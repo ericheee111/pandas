@@ -129,7 +129,14 @@ cdef class Swiss{{name}}Map(HashTable):
             raise NotImplementedError("mask not implement for swisstable")  # pragma: no cover
 
         with nogil:
-            ret = self.table.map_locations(&values[0], <size_t>n)
+            if n > 0 and values.strides[0] == sizeof({{c_type}}):
+                ret = self.table.map_locations(&values[0], <size_t>n)
+            else:
+                for i in range(n):
+                    val = values[i]
+                    ret = self.table.insert(val, <size_t>i)
+                    if ret == -1:
+                        break
         if ret == -1:
             raise MemoryError("Failed to insert into Swiss table")
 
@@ -142,7 +149,15 @@ cdef class Swiss{{name}}Map(HashTable):
             intp_t[::1] locs = np.empty(n, dtype=np.intp)
 
         with nogil:
-            self.table.lookup_batch(&values[0], <size_t>n, &locs[0])
+            if n > 0 and values.strides[0] == sizeof({{c_type}}):
+                self.table.lookup_batch(&values[0], <size_t>n, &locs[0])
+            else:
+                for i in range(n):
+                    val = values[i]
+                    if self.table.get(val, &loc):
+                        locs[i] = <intp_t>loc
+                    else:
+                        locs[i] = -1
 
         return np.asarray(locs)
 
@@ -161,7 +176,7 @@ cdef class Swiss{{name}}Map(HashTable):
             const uint8_t[:] mask_view
             np_uint8_t[::1] result_mask_arr
 
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof({{c_type}}):
             if return_inverse:
                 labels = np.empty(n, dtype=np.intp)
                 with nogil:
@@ -268,7 +283,7 @@ cdef class Swiss{{name}}Map(HashTable):
             {{c_type}} na_val = na_value if uses_na_value else 0
 
         # Fast path: no mask - use C batch function for maximum performance
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof({{c_type}}):
             with nogil:
                 if ignore_na:
                     count = self.table.factorize_ingore_nan_batch(
@@ -407,7 +422,7 @@ def value_count_{{dtype}}(const {{c_type}}[:] values, bint dropna=True, const ui
     table.reserve(<size_t>n)
 
     # Use batch value_count which stores indices for direct access
-    if not use_mask:
+    if not use_mask and n > 0 and values.strides[0] == sizeof({{c_type}}):
         with nogil:
             n_unique = table.value_count_batch(
                 &values[0], <size_t>n,
@@ -492,7 +507,7 @@ def duplicated_{{dtype}}(const {{c_type}}[:] values, object keep="first",
 
     table.reserve(<size_t>n)
 
-    if not uses_mask:
+    if not uses_mask and n > 0 and values.strides[0] == sizeof({{c_type}}):
         result = np.empty(n, dtype=np.uint8)
         with nogil:
             if keep_first or keep_last:
