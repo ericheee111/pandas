@@ -74,6 +74,26 @@ def use_numba_cb(key: str) -> None:
     numba_.set_use_numba(cf.get_option(key))
 
 
+use_swisstable_doc = """
+: bool
+    Use Swiss Tables (SIMD-accelerated hash tables) for supported hash table
+    operations. This is experimental. Default is True.
+    Valid values: False,True
+"""
+
+
+_use_swisstable: bool = True
+
+
+def use_swisstable_cb(key: str) -> None:
+    global _use_swisstable
+    _use_swisstable = cf.get_option(key)
+
+
+def get_use_swisstable() -> bool:
+    return _use_swisstable
+
+
 with cf.config_prefix("compute"):
     cf.register_option(
         "use_bottleneck",
@@ -87,6 +107,13 @@ with cf.config_prefix("compute"):
     )
     cf.register_option(
         "use_numba", False, use_numba_doc, validator=is_bool, cb=use_numba_cb
+    )
+    cf.register_option(
+        "use_swisstable",
+        True,
+        use_swisstable_doc,
+        validator=is_bool,
+        cb=use_swisstable_cb,
     )
 #
 # options from the "display" namespace

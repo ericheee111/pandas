@@ -33,11 +33,7 @@ from pandas._libs.khash cimport (
     uint32_t,
     uint64_t,
 )
-
-# prototypes for sharing
-
-cdef class HashTable:
-    pass
+from pandas._libs.hashing cimport HashTable
 
 cdef class UInt64HashTable(HashTable):
     cdef kh_uint64_t *table
