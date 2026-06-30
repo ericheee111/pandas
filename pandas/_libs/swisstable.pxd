@@ -120,7 +120,7 @@ cdef extern from "swisstable/swisstable_class.hpp" namespace "pandas::swisstable
 from pandas._libs.hashing cimport HashTable
 
 cdef class SwissUInt64Map(HashTable):
-    cdef SwissTable[uint64_t, size_t] table
+    cdef SwissTable[uint64_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, uint64_t val)
@@ -129,7 +129,7 @@ cdef class SwissUInt64Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissInt64Map(HashTable):
-    cdef SwissTable[int64_t, size_t] table
+    cdef SwissTable[int64_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, int64_t val)
@@ -138,7 +138,7 @@ cdef class SwissInt64Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissUInt32Map(HashTable):
-    cdef SwissTable[uint32_t, size_t] table
+    cdef SwissTable[uint32_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, uint32_t val)
@@ -147,7 +147,7 @@ cdef class SwissUInt32Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissInt32Map(HashTable):
-    cdef SwissTable[int32_t, size_t] table
+    cdef SwissTable[int32_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, int32_t val)
@@ -156,7 +156,7 @@ cdef class SwissInt32Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissUInt16Map(HashTable):
-    cdef SwissTable[uint16_t, size_t] table
+    cdef SwissTable[uint16_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, uint16_t val)
@@ -165,7 +165,7 @@ cdef class SwissUInt16Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissInt16Map(HashTable):
-    cdef SwissTable[int16_t, size_t] table
+    cdef SwissTable[int16_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, int16_t val)
@@ -174,7 +174,7 @@ cdef class SwissInt16Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissUInt8Map(HashTable):
-    cdef SwissTable[uint8_t, size_t] table
+    cdef SwissTable[uint8_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, uint8_t val)
@@ -183,7 +183,7 @@ cdef class SwissUInt8Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissInt8Map(HashTable):
-    cdef SwissTable[int8_t, size_t] table
+    cdef SwissTable[int8_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, int8_t val)
@@ -192,7 +192,7 @@ cdef class SwissInt8Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissFloat64Map(HashTable):
-    cdef SwissTable[double, size_t] table
+    cdef SwissTable[double, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, double val)
@@ -201,7 +201,7 @@ cdef class SwissFloat64Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissFloat32Map(HashTable):
-    cdef SwissTable[float, size_t] table
+    cdef SwissTable[float, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, float val)
@@ -210,7 +210,7 @@ cdef class SwissFloat32Map(HashTable):
     cpdef set_na(self, Py_ssize_t val)
 
 cdef class SwissComplex64Map(HashTable):
-    cdef SwissTable[swiss_complex64_t, size_t] table
+    cdef SwissTable[swiss_complex64_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, complex64_t val)
@@ -221,7 +221,7 @@ cdef class SwissComplex64Map(HashTable):
     cdef swiss_complex64_t _to_c_complex(self, object key)
 
 cdef class SwissComplex128Map(HashTable):
-    cdef SwissTable[swiss_complex128_t, size_t] table
+    cdef SwissTable[swiss_complex128_t, size_t]* table
     cdef bint uses_mask
 
     cpdef get_item(self, complex128_t val)
