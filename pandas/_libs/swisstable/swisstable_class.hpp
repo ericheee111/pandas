@@ -457,6 +457,14 @@ public:
     SwissTable(const SwissTable &) = delete;
 
     SwissTable(SwissTable &&other) noexcept
+        : capacity_(0),
+          mask_(0),
+          size_(0),
+          growth_left_(0),
+          ctrl_(nullptr),
+          keys_(nullptr),
+          vals_(nullptr),
+          alloc_(nullptr)
     {
         std::swap(capacity_, other.capacity_);
         std::swap(mask_, other.mask_);
