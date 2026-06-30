@@ -34,6 +34,7 @@ Integration Methods (matching khash HashTable API):
 cimport cython
 from cpython.object cimport PyObject
 from cpython.ref cimport Py_INCREF, Py_DECREF
+from cpython.type cimport PyType_Modified
 from libc.math cimport isnan
 from libc.stddef cimport size_t
 from libc.stdint cimport (
@@ -66,7 +67,23 @@ ctypedef float float32_t
 
 cnp.import_array()
 
+ctypedef unsigned long swisstable_tp_flags_t
+
+cdef extern from "Python.h":
+    ctypedef struct PyTypeObject:
+        swisstable_tp_flags_t tp_flags
+
+    const swisstable_tp_flags_t Py_TPFLAGS_HEAPTYPE
+
 include "swisstable_class_helper.pxi"
+
+
+cdef inline void _fix_swisstable_type(type cls):
+    cdef PyTypeObject* tp = <PyTypeObject*>cls
+
+    if not (tp.tp_flags & Py_TPFLAGS_HEAPTYPE):
+        tp.tp_flags |= Py_TPFLAGS_HEAPTYPE
+        PyType_Modified(cls)
 
 
 # =============================================================================
@@ -81,9 +98,17 @@ cdef class SwissFloat64Map(HashTable):
     """
 
     def __cinit__(self, size_t size_hint=0):
+        self.table = new SwissTable[double, size_t]()
+        if self.table == NULL:
+            raise MemoryError("Failed to allocate Swiss table")
         self.uses_mask = False
         if size_hint > 0:
             self.table.reserve(size_hint)
+
+    def __dealloc__(self):
+        if self.table != NULL:
+            del self.table
+            self.table = NULL
 
     def insert(self, double key, size_t value):
         cdef int ret = self.table.insert(key, value)
@@ -607,9 +632,17 @@ cdef class SwissFloat32Map(HashTable):
     """
 
     def __cinit__(self, size_t size_hint=0):
+        self.table = new SwissTable[float, size_t]()
+        if self.table == NULL:
+            raise MemoryError("Failed to allocate Swiss table")
         self.uses_mask = False
         if size_hint > 0:
             self.table.reserve(size_hint)
+
+    def __dealloc__(self):
+        if self.table != NULL:
+            del self.table
+            self.table = NULL
 
     def insert(self, float key, size_t value):
         cdef int ret = self.table.insert(key, value)
@@ -1130,9 +1163,17 @@ cdef class SwissComplex64Map(HashTable):
     """
 
     def __cinit__(self, size_t size_hint=0):
+        self.table = new SwissTable[swiss_complex64_t, size_t]()
+        if self.table == NULL:
+            raise MemoryError("Failed to allocate Swiss table")
         self.uses_mask = False
         if size_hint > 0:
             self.table.reserve(size_hint)
+
+    def __dealloc__(self):
+        if self.table != NULL:
+            del self.table
+            self.table = NULL
 
     cdef swiss_complex64_t _to_c_complex(self, object key):
         cdef swiss_complex64_t c_key
@@ -1674,9 +1715,17 @@ cdef class SwissComplex128Map(HashTable):
     """
 
     def __cinit__(self, size_t size_hint=0):
+        self.table = new SwissTable[swiss_complex128_t, size_t]()
+        if self.table == NULL:
+            raise MemoryError("Failed to allocate Swiss table")
         self.uses_mask = False
         if size_hint > 0:
             self.table.reserve(size_hint)
+
+    def __dealloc__(self):
+        if self.table != NULL:
+            del self.table
+            self.table = NULL
 
     cdef swiss_complex128_t _to_c_complex(self, object key):
         cdef swiss_complex128_t c_key
@@ -2091,7 +2140,7 @@ def value_count_complex128(const double complex[:] values, bint dropna=True, con
 
 
 def duplicated_complex128(const double complex[:] values, object keep="first",
-                          const uint8_t[:] mask=None):
+                         const uint8_t[:] mask=None):
     """
     Return boolean array indicating duplicated values (NaN-aware).
 
@@ -2211,3 +2260,20 @@ def duplicated_complex128(const double complex[:] values, object keep="first",
             raise MemoryError("Failed to insert into Swiss table")
 
     return np.asarray(result).view(np.bool_)
+
+
+for _swisstable_cls in (
+    SwissUInt64Map,
+    SwissInt64Map,
+    SwissUInt32Map,
+    SwissInt32Map,
+    SwissUInt16Map,
+    SwissInt16Map,
+    SwissUInt8Map,
+    SwissInt8Map,
+    SwissFloat64Map,
+    SwissFloat32Map,
+    SwissComplex64Map,
+    SwissComplex128Map,
+):
+    _fix_swisstable_type(_swisstable_cls)

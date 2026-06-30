@@ -27,9 +27,17 @@ cdef class Swiss{{name}}Map(HashTable):
     """Swiss Table hash map: {{dtype}} -> size_t"""
 
     def __cinit__(self, size_t size_hint=0):
+        self.table = new SwissTable[{{c_type}}, size_t]()
+        if self.table == NULL:
+            raise MemoryError("Failed to allocate Swiss table")
         self.uses_mask = False
         if size_hint > 0:
             self.table.reserve(size_hint)
+
+    def __dealloc__(self):
+        if self.table != NULL:
+            del self.table
+            self.table = NULL
 
     def insert(self, {{c_type}} key, size_t value):
         cdef int ret = self.table.insert(key, value)
