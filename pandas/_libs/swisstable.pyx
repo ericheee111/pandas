@@ -200,7 +200,16 @@ cdef class SwissFloat64Map(HashTable):
             raise NotImplementedError("mask not implement for swisstable")  # pragma: no cover
 
         with nogil:
-            ret = self.table.map_locations(&values[0], <size_t>n)
+            if n > 0 and values.strides[0] == sizeof(double):
+                ret = self.table.map_locations(&values[0], <size_t>n)
+            else:
+                for i in range(n):
+                    val = values[i]
+                    ret = self.table.insert(val, <size_t>i)
+                    if ret == -1:
+                        break
+        if ret == -1:
+            raise MemoryError("Failed to insert into Swiss table")
 
     def lookup(self, const double[:] values) -> ndarray:
         """Look up array values in table, returning positions (-1 if not found)."""
@@ -211,7 +220,15 @@ cdef class SwissFloat64Map(HashTable):
             intp_t[::1] locs = np.empty(n, dtype=np.intp)
 
         with nogil:
-            self.table.lookup_batch(&values[0], <size_t>n, &locs[0])
+            if n > 0 and values.strides[0] == sizeof(double):
+                self.table.lookup_batch(&values[0], <size_t>n, &locs[0])
+            else:
+                for i in range(n):
+                    val = values[i]
+                    if self.table.get(val, &loc):
+                        locs[i] = <intp_t>loc
+                    else:
+                        locs[i] = -1
 
         return np.asarray(locs)
 
@@ -230,7 +247,7 @@ cdef class SwissFloat64Map(HashTable):
             const uint8_t[:] mask_view
             np_uint8_t[::1] result_mask_arr
 
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof(double):
             if return_inverse:
                 labels = np.empty(n, dtype=np.intp)
                 with nogil:
@@ -336,7 +353,7 @@ cdef class SwissFloat64Map(HashTable):
             double na_val = na_value if na_value is not None else NaNTraits[double].NaN()
 
         # Fast path: no mask - use C batch function for maximum performance
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof(double):
             with nogil:
                 if ignore_na:
                     count = self.table.factorize_ingore_nan_batch(
@@ -443,7 +460,7 @@ def value_count_float64(const double[:] values, bint dropna=True, const uint8_t[
     table.reserve(<size_t>n)
 
     # Use batch value_count which stores indices for direct access
-    if not use_mask:
+    if not use_mask and n > 0 and values.strides[0] == sizeof(double):
         with nogil:
             n_unique = table.value_count_batch(
                 &values[0], <size_t>n,
@@ -533,7 +550,7 @@ def duplicated_float64(const double[:] values, object keep="first",
 
     table.reserve(<size_t>n)
 
-    if not uses_mask:
+    if not uses_mask and n > 0 and values.strides[0] == sizeof(double):
         result = np.empty(n, dtype=np.uint8)
         with nogil:
             if keep_first or keep_last:
@@ -730,7 +747,14 @@ cdef class SwissFloat32Map(HashTable):
             raise NotImplementedError("mask not implement for swisstable")  # pragma: no cover
 
         with nogil:
-            ret = self.table.map_locations(&values[0], <size_t>n)
+            if n > 0 and values.strides[0] == sizeof(float):
+                ret = self.table.map_locations(&values[0], <size_t>n)
+            else:
+                for i in range(n):
+                    val = values[i]
+                    ret = self.table.insert(val, <size_t>i)
+                    if ret == -1:
+                        break
         if ret == -1:
             raise MemoryError("Failed to insert into Swiss table")
 
@@ -743,7 +767,15 @@ cdef class SwissFloat32Map(HashTable):
             intp_t[::1] locs = np.empty(n, dtype=np.intp)
 
         with nogil:
-            self.table.lookup_batch(&values[0], <size_t>n, &locs[0])
+            if n > 0 and values.strides[0] == sizeof(float):
+                self.table.lookup_batch(&values[0], <size_t>n, &locs[0])
+            else:
+                for i in range(n):
+                    val = values[i]
+                    if self.table.get(val, &loc):
+                        locs[i] = <intp_t>loc
+                    else:
+                        locs[i] = -1
 
         return np.asarray(locs)
 
@@ -762,7 +794,7 @@ cdef class SwissFloat32Map(HashTable):
             const uint8_t[:] mask_view
             np_uint8_t[::1] result_mask_arr
 
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof(float):
             if return_inverse:
                 labels = np.empty(n, dtype=np.intp)
                 with nogil:
@@ -868,7 +900,7 @@ cdef class SwissFloat32Map(HashTable):
             float na_val = na_value if na_value is not None else NaNTraits[float].NaN()
 
         # Fast path: no mask - use C batch function for maximum performance
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof(float):
             with nogil:
                 if ignore_na:
                     count = self.table.factorize_ingore_nan_batch(
@@ -975,7 +1007,7 @@ def value_count_float32(const float[:] values, bint dropna=True, const uint8_t[:
     table.reserve(<size_t>n)
 
     # Use batch value_count which stores indices for direct access
-    if not use_mask:
+    if not use_mask and n > 0 and values.strides[0] == sizeof(float):
         with nogil:
             n_unique = table.value_count_batch(
                 &values[0], <size_t>n,
@@ -1065,7 +1097,7 @@ def duplicated_float32(const float[:] values, object keep="first",
 
     table.reserve(<size_t>n)
 
-    if not uses_mask:
+    if not uses_mask and n > 0 and values.strides[0] == sizeof(float):
         result = np.empty(n, dtype=np.uint8)
         with nogil:
             if keep_first or keep_last:
@@ -1282,7 +1314,17 @@ cdef class SwissComplex64Map(HashTable):
             raise NotImplementedError("mask not implement for swisstable")  # pragma: no cover
 
         with nogil:
-            ret = self.table.map_locations(<swiss_complex64_t*>&values[0], <size_t>n)
+            if n > 0 and values.strides[0] == sizeof(swiss_complex64_t):
+                ret = self.table.map_locations(<swiss_complex64_t*>&values[0], <size_t>n)
+            else:
+                for i in range(n):
+                    c_key.real = values[i].real
+                    c_key.imag = values[i].imag
+                    ret = self.table.insert(c_key, <size_t>i)
+                    if ret == -1:
+                        break
+        if ret == -1:
+            raise MemoryError("Failed to insert into Swiss table")
 
     def lookup(self, const float complex[:] values) -> ndarray:
         """Look up array values in table, returning positions (-1 if not found)."""
@@ -1293,7 +1335,16 @@ cdef class SwissComplex64Map(HashTable):
             intp_t[::1] locs = np.empty(n, dtype=np.intp)
 
         with nogil:
-            self.table.lookup_batch(<swiss_complex64_t*>&values[0], <size_t>n, &locs[0])
+            if n > 0 and values.strides[0] == sizeof(swiss_complex64_t):
+                self.table.lookup_batch(<swiss_complex64_t*>&values[0], <size_t>n, &locs[0])
+            else:
+                for i in range(n):
+                    c_key.real = values[i].real
+                    c_key.imag = values[i].imag
+                    if self.table.get(c_key, &loc):
+                        locs[i] = <intp_t>loc
+                    else:
+                        locs[i] = -1
 
         return np.asarray(locs)
 
@@ -1312,7 +1363,7 @@ cdef class SwissComplex64Map(HashTable):
             const uint8_t[:] mask_view
             np_uint8_t[::1] result_mask_arr
 
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof(swiss_complex64_t):
             if return_inverse:
                 labels = np.empty(n, dtype=np.intp)
                 with nogil:
@@ -1422,7 +1473,7 @@ cdef class SwissComplex64Map(HashTable):
             swiss_complex64_t na_val = na_value if na_value is not None else NaNTraits[swiss_complex64_t].NaN()
 
         # Fast path: no mask - use C batch function for maximum performance
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof(swiss_complex64_t):
             with nogil:
                 if ignore_na:
                     count = self.table.factorize_ingore_nan_batch(
@@ -1531,7 +1582,7 @@ def value_count_complex64(const float complex[:] values, bint dropna=True, const
     table.reserve(<size_t>n)
 
     # Use batch value_count which stores indices for direct access
-    if not use_mask:
+    if not use_mask and n > 0 and values.strides[0] == sizeof(swiss_complex64_t):
         with nogil:
             n_unique = table.value_count_batch(
                 <swiss_complex64_t*>&values[0], <size_t>n,
@@ -1621,7 +1672,7 @@ def duplicated_complex64(const float complex[:] values, object keep="first",
 
     table.reserve(<size_t>n)
 
-    if not uses_mask:
+    if not uses_mask and n > 0 and values.strides[0] == sizeof(swiss_complex64_t):
         result = np.empty(n, dtype=np.uint8)
         with nogil:
             if keep_first or keep_last:
@@ -1838,7 +1889,15 @@ cdef class SwissComplex128Map(HashTable):
             raise NotImplementedError("mask not implement for swisstable")  # pragma: no cover
 
         with nogil:
-            ret = self.table.map_locations(<swiss_complex128_t*>&values[0], <size_t>n)
+            if n > 0 and values.strides[0] == sizeof(swiss_complex128_t):
+                ret = self.table.map_locations(<swiss_complex128_t*>&values[0], <size_t>n)
+            else:
+                for i in range(n):
+                    c_key.real = values[i].real
+                    c_key.imag = values[i].imag
+                    ret = self.table.insert(c_key, <size_t>i)
+                    if ret == -1:
+                        break
         if ret == -1:
             raise MemoryError("Failed to insert into Swiss table")
 
@@ -1851,7 +1910,16 @@ cdef class SwissComplex128Map(HashTable):
             intp_t[::1] locs = np.empty(n, dtype=np.intp)
 
         with nogil:
-            self.table.lookup_batch(<swiss_complex128_t*>&values[0], <size_t>n, &locs[0])
+            if n > 0 and values.strides[0] == sizeof(swiss_complex128_t):
+                self.table.lookup_batch(<swiss_complex128_t*>&values[0], <size_t>n, &locs[0])
+            else:
+                for i in range(n):
+                    c_key.real = values[i].real
+                    c_key.imag = values[i].imag
+                    if self.table.get(c_key, &loc):
+                        locs[i] = <intp_t>loc
+                    else:
+                        locs[i] = -1
 
         return np.asarray(locs)
 
@@ -1870,7 +1938,7 @@ cdef class SwissComplex128Map(HashTable):
             const uint8_t[:] mask_view
             np_uint8_t[::1] result_mask_arr
 
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof(swiss_complex128_t):
             if return_inverse:
                 labels = np.empty(n, dtype=np.intp)
                 with nogil:
@@ -1980,7 +2048,7 @@ cdef class SwissComplex128Map(HashTable):
             swiss_complex128_t na_val = na_value if na_value is not None else NaNTraits[swiss_complex128_t].NaN()
 
         # Fast path: no mask - use C batch function for maximum performance
-        if not uses_mask:
+        if not uses_mask and n > 0 and values.strides[0] == sizeof(swiss_complex128_t):
             with nogil:
                 if ignore_na:
                     count = self.table.factorize_ingore_nan_batch(
@@ -2089,7 +2157,7 @@ def value_count_complex128(const double complex[:] values, bint dropna=True, con
     table.reserve(<size_t>n)
 
     # Use batch value_count which stores indices for direct access
-    if not use_mask:
+    if not use_mask and n > 0 and values.strides[0] == sizeof(swiss_complex128_t):
         with nogil:
             n_unique = table.value_count_batch(
                 <swiss_complex128_t*>&values[0], <size_t>n,
@@ -2179,7 +2247,7 @@ def duplicated_complex128(const double complex[:] values, object keep="first",
 
     table.reserve(<size_t>n)
 
-    if not uses_mask:
+    if not uses_mask and n > 0 and values.strides[0] == sizeof(swiss_complex128_t):
         result = np.empty(n, dtype=np.uint8)
         with nogil:
             if keep_first or keep_last:
