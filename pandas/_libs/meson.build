@@ -28,6 +28,12 @@ _hashtable_func_helper = custom_target(
     input: 'hashtable_func_helper.pxi.in',
     command: [py, tempita, '@INPUT@', '-o', '@OUTDIR@'],
 )
+_swisstable_class_helper = custom_target(
+    'swisstable_class_helper_pxi',
+    output: 'swisstable_class_helper.pxi',
+    input: 'swisstable_class_helper.pxi.in',
+    command: [py, tempita, '@INPUT@', '-o', '@OUTDIR@'],
+)
 _index_class_helper = custom_target(
     'index_class_helper_pxi',
     output: 'index_class_helper.pxi',
@@ -168,6 +174,25 @@ foreach ext_name, ext_dict : libs_sources
         install: true,
     )
 endforeach
+
+swisstable_cpp_args = []
+if host_machine.cpu_family() == 'aarch64'
+    swisstable_cpp_args += ['-march=armv8-a+crc']
+endif
+
+py.extension_module(
+    'swisstable',
+    [
+        'swisstable.pyx',
+        _swisstable_class_helper,
+    ],
+    cython_args: cython_args,
+    include_directories: [inc_np, inc_pd],
+    subdir: 'pandas/_libs',
+    cpp_args: swisstable_cpp_args,
+    override_options: ['cython_language=cpp', 'cpp_std=c++17'],
+    install: true,
+)
 
 # Basically just __init__.py and the .pyi files
 sources_to_install = [

@@ -21,6 +21,10 @@ import_array()
 from pandas._libs.util cimport is_nan
 
 
+cdef class HashTable:
+    pass
+
+
 @cython.boundscheck(False)
 def hash_object_array(
     ndarray[object, ndim=1] arr, str key, str encoding="utf8"
