@@ -11,6 +11,7 @@ import math
 import numpy as np
 import pytest
 
+import pandas as pd
 from pandas._libs import swisstable
 
 import pandas._testing as tm
@@ -755,6 +756,16 @@ class TestFactorize:
 
         tm.assert_numpy_array_equal(uniques, np.array([42], dtype=np.intp))
         tm.assert_numpy_array_equal(labels, np.array([0, 0, 0], dtype=np.intp))
+
+    def test_int64_zero_is_not_missing(self):
+        """Test factorize does not treat integer 0 as missing."""
+        values = np.array([0, 1, 0], dtype=np.int64)
+
+        with pd.option_context("compute.use_swisstable", True):
+            codes, uniques = pd.factorize(values)
+
+        tm.assert_numpy_array_equal(codes, np.array([0, 1, 0], dtype=np.intp))
+        tm.assert_numpy_array_equal(uniques, np.array([0, 1], dtype=np.int64))
 
     def test_float64_with_nan_ignore(self):
         """Test factorize with NaN values (ignore_na=True)"""
