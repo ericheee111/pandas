@@ -282,10 +282,12 @@ cdef class Swiss{{name}}Map(HashTable):
             const uint8_t[:] mask_view
             {{c_type}} na_val = na_value if uses_na_value else 0
 
-        # Fast path: no mask - use C batch function for maximum performance
+        # Fast path: no mask - use C batch function for maximum performance.
+        # Only use the ignore-na batch path when an explicit na_value is provided;
+        # otherwise integer 0 would be misinterpreted as the internal sentinel.
         if not uses_mask and n > 0 and values.strides[0] == sizeof({{c_type}}):
             with nogil:
-                if ignore_na:
+                if ignore_na and uses_na_value:
                     count = self.table.factorize_ingore_nan_batch(
                         &values[0], <size_t>n,
                         &uniques_arr[0], &labels[0],
