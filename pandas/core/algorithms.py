@@ -594,25 +594,20 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
         len(comps_array) > _MINIMUM_COMP_ARR_LEN
         and len(values) <= 26
         and comps_array.dtype != object
-        and not any(v is NA for v in values)
+        and (values.dtype != object or not any(v is NA for v in values))
     ):
         # If the values include nan we need to check for nan explicitly
         # since np.nan it not equal to np.nan
         if isna(values).any():
+            return np.logical_or(
+                np.isin(comps_array, values).ravel(), np.isnan(comps_array)
+            )
+        return np.isin(comps_array, values).ravel()
 
-            def f(c, v):
-                return np.logical_or(np.isin(c, v).ravel(), np.isnan(c))
-
-        else:
-            f = lambda a, b: np.isin(a, b).ravel()
-
-    else:
-        common = np_find_common_type(values.dtype, comps_array.dtype)
-        values = values.astype(common, copy=False)
-        comps_array = comps_array.astype(common, copy=False)
-        f = _get_ismember_func(common)
-
-    return f(comps_array, values)
+    common = np_find_common_type(values.dtype, comps_array.dtype)
+    values = values.astype(common, copy=False)
+    comps_array = comps_array.astype(common, copy=False)
+    return _get_ismember_func(common)(comps_array, values)
 
 
 def _get_ismember_func(dtype: np.dtype):
