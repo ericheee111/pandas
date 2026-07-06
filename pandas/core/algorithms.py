@@ -604,10 +604,15 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
             )
         return np.isin(comps_array, values).ravel()
 
-    common = np_find_common_type(values.dtype, comps_array.dtype)
-    values = values.astype(common, copy=False)
-    comps_array = comps_array.astype(common, copy=False)
-    return _get_ismember_func(common)(comps_array, values)
+    if (
+        values.dtype != comps_array.dtype
+        or not values.dtype.isnative
+        or values.dtype.name not in _hashtables
+    ):
+        common = np_find_common_type(values.dtype, comps_array.dtype)
+        values = values.astype(common, copy=False)
+        comps_array = comps_array.astype(common, copy=False)
+    return _get_ismember_func(comps_array.dtype)(comps_array, values)
 
 
 def _get_ismember_func(dtype: np.dtype):
