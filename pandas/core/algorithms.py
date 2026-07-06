@@ -891,13 +891,20 @@ def factorize(
         )
 
     if sort and len(uniques) > 0:
-        uniques, codes = safe_sort(
-            uniques,
-            codes,
-            use_na_sentinel=use_na_sentinel,
-            assume_unique=True,
-            verify=False,
+        already_sorted = (
+            isinstance(uniques, np.ndarray)
+            and uniques.dtype == np.float64
+            and uniques[0] <= uniques[-1]
+            and algos.is_monotonic(uniques, timelike=False)[0]
         )
+        if not already_sorted:
+            uniques, codes = safe_sort(
+                uniques,
+                codes,
+                use_na_sentinel=use_na_sentinel,
+                assume_unique=True,
+                verify=False,
+            )
 
     uniques = _reconstruct_data(uniques, original.dtype, original)
 
