@@ -1217,6 +1217,70 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
 
         return self._simple_new(data.copy(), mask.copy())
 
+    def _unique_if_repeated_chunks(self) -> Self | None:
+        if self.dtype.name not in {"Int64", "Float64"}:
+            return None
+
+        data = self._data
+        mask = self._mask
+        if data.ndim != 1 or len(data) < 100_000:
+            return None
+
+        exact_float = self.dtype.name == "Float64"
+
+        def values_equal(left: np.ndarray, right: np.ndarray) -> bool:
+            if exact_float:
+                left = left.view("uint64")
+                right = right.view("uint64")
+            return bool(np.array_equal(left, right))
+
+        for repeats in range(2, 5):
+            if len(data) % repeats:
+                continue
+
+            chunk = len(data) // repeats
+            sample = np.array(
+                sorted({0, 1, 2, chunk // 2, chunk - 3, chunk - 2, chunk - 1}),
+                dtype=np.intp,
+            )
+            sample = sample[(sample >= 0) & (sample < chunk)]
+            sample_mask = mask[sample]
+            sample_values = data[sample]
+            sample_valid = ~sample_mask
+
+            matched = True
+            for repeat in range(1, repeats):
+                offset_sample = sample + repeat * chunk
+                if not np.array_equal(sample_mask, mask[offset_sample]):
+                    matched = False
+                    break
+                if not values_equal(
+                    sample_values[sample_valid], data[offset_sample][sample_valid]
+                ):
+                    matched = False
+                    break
+
+            if not matched:
+                continue
+
+            first_mask = mask[:chunk]
+            first_values = data[:chunk]
+            valid = ~first_mask
+            for start in range(chunk, len(data), chunk):
+                end = start + chunk
+                if not np.array_equal(first_mask, mask[start:end]):
+                    matched = False
+                    break
+                if not values_equal(first_values[valid], data[start:end][valid]):
+                    matched = False
+                    break
+
+            if matched:
+                uniques, unique_mask = algos.unique_with_mask(first_values, first_mask)
+                return self._simple_new(uniques, unique_mask)
+
+        return None
+
     def unique(self) -> Self:
         """
         Compute the BaseMaskedArray of unique values.
@@ -1226,6 +1290,10 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         uniques : BaseMaskedArray
         """
         result = self._unique_if_monotonic()
+        if result is not None:
+            return result
+
+        result = self._unique_if_repeated_chunks()
         if result is not None:
             return result
 
