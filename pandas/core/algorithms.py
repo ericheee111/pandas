@@ -488,6 +488,37 @@ unique1d = unique
 
 
 _MINIMUM_COMP_ARR_LEN = 1_000_000
+_MAX_INTEGER_ZERO_RANGE_VALUES = _MINIMUM_COMP_ARR_LEN // 10
+_INTEGER_ZERO_RANGE_ISIN_DTYPES = {"int64", "uint64"}
+
+
+def _isin_integer_zero_range(
+    comps_array: np.ndarray, values: np.ndarray
+) -> npt.NDArray[np.bool_] | None:
+    if (
+        len(comps_array) < _MINIMUM_COMP_ARR_LEN
+        or len(values) <= 26
+        or len(values) > _MAX_INTEGER_ZERO_RANGE_VALUES
+        or values.dtype != comps_array.dtype
+        or not values.dtype.isnative
+        or values.dtype.name not in _INTEGER_ZERO_RANGE_ISIN_DTYPES
+        or comps_array.ndim != 1
+        or values.ndim != 1
+    ):
+        return None
+
+    n_values = len(values)
+    if n_values == 0 or values[0] != 0 or values[-1] != n_values - 1:
+        return None
+
+    if n_values > 1 and not bool(
+        np.all(values == np.arange(n_values, dtype=values.dtype))
+    ):
+        return None
+
+    if values.dtype.name == "uint64":
+        return comps_array < n_values
+    return (comps_array >= 0) & (comps_array < n_values)
 
 
 def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
@@ -575,6 +606,10 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
                 np.isin(comps_array, values).ravel(), np.isnan(comps_array)
             )
         return np.isin(comps_array, values).ravel()
+
+    result = _isin_integer_zero_range(comps_array, values)
+    if result is not None:
+        return result
 
     if (
         values.dtype != comps_array.dtype
