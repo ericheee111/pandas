@@ -1206,12 +1206,10 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         if data.ndim != 1:
             return None
 
-        values = data
-        if mask.any():
-            if not mask[-1] or mask[:-1].any():
-                return None
-            values = data[:-1]
+        if len(mask) == 0 or not mask[-1] or mask[:-1].any():
+            return None
 
+        values = data[:-1]
         if len(values) > 1 and not libalgos.is_monotonic(
             values, timelike=False
         )[2]:
