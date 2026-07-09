@@ -723,6 +723,29 @@ class TestFrameFlexArithmetic:
 
         tm.assert_frame_equal(result, expected)
 
+    @pytest.mark.parametrize("op", ["add", "sub", "mul", "div"])
+    def test_arith_frame_multiindex_level_broadcast(self, op):
+        labels = ["0", "1", "2", "10"]
+        index = MultiIndex.from_product(
+            [labels, [0, 1]], names=["key", "num"]
+        )
+        df = DataFrame(
+            np.arange(16, dtype="float64").reshape(8, 2),
+            index=index,
+            columns=["x", "y"],
+        )
+        other = DataFrame(
+            {"x": [1.0, 2.0, 3.0, 4.0], "y": [5.0, 6.0, 7.0, 8.0]},
+            index=Index(labels, name="key"),
+        )
+
+        result = getattr(df, op)(other, level="key")
+        right = other.reindex(index.get_level_values("key"))
+        right.index = index
+        expected = getattr(df, op)(right)
+
+        tm.assert_frame_equal(result, expected)
+
     def test_frame_multiindex_operations(self):
         # GH 43321
         df = DataFrame(
