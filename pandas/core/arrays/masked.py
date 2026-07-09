@@ -1197,6 +1197,28 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         mask = self._mask
         return algos.duplicated(values, keep=keep, mask=mask)
 
+    def _unique_if_monotonic(self) -> Self | None:
+        if self.dtype.name not in {"Int64", "Float64"}:
+            return None
+
+        data = self._data
+        mask = self._mask
+        if data.ndim != 1:
+            return None
+
+        values = data
+        if mask.any():
+            if not mask[-1] or mask[:-1].any():
+                return None
+            values = data[:-1]
+
+        if len(values) > 1 and not libalgos.is_monotonic(
+            values, timelike=False
+        )[2]:
+            return None
+
+        return self._simple_new(data.copy(), mask.copy())
+
     def unique(self) -> Self:
         """
         Compute the BaseMaskedArray of unique values.
@@ -1205,6 +1227,10 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         -------
         uniques : BaseMaskedArray
         """
+        result = self._unique_if_monotonic()
+        if result is not None:
+            return result
+
         uniques, mask = algos.unique_with_mask(self._data, self._mask)
         return self._simple_new(uniques, mask)
 
