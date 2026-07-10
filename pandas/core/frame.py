@@ -92,7 +92,6 @@ from pandas.core.dtypes.cast import (
     maybe_unbox_numpy_scalar,
 )
 from pandas.core.dtypes.common import (
-    ensure_platform_int,
     infer_dtype_from_object,
     is_1d_only_ea_dtype,
     is_array_like,
@@ -9552,7 +9551,7 @@ class DataFrame(NDFrame, OpsMixin):
         if (taker == -1).any():
             return None
 
-        taker = ensure_platform_int(level_to_other.take(taker))
+        taker = level_to_other.take(taker)
         right = other._reindex_with_indexers(
             {0: [self.index, taker], 1: [None, None]}, allow_dups=True
         )
