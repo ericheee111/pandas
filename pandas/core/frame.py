@@ -9541,19 +9541,22 @@ class DataFrame(NDFrame, OpsMixin):
 
         try:
             level_number = self.index._get_level_number(level)
-            level_index = self.index.levels[level_number]
-            if len(level_index) != len(other.index):
-                return None
-
-            level_to_other = other.index.get_indexer(level_index)
-            if (level_to_other == -1).any():
-                return None
-
-            taker = self.index.codes[level_number]
         except (IndexError, KeyError, TypeError, ValueError):
             return None
 
+        level_index = self.index.levels[level_number]
+        if len(level_index) != len(other.index):
+            return None
+
+        level_to_other = other.index.get_indexer(level_index)
+        if (level_to_other == -1).any():
+            return None
+
+        taker = self.index.codes[level_number]
         if (taker == -1).any():
+            return None
+
+        if not np.bincount(taker, minlength=len(level_index)).all():
             return None
 
         taker = level_to_other.take(taker)

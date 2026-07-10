@@ -724,7 +724,23 @@ class TestFrameFlexArithmetic:
         tm.assert_frame_equal(result, expected)
 
     @pytest.mark.parametrize(
-        "op", ["add", "sub", "mul", "div", "radd", "rsub", "rmul", "rdiv"]
+        "op",
+        [
+            "add",
+            "sub",
+            "mul",
+            "div",
+            "floordiv",
+            "mod",
+            "pow",
+            "radd",
+            "rsub",
+            "rmul",
+            "rdiv",
+            "rfloordiv",
+            "rmod",
+            "rpow",
+        ],
     )
     def test_arith_frame_multiindex_level_broadcast(self, op):
         labels = ["0", "1", "2", "10"]
@@ -732,7 +748,7 @@ class TestFrameFlexArithmetic:
             [labels, [0, 1]], names=["key", "num"]
         )
         df = DataFrame(
-            np.arange(16, dtype="float64").reshape(8, 2),
+            np.arange(1, 17, dtype="float64").reshape(8, 2),
             index=index,
             columns=["x", "y"],
         )
@@ -745,6 +761,23 @@ class TestFrameFlexArithmetic:
         right = other.reindex(index.get_level_values("key"))
         right.index = index
         expected = getattr(df, op)(right)
+
+        tm.assert_frame_equal(result, expected)
+
+    def test_arith_frame_multiindex_level_broadcast_unused_level(self):
+        index = MultiIndex(
+            levels=[["a", "b", "c"], [0, 1]],
+            codes=[[0, 0, 1, 1], [0, 1, 0, 1]],
+            names=["key", "num"],
+        )
+        df = DataFrame(np.arange(8).reshape(4, 2), index=index, columns=["x", "y"])
+        other = DataFrame(
+            {"x": [1, 2, 3], "y": [4, 5, 6]}, index=Index(["a", "b", "c"])
+        )
+
+        result = df.add(other, level="key")
+        left, right = df.align(other, join="outer", level="key")
+        expected = left + right
 
         tm.assert_frame_equal(result, expected)
 
