@@ -774,6 +774,29 @@ def test_ismember_tuple_with_nans():
     tm.assert_numpy_array_equal(result, expected)
 
 
+def test_ismember_float64_zero_range():
+    arr = np.array(
+        [
+            -np.inf,
+            -1.0,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            4.0,
+            np.nextafter(5.0, 0.0),
+            5.0,
+            np.nan,
+            np.inf,
+        ]
+    )
+    result = ht.ismember_float64_zero_range(arr, 5)
+    expected = np.array(
+        [False, False, True, True, False, True, True, False, False, False, False]
+    )
+    tm.assert_numpy_array_equal(result, expected)
+
+
 def test_float_complex_int_are_equal_as_objects():
     values = ["a", 5, 5.0, 5.0 + 0j]
     comps = list(range(129))

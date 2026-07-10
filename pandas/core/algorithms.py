@@ -488,19 +488,19 @@ unique1d = unique
 
 
 _MINIMUM_COMP_ARR_LEN = 1_000_000
-_MAX_INTEGER_ZERO_RANGE_VALUES = _MINIMUM_COMP_ARR_LEN // 10
-_INTEGER_ZERO_RANGE_ISIN_DTYPES = {"int64", "uint64"}
+_MAX_ZERO_RANGE_VALUES = _MINIMUM_COMP_ARR_LEN // 10
+_ZERO_RANGE_ISIN_DTYPES = {"float64", "int64", "uint64"}
 
 
-def _isin_integer_zero_range(
+def _isin_zero_range(
     comps_array: np.ndarray, values: np.ndarray
 ) -> npt.NDArray[np.bool_] | None:
     if (
         len(comps_array) < _MINIMUM_COMP_ARR_LEN
-        or len(values) > _MAX_INTEGER_ZERO_RANGE_VALUES
+        or len(values) > _MAX_ZERO_RANGE_VALUES
         or values.dtype != comps_array.dtype
         or not values.dtype.isnative
-        or values.dtype.name not in _INTEGER_ZERO_RANGE_ISIN_DTYPES
+        or values.dtype.name not in _ZERO_RANGE_ISIN_DTYPES
         or comps_array.ndim != 1
         or values.ndim != 1
     ):
@@ -515,6 +515,10 @@ def _isin_integer_zero_range(
     ):
         return None
 
+    if values.dtype.name == "float64":
+        if not comps_array.flags.c_contiguous:
+            return None
+        return htable.ismember_float64_zero_range(comps_array, n_values)
     if values.dtype.name == "uint64":
         return comps_array < n_values
     # Negative int64 values become large uint64 values, folding both bounds
@@ -594,7 +598,7 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
     # GH60678
     # Ensure values don't contain <NA>, otherwise it throws exception with np.in1d
 
-    result = _isin_integer_zero_range(comps_array, values)
+    result = _isin_zero_range(comps_array, values)
     if result is not None:
         return result
 
