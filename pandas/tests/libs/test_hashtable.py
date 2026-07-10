@@ -809,6 +809,21 @@ def test_unique_float64_monotonic():
     assert ht.unique_float64_monotonic(np.array([0.0, np.nan])) is None
 
 
+def test_factorize_float64_monotonic():
+    values = np.array([-np.inf, -np.inf, -0.0, 0.0, 1.0, 1.0, np.inf])
+    result = ht.factorize_float64_monotonic(values)
+    assert result is not None
+    labels, uniques = result
+    expected_labels = np.array([0, 0, 1, 1, 2, 2, 3], dtype=np.intp)
+    expected_uniques = np.array([-np.inf, -0.0, 1.0, np.inf])
+    tm.assert_numpy_array_equal(labels, expected_labels)
+    tm.assert_numpy_array_equal(uniques, expected_uniques)
+    assert np.signbit(uniques[1])
+
+    assert ht.factorize_float64_monotonic(np.array([0.0, 2.0, 1.0])) is None
+    assert ht.factorize_float64_monotonic(np.array([0.0, np.nan])) is None
+
+
 def test_float_complex_int_are_equal_as_objects():
     values = ["a", 5, 5.0, 5.0 + 0j]
     comps = list(range(129))
