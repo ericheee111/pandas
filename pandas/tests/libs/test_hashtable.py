@@ -797,6 +797,18 @@ def test_ismember_float64_zero_range():
     tm.assert_numpy_array_equal(result, expected)
 
 
+def test_unique_float64_monotonic():
+    values = np.array([-np.inf, -np.inf, -0.0, 0.0, 1.0, 1.0, np.inf])
+    result = ht.unique_float64_monotonic(values)
+    expected = np.array([-np.inf, -0.0, 1.0, np.inf])
+    assert result is not None
+    tm.assert_numpy_array_equal(result, expected)
+    assert np.signbit(result[1])
+
+    assert ht.unique_float64_monotonic(np.array([0.0, 2.0, 1.0])) is None
+    assert ht.unique_float64_monotonic(np.array([0.0, np.nan])) is None
+
+
 def test_float_complex_int_are_equal_as_objects():
     values = ["a", 5, 5.0, 5.0 + 0j]
     comps = list(range(129))
