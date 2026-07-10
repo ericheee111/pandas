@@ -723,7 +723,9 @@ class TestFrameFlexArithmetic:
 
         tm.assert_frame_equal(result, expected)
 
-    @pytest.mark.parametrize("op", ["add", "sub", "mul", "div"])
+    @pytest.mark.parametrize(
+        "op", ["add", "sub", "mul", "div", "radd", "rsub", "rmul", "rdiv"]
+    )
     def test_arith_frame_multiindex_level_broadcast(self, op):
         labels = ["0", "1", "2", "10"]
         index = MultiIndex.from_product(
