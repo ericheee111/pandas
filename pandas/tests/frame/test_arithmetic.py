@@ -748,6 +748,14 @@ class TestFrameFlexArithmetic:
 
         tm.assert_frame_equal(result, expected)
 
+    def test_arith_frame_multiindex_level_broadcast_invalid_level(self):
+        index = MultiIndex.from_product([["a", "b"], [0, 1]], names=["key", "num"])
+        df = DataFrame(np.arange(8).reshape(4, 2), index=index, columns=["x", "y"])
+        other = DataFrame({"x": [1, 2], "y": [3, 4]}, index=Index(["a", "b"]))
+
+        with pytest.raises(KeyError, match="Level \\['key'\\] not found"):
+            df.add(other, level=["key"])
+
     def test_frame_multiindex_operations(self):
         # GH 43321
         df = DataFrame(
