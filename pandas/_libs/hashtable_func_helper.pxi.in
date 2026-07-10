@@ -348,6 +348,54 @@ cpdef unique_float64_monotonic(const float64_t[::1] values):
     return result[:count].copy()
 
 
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cpdef factorize_float64_monotonic(const float64_t[::1] values):
+    cdef:
+        Py_ssize_t i, n = len(values), count = 1
+        float64_t val, previous
+        bint valid = True
+        ndarray[intp_t] labels = np.empty(n, dtype=np.intp)
+        ndarray[float64_t] uniques
+
+    if n == 0:
+        return labels, np.empty(0, dtype=np.float64)
+
+    uniques = np.empty(n, dtype=np.float64)
+    previous = values[0]
+    if previous != previous:
+        return None
+    labels[0] = 0
+    uniques[0] = previous
+
+    with nogil:
+        for i in range(1, n):
+            val = values[i]
+            if val != val:
+                valid = False
+                break
+            if are_equivalent_float64_t(val, previous):
+                labels[i] = count - 1
+                continue
+            if val < previous:
+                valid = False
+                break
+
+            labels[i] = count
+            uniques[count] = val
+            count += 1
+            previous = val
+
+            # Leave dense runs to the regular hash-table path.
+            if i >= 4096 and count * 4 > i + 1:
+                valid = False
+                break
+
+    if not valid:
+        return None
+    return labels, uniques[:count].copy()
+
+
 ctypedef fused htfunc_t:
     numeric_object_t
     complex128_t

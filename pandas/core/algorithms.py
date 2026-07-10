@@ -456,28 +456,41 @@ def nunique_ints(values: ArrayLike) -> int:
     return result
 
 
-_MINIMUM_MONOTONIC_RUN_UNIQUE_LEN = 100_000
-_MONOTONIC_RUN_UNIQUE_SAMPLE_SIZE = 257
+_MINIMUM_MONOTONIC_RUN_LEN = 100_000
+_MONOTONIC_RUN_SAMPLE_SIZE = 257
+
+
+def _is_float64_monotonic_runs_candidate(values: np.ndarray) -> bool:
+    if (
+        not isinstance(values, np.ndarray)
+        or len(values) < _MINIMUM_MONOTONIC_RUN_LEN
+        or values.dtype != np.dtype(np.float64)
+        or values.ndim != 1
+        or not values.flags.c_contiguous
+    ):
+        return False
+
+    sample = values[:_MONOTONIC_RUN_SAMPLE_SIZE]
+    adjacent_equal = np.count_nonzero(sample[1:] == sample[:-1])
+    return adjacent_equal >= len(sample) // 2
 
 
 def _unique_float64_monotonic_runs(
     values: np.ndarray,
 ) -> npt.NDArray[np.float64] | None:
-    if (
-        not isinstance(values, np.ndarray)
-        or len(values) < _MINIMUM_MONOTONIC_RUN_UNIQUE_LEN
-        or values.dtype != np.dtype(np.float64)
-        or values.ndim != 1
-        or not values.flags.c_contiguous
-    ):
-        return None
-
-    sample = values[:_MONOTONIC_RUN_UNIQUE_SAMPLE_SIZE]
-    adjacent_equal = np.count_nonzero(sample[1:] == sample[:-1])
-    if adjacent_equal < len(sample) // 2:
+    if not _is_float64_monotonic_runs_candidate(values):
         return None
 
     return htable.unique_float64_monotonic(values)
+
+
+def _factorize_float64_monotonic_runs(
+    values: np.ndarray,
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.float64]] | None:
+    if not _is_float64_monotonic_runs_candidate(values):
+        return None
+
+    return htable.factorize_float64_monotonic(values)
 
 
 def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
@@ -700,6 +713,11 @@ def factorize_array(
         #  na_value is an appropriately-typed NaT.
         # e.g. test_where_datetimelike_categorical
         na_value = iNaT
+
+    if use_na_sentinel and na_value is None and mask is None:
+        result = _factorize_float64_monotonic_runs(values)
+        if result is not None:
+            return result
 
     hash_klass, values = _get_hashtable_algo(values)
 
