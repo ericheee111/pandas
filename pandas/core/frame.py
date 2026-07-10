@@ -9533,6 +9533,7 @@ class DataFrame(NDFrame, OpsMixin):
         """
         if (
             not isinstance(self.index, MultiIndex)
+            or isinstance(other.index, MultiIndex)
             or not self.columns.equals(other.columns)
             or not other.index.is_unique
         ):
