@@ -456,6 +456,30 @@ def nunique_ints(values: ArrayLike) -> int:
     return result
 
 
+_MINIMUM_MONOTONIC_RUN_UNIQUE_LEN = 100_000
+_MONOTONIC_RUN_UNIQUE_SAMPLE_SIZE = 257
+
+
+def _unique_float64_monotonic_runs(
+    values: np.ndarray,
+) -> npt.NDArray[np.float64] | None:
+    if (
+        not isinstance(values, np.ndarray)
+        or len(values) < _MINIMUM_MONOTONIC_RUN_UNIQUE_LEN
+        or values.dtype != np.dtype(np.float64)
+        or values.ndim != 1
+        or not values.flags.c_contiguous
+    ):
+        return None
+
+    sample = values[:_MONOTONIC_RUN_UNIQUE_SAMPLE_SIZE]
+    adjacent_equal = np.count_nonzero(sample[1:] == sample[:-1])
+    if adjacent_equal < len(sample) // 2:
+        return None
+
+    return htable.unique_float64_monotonic(values)
+
+
 def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
     """See algorithms.unique for docs. Takes a mask for masked arrays."""
     values = _ensure_arraylike(values, func_name="unique")
@@ -467,6 +491,11 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
     if isinstance(values, ABCIndex):
         # Dispatch to Index's unique.
         return values.unique()
+
+    if mask is None:
+        result = _unique_float64_monotonic_runs(values)
+        if result is not None:
+            return result
 
     original = values
     hashtable, values = _get_hashtable_algo(values)
