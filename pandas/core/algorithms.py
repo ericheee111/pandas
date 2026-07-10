@@ -525,7 +525,6 @@ def _isin_integer_zero_range(
 ) -> npt.NDArray[np.bool_] | None:
     if (
         len(comps_array) < _MINIMUM_COMP_ARR_LEN
-        or len(values) <= 26
         or len(values) > _MAX_INTEGER_ZERO_RANGE_VALUES
         or values.dtype != comps_array.dtype
         or not values.dtype.isnative
@@ -546,7 +545,9 @@ def _isin_integer_zero_range(
 
     if values.dtype.name == "uint64":
         return comps_array < n_values
-    return (comps_array >= 0) & (comps_array < n_values)
+    # Negative int64 values become large uint64 values, folding both bounds
+    # into one comparison.
+    return comps_array.view("uint64") < n_values
 
 
 def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
@@ -621,6 +622,10 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
     # GH60678
     # Ensure values don't contain <NA>, otherwise it throws exception with np.in1d
 
+    result = _isin_integer_zero_range(comps_array, values)
+    if result is not None:
+        return result
+
     if (
         len(comps_array) > _MINIMUM_COMP_ARR_LEN
         and len(values) <= 26
@@ -634,10 +639,6 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
                 np.isin(comps_array, values).ravel(), np.isnan(comps_array)
             )
         return np.isin(comps_array, values).ravel()
-
-    result = _isin_integer_zero_range(comps_array, values)
-    if result is not None:
-        return result
 
     if (
         values.dtype != comps_array.dtype
