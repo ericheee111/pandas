@@ -1234,6 +1234,14 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
                 right = right.view("uint64")
             return bool(np.array_equal(left, right))
 
+        def values_equal_with_mask(
+            left: np.ndarray, right: np.ndarray, mask: np.ndarray
+        ) -> bool:
+            if values_equal(left, right):
+                return True
+            valid = ~mask
+            return values_equal(left[valid], right[valid])
+
         for repeats in range(2, 5):
             if len(data) % repeats:
                 continue
@@ -1265,13 +1273,14 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
 
             first_mask = mask[:chunk]
             first_values = data[:chunk]
-            valid = ~first_mask
             for start in range(chunk, len(data), chunk):
                 end = start + chunk
                 if not np.array_equal(first_mask, mask[start:end]):
                     matched = False
                     break
-                if not values_equal(first_values[valid], data[start:end][valid]):
+                if not values_equal_with_mask(
+                    first_values, data[start:end], first_mask
+                ):
                     matched = False
                     break
 
