@@ -1,0 +1,6 @@
+option(
+    'pandas_cython_coverage',
+    type: 'boolean',
+    value: false,
+    description: 'Enable Cython line coverage',
+)
