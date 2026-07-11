@@ -19,6 +19,7 @@ from pandas._config import (
 
 from pandas._libs import (
     algos as libalgos,
+    hashtable as htable,
     lib,
     missing as libmissing,
 )
@@ -1285,6 +1286,25 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
                     break
 
             if matched:
+                result = None
+                if (
+                    first_values.flags.c_contiguous
+                    and first_mask.flags.c_contiguous
+                    and first_values.dtype.isnative
+                ):
+                    mask_view = first_mask.view("uint8")
+                    if exact_float:
+                        result = htable.unique_float64_masked_monotonic_tail(
+                            first_values, mask_view
+                        )
+                    else:
+                        result = htable.unique_int64_masked_monotonic_tail(
+                            first_values, mask_view
+                        )
+                if result is not None:
+                    uniques, unique_mask = result
+                    return self._simple_new(uniques, unique_mask)
+
                 uniques, unique_mask = algos.unique_with_mask(first_values, first_mask)
                 return self._simple_new(uniques, unique_mask)
 

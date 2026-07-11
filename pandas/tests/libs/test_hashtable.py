@@ -824,6 +824,59 @@ def test_factorize_float64_monotonic():
     assert ht.factorize_float64_monotonic(np.array([0.0, np.nan])) is None
 
 
+@pytest.mark.parametrize(
+    "dtype, func_name",
+    [
+        (np.dtype("int64"), "unique_int64_masked_monotonic_tail"),
+        (np.dtype("float64"), "unique_float64_masked_monotonic_tail"),
+    ],
+)
+def test_unique_masked_monotonic_tail(dtype, func_name):
+    values = np.array([5, 99, 2, 0, 1, 2, 3, 4, 5, 6], dtype=dtype)
+    mask = np.array([False, True, False, False, False] + [False] * 5)
+
+    result = getattr(ht, func_name)(values, mask.view("uint8"))
+
+    assert result is not None
+    uniques, unique_mask = result
+    expected = np.array([5, 99, 2, 0, 1, 3, 4, 6], dtype=dtype)
+    expected_mask = np.array(
+        [False, True, False, False, False, False, False, False]
+    )
+    tm.assert_numpy_array_equal(uniques, expected)
+    tm.assert_numpy_array_equal(unique_mask, expected_mask)
+
+
+def test_unique_float64_masked_monotonic_tail_signed_zero():
+    values = np.array([-0.0, 42.0, 2.0, 0.0, 0.0, 1.0, 2.0, 3.0])
+    mask = np.array([False, True, False, False, False, False, False, False])
+
+    result = ht.unique_float64_masked_monotonic_tail(
+        values, mask.view("uint8")
+    )
+
+    assert result is not None
+    uniques, unique_mask = result
+    expected = np.array([-0.0, 42.0, 2.0, 1.0, 3.0])
+    expected_mask = np.array([False, True, False, False, False])
+    tm.assert_numpy_array_equal(uniques, expected)
+    tm.assert_numpy_array_equal(unique_mask, expected_mask)
+    assert np.signbit(uniques[0])
+
+
+def test_unique_masked_monotonic_tail_fallbacks():
+    mask = np.zeros(100, dtype="uint8")
+    values = np.arange(100, dtype="int64")
+    values[-2] = 200
+    assert ht.unique_int64_masked_monotonic_tail(values, mask) is None
+
+    float_values = np.arange(10, dtype="float64")
+    float_values[5] = np.nan
+    assert ht.unique_float64_masked_monotonic_tail(
+        float_values, mask[:10]
+    ) is None
+
+
 def test_float_complex_int_are_equal_as_objects():
     values = ["a", 5, 5.0, 5.0 + 0j]
     comps = list(range(129))
