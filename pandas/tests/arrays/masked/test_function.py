@@ -73,3 +73,12 @@ def test_to_numpy():
     result = arr.to_numpy()
     expected = np.array(["a", pd.NA, "c"])
     tm.assert_numpy_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("dtype", ["Int64", "Float64"])
+def test_unique_repeated_chunks_with_monotonic_tail(dtype):
+    chunk = [5, pd.NA, 2, *range(33_331)]
+    result = pd.array(chunk * 3, dtype=dtype).unique()
+    expected = pd.array(chunk, dtype=dtype).unique()
+
+    tm.assert_extension_array_equal(result, expected)
