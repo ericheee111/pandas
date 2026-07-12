@@ -404,10 +404,10 @@ cpdef unique_{{dtype}}_masked_monotonic_tail(
     const {{c_type}}[::1] values, const uint8_t[::1] mask
 ):
     cdef:
-        Py_ssize_t i, j, n = len(values), suffix_start = n
+        Py_ssize_t i, j, n = len(values), suffix_start = 0
         Py_ssize_t count = 0, prefix_count
-        {{c_type}} val, next_val, previous, prefix_max
-        bint have_next = False, have_previous = False, have_prefix_max = False
+        {{c_type}} val, previous, prefix_max
+        bint have_previous = False, have_prefix_max = False
         bint seen_na = False, duplicate, valid = True
         ndarray[{{c_type}}] result = np.empty(n, dtype=np.{{dtype}})
         ndarray[uint8_t] result_mask = np.empty(n, dtype=np.uint8)
@@ -416,9 +416,8 @@ cpdef unique_{{dtype}}_masked_monotonic_tail(
         raise ValueError("values and mask must have the same length")
 
     with nogil:
-        for i in range(n - 1, -1, -1):
+        for i in range(n):
             if mask[i]:
-                suffix_start = i
                 continue
 
             val = values[i]
@@ -427,19 +426,18 @@ cpdef unique_{{dtype}}_masked_monotonic_tail(
                 valid = False
                 break
             {{endif}}
-            if not have_next:
-                next_val = val
-                have_next = True
+            if have_previous and val < previous:
                 suffix_start = i
-                continue
+                if suffix_start > 64:
+                    valid = False
+                    break
+            previous = val
+            have_previous = True
 
-            if val > next_val:
-                break
-            next_val = val
-            suffix_start = i
+        have_previous = False
 
     # Keep the prefix scan bounded; larger disordered inputs use the hash table.
-    if not valid or suffix_start > 64:
+    if not valid:
         return None
 
     with nogil:
