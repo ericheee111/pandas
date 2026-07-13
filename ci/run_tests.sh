@@ -75,6 +75,15 @@ python -m coverage report \
   --include="*/pandas/**/*.pyx,*/pandas/**/*.pxi,*/pandas/**/*.pxd" \
   | tail -n 1
 
+coverage_gate_failed=0
+echo "Full coverage (minimum ${TOTAL_COVERAGE_MIN:-70}%):"
+if python -m coverage report --format=total --fail-under="${TOTAL_COVERAGE_MIN:-70}"; then
+  echo "Full coverage gate: passed"
+else
+  echo "Full coverage gate: failed"
+  coverage_gate_failed=1
+fi
+
 if [[ -z "${DIFF_COVERAGE_MIN+x}" ]]; then
   DIFF_COVERAGE_MIN=80
 fi
@@ -103,11 +112,15 @@ if [[ -n "${GIT_BRANCH:-}" ]]; then
   COVERAGE_BASE_REF="$MERGE_BASE_COMMIT"
   echo "Incremental coverage base: $COVERAGE_BASE_REF ($GIT_BRANCH)"
 
-  python "$SOURCE_DIR/ci/check_incremental_coverage.py" \
+  if ! python "$SOURCE_DIR/ci/check_incremental_coverage.py" \
     coverage.xml \
     "$COVERAGE_BASE_REF" \
-    --fail-under="$DIFF_COVERAGE_MIN"
+    --fail-under="$DIFF_COVERAGE_MIN"; then
+    coverage_gate_failed=1
+  fi
 else
   echo "Local environment detected, skipping incremental coverage gate."
   echo "To run incremental coverage in CI, export GIT_BRANCH=<base_ref>."
 fi
+
+exit "$coverage_gate_failed"
