@@ -339,6 +339,24 @@ class TestFactorize:
         tm.assert_numpy_array_equal(codes, expected_codes)
         tm.assert_numpy_array_equal(uniques, expected_uniques)
 
+    def test_object_int_factorize(self):
+        data = np.array([2, -1, 2, 0], dtype=object)
+        expected_codes = np.array([2, 0, 2, 1], dtype=np.intp)
+        expected_uniques = np.array([-1, 0, 2], dtype=object)
+
+        codes, uniques = algos.factorize(data, sort=True)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
+    def test_object_int_factorize_fallback_semantics(self):
+        data = np.array([True, 1, np.int64(1), None, 2**80, 2**80], dtype=object)
+        expected_codes = np.array([0, 0, 0, -1, 1, 1], dtype=np.intp)
+        expected_uniques = np.array([True, 2**80], dtype=object)
+
+        codes, uniques = algos.factorize(data)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
     def test_datetime64_factorize(self, writable):
         # GH35650 Verify whether read-only datetime64 array can be factorized
         data = np.array([np.datetime64("2020-01-01T00:00:00.000")], dtype="M8[ns]")
