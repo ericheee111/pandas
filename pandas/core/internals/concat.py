@@ -13,6 +13,7 @@ from pandas._libs import (
     internals as libinternals,
     lib,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.missing import NA
 from pandas.util._decorators import cache_readonly
 
@@ -88,21 +89,30 @@ def concatenate_managers(
         mgrs = _maybe_reindex_columns_na_proxy(axes, mgrs_indexers, needs_copy)
         return mgrs[0].concat_horizontal(mgrs, axes)
 
-    if len(mgrs_indexers) > 0 and mgrs_indexers[0][0].nblocks > 0:
-        first_dtype = mgrs_indexers[0][0].blocks[0].dtype
-        if first_dtype in [np.float64, np.float32]:
-            # TODO: support more dtypes here.  This will be simpler once
-            #  JoinUnit.is_na behavior is deprecated.
-            #  (update 2024-04-13 that deprecation has been enforced)
-            if (
-                all(_is_homogeneous_mgr(mgr, first_dtype) for mgr, _ in mgrs_indexers)
-                and len(mgrs_indexers) > 1
+    if IS_ARM:
+        if len(mgrs_indexers) > 1 and mgrs_indexers[0][0].nblocks > 0:
+            first_dtype = mgrs_indexers[0][0].blocks[0].dtype
+            if not isinstance(first_dtype, ExtensionDtype) and all(
+                _is_homogeneous_mgr(mgr, first_dtype) for mgr, _ in mgrs_indexers
             ):
-                # Fastpath!
-                # Length restriction is just to avoid having to worry about 'copy'
-                shape = tuple(len(x) for x in axes)
-                nb = _concat_homogeneous_fastpath(mgrs_indexers, shape, first_dtype)
-                return BlockManager((nb,), axes)
+                has_any_indexers = any(indexers for _, indexers in mgrs_indexers)
+                if not has_any_indexers or first_dtype in [np.float64, np.float32]:
+                    shape = tuple(len(x) for x in axes)
+                    nb = _concat_homogeneous_fastpath(
+                        mgrs_indexers, shape, first_dtype, has_any_indexers
+                    )
+                    return BlockManager((nb,), axes)
+    else:
+        if len(mgrs_indexers) > 0 and mgrs_indexers[0][0].nblocks > 0:
+            first_dtype = mgrs_indexers[0][0].blocks[0].dtype
+            if first_dtype in [np.float64, np.float32]:
+                if (
+                    all(_is_homogeneous_mgr(mgr, first_dtype) for mgr, _ in mgrs_indexers)
+                    and len(mgrs_indexers) > 1
+                ):
+                    shape = tuple(len(x) for x in axes)
+                    nb = _concat_homogeneous_fastpath(mgrs_indexers, shape, first_dtype)
+                    return BlockManager((nb,), axes)
 
     mgrs = _maybe_reindex_columns_na_proxy(axes, mgrs_indexers, needs_copy)
 
@@ -202,23 +212,50 @@ def _is_homogeneous_mgr(mgr: BlockManager, first_dtype: DtypeObj) -> bool:
 
 
 def _concat_homogeneous_fastpath(
-    mgrs_indexers, shape: Shape, first_dtype: np.dtype
+    mgrs_indexers,
+    shape: Shape,
+    first_dtype: np.dtype,
+    has_any_indexers: bool = False,
 ) -> Block:
     """
-    With single-Block managers with homogeneous dtypes (that can already hold nan),
-    we avoid [...]
+    With single-Block managers with homogeneous dtypes, we avoid the overhead
+    of the general-purpose concat pipeline by directly copying block values
+    into a preallocated result array.
     """
     # assumes
     #  all(_is_homogeneous_mgr(mgr, first_dtype) for mgr, _ in in mgrs_indexers)
 
-    if all(not indexers for _, indexers in mgrs_indexers):
-        # https://github.com/pandas-dev/pandas/pull/52685#issuecomment-1523287739
-        arrs = [mgr.blocks[0].values.T for mgr, _ in mgrs_indexers]
-        arr = np.concatenate(arrs).T
+    if not has_any_indexers:
+        if not IS_ARM:
+            arrs = [mgr.blocks[0].values.T for mgr, _ in mgrs_indexers]
+            arr = np.concatenate(arrs).T
+            bp = libinternals.BlockPlacement(slice(shape[0]))
+            nb = new_block_2d(arr, bp)
+            return nb
+
+        first_arr = mgrs_indexers[0][0].blocks[0].values
+        n = len(mgrs_indexers)
+
+        if not isinstance(first_arr, np.ndarray):
+            arrs = [mgr.blocks[0].values for mgr, _ in mgrs_indexers]
+            arr = np.concatenate(arrs, axis=1)
+        elif n > 1 and all(
+            mgr.blocks[0].values is first_arr for mgr, _ in mgrs_indexers[1:]
+        ):
+            arr = np.tile(first_arr, (1, n))
+        else:
+            arr = np.empty(shape, dtype=first_dtype)
+            offset = 0
+            for mgr, _ in mgrs_indexers:
+                nrows = mgr.shape[1]
+                arr[:, offset : offset + nrows] = mgr.blocks[0].values
+                offset += nrows
+
         bp = libinternals.BlockPlacement(slice(shape[0]))
         nb = new_block_2d(arr, bp)
         return nb
 
+    # With indexers: only float64/float32 supported (Cython take functions)
     arr = np.empty(shape, dtype=first_dtype)
 
     if first_dtype == np.float64:
@@ -238,7 +275,6 @@ def _concat_homogeneous_fastpath(
                 arr[:, start:end],
             )
         else:
-            # No reindexing necessary, we can copy values directly
             arr[:, start:end] = mgr.blocks[0].values
 
         start += mgr_len

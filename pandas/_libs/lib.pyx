@@ -3323,3 +3323,151 @@ def is_np_dtype(object dtype, str kinds=None) -> bool:
     if kinds is None:
         return True
     return dtype.kind in kinds
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def fast_bool_index_objarray(ndarray[object, ndim=1] data, ndarray[uint8_t, ndim=1] mask):
+    """
+    Fast boolean indexing for object arrays.
+    
+    This is optimized for object dtype arrays where numpy's generic
+    compress/getitem has significant overhead.
+    """
+    cdef:
+        Py_ssize_t n = mask.shape[0]
+        Py_ssize_t count
+        Py_ssize_t i, j
+        PyObject **data_ptr
+        uint8_t *mask_ptr
+        PyObject **result_ptr
+        ndarray[object, ndim=1] result
+    
+    count = np.count_nonzero(mask)
+    result = np.empty(count, dtype=object)
+    
+    if count == 0:
+        return result
+    
+    mask_ptr = <uint8_t*>mask.data
+    result_ptr = <PyObject**>result.data
+    data_ptr = <PyObject**>data.data
+    
+    j = 0
+    i = 0
+    while i <= n - 4:
+        if mask_ptr[i]:
+            result_ptr[j] = data_ptr[i]
+            Py_INCREF(<object>data_ptr[i])
+            j += 1
+        if mask_ptr[i+1]:
+            result_ptr[j] = data_ptr[i+1]
+            Py_INCREF(<object>data_ptr[i+1])
+            j += 1
+        if mask_ptr[i+2]:
+            result_ptr[j] = data_ptr[i+2]
+            Py_INCREF(<object>data_ptr[i+2])
+            j += 1
+        if mask_ptr[i+3]:
+            result_ptr[j] = data_ptr[i+3]
+            Py_INCREF(<object>data_ptr[i+3])
+            j += 1
+        i += 4
+    
+    while i < n:
+        if mask_ptr[i]:
+            result_ptr[j] = data_ptr[i]
+            Py_INCREF(<object>data_ptr[i])
+            j += 1
+        i += 1
+    
+    return result
+
+
+
+ctypedef fused numeric_t:
+    cnp.int64_t
+    cnp.float64_t
+
+
+cdef void _copy_masked_numeric(numeric_t* src, numeric_t* dst, cnp.uint8_t* mask, Py_ssize_t n) noexcept nogil:
+    cdef Py_ssize_t i, j = 0
+    for i in range(n):
+        if mask[i]:
+            dst[j] = src[i]
+            j += 1
+
+
+cdef void _copy_masked_object(PyObject** src, PyObject** dst, cnp.uint8_t* mask, Py_ssize_t n) noexcept:
+    cdef Py_ssize_t i, j = 0
+    cdef PyObject* obj
+    i = 0
+    while i <= n - 4:
+        if mask[i]:
+            obj = src[i]
+            Py_INCREF(<object>obj)
+            dst[j] = obj
+            j += 1
+        if mask[i + 1]:
+            obj = src[i + 1]
+            Py_INCREF(<object>obj)
+            dst[j] = obj
+            j += 1
+        if mask[i + 2]:
+            obj = src[i + 2]
+            Py_INCREF(<object>obj)
+            dst[j] = obj
+            j += 1
+        if mask[i + 3]:
+            obj = src[i + 3]
+            Py_INCREF(<object>obj)
+            dst[j] = obj
+            j += 1
+        i += 4
+    while i < n:
+        if mask[i]:
+            obj = src[i]
+            Py_INCREF(<object>obj)
+            dst[j] = obj
+            j += 1
+        i += 1
+
+
+def fast_bool_mask_indexer(ndarray data, ndarray mask):
+    """
+    Fast boolean indexing using direct C pointer operations.
+    """
+    cdef:
+        Py_ssize_t n = data.shape[0]
+        Py_ssize_t count = 0
+        Py_ssize_t i
+        cnp.uint8_t* m = <cnp.uint8_t*>mask.data
+        ndarray result
+
+    if not cnp.PyArray_ISCONTIGUOUS(data):
+        return data[mask]
+
+    for i in range(n):
+        count += m[i]
+
+    result = np.empty(count, dtype=data.dtype)
+
+    if data.dtype.num == cnp.NPY_INT64:
+        _copy_masked_numeric[cnp.int64_t](
+            <cnp.int64_t*>data.data,
+            <cnp.int64_t*>result.data,
+            m, n)
+    elif data.dtype.num == cnp.NPY_FLOAT64:
+        _copy_masked_numeric[cnp.float64_t](
+            <cnp.float64_t*>data.data,
+            <cnp.float64_t*>result.data,
+            m, n)
+    elif data.dtype.num == cnp.NPY_OBJECT:
+        _copy_masked_object(
+            <PyObject**>data.data,
+            <PyObject**>result.data,
+            m, n)
+    else:
+        result = data[mask]
+
+    return result

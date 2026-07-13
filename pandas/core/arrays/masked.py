@@ -315,19 +315,54 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
                 mask = mask.copy()
                 mask[modify] = False
 
-        value = missing.check_value_size(value, mask, len(self))
+        from pandas.compat._arch import IS_ARM
 
-        if mask.any():
-            # fill with value
+        if not IS_ARM:
+            value = missing.check_value_size(value, mask, len(self))
+            if mask.any():
+                if copy:
+                    new_values = self.copy()
+                else:
+                    new_values = self[:]
+                new_values[mask] = value
+            elif copy:
+                new_values = self.copy()
+            else:
+                new_values = self[:]
+            return new_values
+
+        if not mask.any():
             if copy:
                 new_values = self.copy()
             else:
                 new_values = self[:]
-            new_values[mask] = value
-        elif copy:
+            return new_values
+
+        value = missing.check_value_size(value, mask, len(self))
+
+        # Fast path for scalar non-NA fill: use np.where for single-pass operation
+        # instead of copy + masked assignment (which requires two passes)
+        if is_scalar(value) and not is_valid_na_for_dtype(value, self.dtype):
+            value = self._validate_setitem_value(value)
+            if copy:
+                new_data = np.where(mask, value, self._data)
+                new_mask = self._mask.copy()
+                new_mask[mask] = False
+            else:
+                if self._readonly:
+                    raise ValueError("Cannot modify read-only array")
+                new_data = self._data
+                new_data[mask] = value
+                new_mask = self._mask
+                new_mask[mask] = False
+            return self._simple_new(new_data, new_mask)
+
+        # fill with value (array-like or NA scalar path)
+        if copy:
             new_values = self.copy()
         else:
             new_values = self[:]
+        new_values[mask] = value
         return new_values
 
     @classmethod

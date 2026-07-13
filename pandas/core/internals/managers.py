@@ -1406,6 +1406,112 @@ class BlockManager(libinternals.BlockManager, BaseBlockManager):
             # Newly created block's dtype may already be present.
             self._known_consolidated = False
 
+    def iset_batch(
+        self,
+        locs: np.ndarray,
+        values: list[ArrayLike],
+        refs: BlockValuesRefs | None = None,
+    ) -> None:
+        """Set multiple columns at once, batching block split operations.
+
+        Optimized for the case where multiple columns are being set to new
+        values (e.g., df[[col1, col2, col3]] = scalar). Each column gets its
+        own independent array from the values list.
+
+        The key optimization: all block splits are done first (removing target
+        columns from existing blocks), then all new single-column blocks are
+        created and added at once. This avoids the cascading block tuple
+        reconstruction that happens with multiple separate iset calls.
+
+        Parameters
+        ----------
+        locs : np.ndarray of intp
+            Sorted integer column positions to set.
+        values : list of ArrayLike
+            List of 1D arrays, one per location in locs.
+        refs : BlockValuesRefs, optional
+            Reference tracking for CoW.
+        """
+        n = len(locs)
+        if n == 0:
+            return
+
+        if self._blklocs is None and self.ndim > 1:
+            self._rebuild_blknos_and_blklocs()
+
+        value0_2d = ensure_block_shape(values[0], ndim=2)
+
+        blknos = self.blknos[locs]
+        blklocs = self.blklocs[locs].copy()
+
+        split_ops: dict[int, list] = {}
+        removed_blknos: list[int] = []
+        new_col_indices: list[int] = []
+
+        for blkno_l, val_locs in libinternals.get_blkno_placements(blknos, group=True):
+            blk = self.blocks[blkno_l]
+            blk_locs_arr = blklocs[val_locs.indexer]
+            col_indices = np.arange(n)[val_locs.indexer].tolist()
+
+            if blk.should_store(value0_2d):
+                if not self._has_no_reference_block(blkno_l):
+                    if blkno_l not in split_ops:
+                        split_ops[blkno_l] = []
+                    split_ops[blkno_l].extend(blk_locs_arr.tolist())
+                    new_col_indices.extend(col_indices)
+                else:
+                    for idx in col_indices:
+                        val = ensure_block_shape(values[idx], ndim=2)
+                        blk_idx = blklocs[idx]
+                        blk.set_inplace([blk_idx], val)
+            else:
+                n_cols = blk.values.shape[0]
+                if len(blk_locs_arr) == n_cols:
+                    removed_blknos.append(blkno_l)
+                else:
+                    if blkno_l not in split_ops:
+                        split_ops[blkno_l] = []
+                    split_ops[blkno_l].extend(blk_locs_arr.tolist())
+                new_col_indices.extend(col_indices)
+
+        for blkno_l, blk_locs_list in split_ops.items():
+            blk_locs_arr = np.array(blk_locs_list, dtype=np.intp)
+            self._iset_split_block(blkno_l, blk_locs_arr, refs=refs)
+
+        if not new_col_indices:
+            return
+
+        new_blocks: list[Block] = []
+        for idx in new_col_indices:
+            loc = locs[idx]
+            val = ensure_block_shape(values[idx], ndim=2)
+            bp = BlockPlacement(slice(loc, loc + 1))
+            nb = new_block_2d(val, bp, refs=refs)
+            new_blocks.append(nb)
+
+        if removed_blknos:
+            is_deleted = np.zeros(self.nblocks, dtype=np.bool_)
+            is_deleted[removed_blknos] = True
+            new_block_numbers = np.full(self.nblocks, -1, dtype=np.intp)
+            new_block_numbers[~is_deleted] = np.arange(
+                self.nblocks - len(removed_blknos)
+            )
+            self._blknos = new_block_numbers[self._blknos]
+            self.blocks = tuple(
+                blk
+                for i, blk in enumerate(self.blocks)
+                if i not in set(removed_blknos)
+            )
+
+        base_blkno = len(self.blocks)
+        for i, idx in enumerate(new_col_indices):
+            loc = locs[idx]
+            self._blknos[loc] = base_blkno + i
+            self._blklocs[loc] = 0
+
+        self.blocks += tuple(new_blocks)
+        self._known_consolidated = False
+
     def _iset_split_block(
         self,
         blkno_l: int,

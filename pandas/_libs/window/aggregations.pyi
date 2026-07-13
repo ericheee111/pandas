@@ -23,12 +23,29 @@ def roll_mean(
     end: np.ndarray,  # np.ndarray[np.int64]
     minp: int,  # int64_t
 ) -> np.ndarray: ...  # np.ndarray[float]
+def roll_mean_fixed_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
 def roll_var(
     values: np.ndarray,  # const float64_t[:]
     start: np.ndarray,  # np.ndarray[np.int64]
     end: np.ndarray,  # np.ndarray[np.int64]
     minp: int,  # int64_t
     ddof: int = ...,
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_var_fixed_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+    ddof: int,  # int
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_std_fixed_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+    ddof: int,  # int
 ) -> np.ndarray: ...  # np.ndarray[float]
 def roll_skew(
     values: np.ndarray,  # np.ndarray[np.float64]
