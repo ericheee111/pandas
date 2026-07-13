@@ -2593,7 +2593,7 @@ def test_sql_open_close(temp_file, test_frame3):
 @td.skip_if_installed("sqlalchemy")
 def test_con_string_import_error():
     conn = "mysql://root@localhost/pandas"
-    msg =  r"Using URI string without version.*of 'sqlalchemy' installed"
+    msg = "Using URI string without sqlalchemy installed"
     with pytest.raises(ImportError, match=msg):
         sql.read_sql("SELECT * FROM iris", conn)
 
