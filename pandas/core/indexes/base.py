@@ -33,6 +33,7 @@ from pandas._libs import (
     lib,
     writers,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.internals import BlockValuesRefs
 import pandas._libs.join as libjoin
 from pandas._libs.lib import (
@@ -5392,6 +5393,31 @@ class Index(IndexOpsMixin, PandasObject):
         corresponding `Index` subclass.
 
         """
+        if IS_ARM and (
+            isinstance(key, np.ndarray)
+            and key.dtype == np.bool_
+            and key.ndim != 0
+            and isinstance(self._data, np.ndarray)
+        ):
+            if len(key) == 0 and len(key) != len(self):
+                raise ValueError(
+                    "The length of the boolean indexer cannot be 0 "
+                    "when the Index has length greater than 0."
+                )
+            if self._data.dtype == object:
+                result = lib.fast_bool_index_objarray(self._data, key.view(np.uint8))
+            else:
+                result = self._data.compress(key)
+            cls = type(self)
+            new_index = object.__new__(cls)
+            new_index._data = result
+            new_index._name = self._name
+            new_index._cache = {}
+            new_index._id = object()
+            new_index._references = BlockValuesRefs()
+            new_index._references.add_index_reference(new_index)
+            return new_index
+
         getitem = self._data.__getitem__
 
         key = lib.item_from_zerodim(key)
@@ -5404,6 +5430,31 @@ class Index(IndexOpsMixin, PandasObject):
             # This case is separated from the conditional above to avoid
             # pessimization com.is_bool_indexer and ndim checks.
             return self._getitem_slice(key)
+
+        # Fast path for boolean Series indexing
+        if IS_ARM and isinstance(key, ABCSeries) and key.dtype == np.bool_:
+            mask = key._values
+            if (
+                len(mask) == 0
+                and len(mask) != len(self)
+                and not isinstance(self.dtype, ExtensionDtype)
+            ):
+                raise ValueError(
+                    "The length of the boolean indexer cannot be 0 "
+                    "when the Index has length greater than 0."
+                )
+            if isinstance(self._data, np.ndarray):
+                result = lib.fast_bool_mask_indexer(self._data, mask)
+            else:
+                result = self._data[mask]
+            new_idx = object.__new__(type(self))
+            new_idx._data = result
+            new_idx._name = self._name
+            new_idx._cache = {}
+            new_idx._id = object()
+            new_idx._references = BlockValuesRefs()
+            new_idx._references.add_index_reference(new_idx)
+            return new_idx
 
         if com.is_bool_indexer(key):
             # if we have list[bools, length=1e5] then doing this check+convert

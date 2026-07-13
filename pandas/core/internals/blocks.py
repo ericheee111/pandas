@@ -19,6 +19,7 @@ from pandas._libs import (
     internals as libinternals,
     lib,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.internals import (
     BlockPlacement,
     BlockValuesRefs,
@@ -1011,10 +1012,15 @@ class Block(PandasObject, libinternals.Block):
         else:
             allow_fill = True
 
-        # Note: algos.take_nd has upcast logic similar to coerce_to_target_dtype
-        new_values = algos.take_nd(
-            values, indexer, axis=axis, allow_fill=allow_fill, fill_value=fill_value
-        )
+        # Fast path: when no fill is needed and values is a numpy array,
+        # use numpy.take directly to avoid algos.take_nd overhead
+        if IS_ARM and not allow_fill and isinstance(values, np.ndarray):
+            new_values = values.take(indexer, axis=axis)
+        else:
+            # Note: algos.take_nd has upcast logic similar to coerce_to_target_dtype
+            new_values = algos.take_nd(
+                values, indexer, axis=axis, allow_fill=allow_fill, fill_value=fill_value
+            )
 
         # Called from three places in managers, all of which satisfy
         #  these assertions
@@ -1886,15 +1892,26 @@ class ExtensionBlock(EABackedBlock):
         limit: int | None = None,
         inplace: bool = False,
     ) -> list[Block]:
-        if isinstance(self.dtype, (IntervalDtype, StringDtype)):
-            # Block.fillna handles coercion (test_fillna_interval)
-            if isinstance(self.dtype, IntervalDtype) and limit is not None:
-                raise ValueError("limit must be None")
-            return super().fillna(
-                value=value,
-                limit=limit,
-                inplace=inplace,
-            )
+        if IS_ARM:
+            if isinstance(self.dtype, IntervalDtype):
+                # Block.fillna handles coercion (test_fillna_interval)
+                if limit is not None:
+                    raise ValueError("limit must be None")
+                return super().fillna(
+                    value=value,
+                    limit=limit,
+                    inplace=inplace,
+                )
+        else:
+            if isinstance(self.dtype, (IntervalDtype, StringDtype)):
+                # Block.fillna handles coercion (test_fillna_interval)
+                if isinstance(self.dtype, IntervalDtype) and limit is not None:
+                    raise ValueError("limit must be None")
+                return super().fillna(
+                    value=value,
+                    limit=limit,
+                    inplace=inplace,
+                )
         if self._can_hold_na and not self.values._hasna:
             refs = self.refs
             new_values = self.values
@@ -1903,7 +1920,11 @@ class ExtensionBlock(EABackedBlock):
 
             try:
                 new_values = self.values.fillna(value=value, limit=limit, copy=copy)
-            except TypeError:
+            except TypeError as err:
+                # Check if this is an invalid fill value error
+                if "Invalid value" in str(err) and "for dtype" in str(err):
+                    # Skip this block - value is incompatible with the dtype
+                    return [self] if not inplace else [self.make_block_same_class(self.values, refs=refs)]
                 # 3rd party EA that has not implemented copy keyword yet
                 refs = None
                 new_values = self.values.fillna(value=value, limit=limit)

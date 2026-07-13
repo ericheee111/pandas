@@ -7,6 +7,8 @@ from numpy cimport (
     int64_t,
     intp_t,
     ndarray,
+    uint8_t,
+    uint64_t,
 )
 
 cnp.import_array()

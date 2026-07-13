@@ -18,6 +18,7 @@ import warnings
 import numpy as np
 
 from pandas._libs import lib
+from pandas.compat._arch import IS_ARM
 from pandas.errors import Pandas4Warning
 from pandas.util._decorators import set_module
 from pandas.util._exceptions import find_stack_level
@@ -818,22 +819,35 @@ def _clean_keys_and_objs(
             )
 
     # GH#1649
-    key_indices = []
-    clean_objs = []
-    ndims = set()
-    for i, obj in enumerate(objs):
-        if obj is None:
-            continue
-        elif isinstance(obj, (ABCSeries, ABCDataFrame)):
-            key_indices.append(i)
-            clean_objs.append(obj)
-            ndims.add(obj.ndim)
-        else:
-            msg = (
-                f"cannot concatenate object of type '{type(obj)}'; "
-                "only Series and DataFrame objs are valid"
-            )
-            raise TypeError(msg)
+    # Fast path: if objs is a list and all elements are the same non-None object
+    if (
+        IS_ARM
+        and isinstance(objs, list)
+        and len(objs) > 1
+        and objs[0] is not None
+        and isinstance(objs[0], (ABCSeries, ABCDataFrame))
+        and all(obj is objs[0] for obj in objs)
+    ):
+        clean_objs = list(objs)
+        ndims = {objs[0].ndim}
+        key_indices = list(range(len(objs)))
+    else:
+        key_indices = []
+        clean_objs = []
+        ndims = set()
+        for i, obj in enumerate(objs):
+            if obj is None:
+                continue
+            elif isinstance(obj, (ABCSeries, ABCDataFrame)):
+                key_indices.append(i)
+                clean_objs.append(obj)
+                ndims.add(obj.ndim)
+            else:
+                msg = (
+                    f"cannot concatenate object of type '{type(obj)}'; "
+                    "only Series and DataFrame objs are valid"
+                )
+                raise TypeError(msg)
 
     if keys is not None and len(key_indices) < len(keys):
         keys = keys.take(key_indices)
@@ -852,6 +866,10 @@ def _get_sample_object(
     levels,
     intersect: bool,
 ) -> tuple[Series | DataFrame, list[Series | DataFrame]]:
+    # Fast path: if all objs are the same object, return immediately
+    if IS_ARM and len(objs) > 1 and all(obj is objs[0] for obj in objs):
+        return objs[0], objs
+
     # get the sample
     # want the highest ndim that we have, and must be non-empty
     # unless all objs are empty

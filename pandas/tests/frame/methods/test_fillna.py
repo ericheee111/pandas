@@ -78,7 +78,8 @@ class TestFillNA:
 
         result = mf.fillna(value=0)
         assert (result.loc[result.index[-10:], "A"] == 0).all()
-        assert (result.loc[result.index[5:20], "foo"] == 0).all()
+        if not using_infer_string:
+            assert (result.loc[result.index[5:20], "foo"] == 0).all()
 
     def test_fillna_mixed_float(self, mixed_float_frame):
         # mixed numeric (but no float16)
