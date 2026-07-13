@@ -364,11 +364,6 @@ cdef class ObjectVector(Vector):
 # HashTable
 # ----------------------------------------------------------------------
 
-
-cdef class HashTable:
-
-    pass
-
 {{py:
 
 # name, dtype, c_type, to_c_type
