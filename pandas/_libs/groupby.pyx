@@ -790,6 +790,60 @@ def group_sum(
             )
             return
 
+    if (
+        sum_t is not object
+        and pandas_is_aarch64()
+        and uses_mask
+        and skipna
+        and not is_datetimelike
+        and K == 1
+    ):
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
+                    continue
+
+                counts[lab] += 1
+                if mask[i, 0]:
+                    continue
+
+                nobs[lab, 0] += 1
+                val = values[i, 0]
+
+                if sum_t is int64_t or sum_t is uint64_t:
+                    if nobs[lab, 0] == 1:
+                        t = val
+                    else:
+                        t = sumx[lab, 0] + val
+                    sumx[lab, 0] = t
+                else:
+                    y = val - compensation[lab, 0]
+                    t = sumx[lab, 0] + y
+                    compensation[lab, 0] = t - sumx[lab, 0] - y
+
+                    if (
+                        sum_t is float32_t or sum_t is float64_t
+                    ) and not isfinite(compensation[lab, 0]):
+                        compensation[lab, 0] = 0
+
+                    if (
+                        sum_t is complex64_t or sum_t is complex128_t
+                    ) and not isfinite(compensation[lab, 0].real):
+                        compensation[lab, 0].real = 0
+
+                    if (
+                        sum_t is complex64_t or sum_t is complex128_t
+                    ) and not isfinite(compensation[lab, 0].imag):
+                        compensation[lab, 0].imag = 0
+
+                    sumx[lab, 0] = t
+
+        _check_below_mincount(
+            out, uses_mask, result_mask, ncounts, K, nobs, min_count, sumx
+        )
+        return
+
     with nogil(sum_t is not object):
         for i in range(N):
             lab = labels[i]
@@ -1330,6 +1384,40 @@ def group_mean(
                         else:
                             out[i, j] = sumx[i, j] / count
             return
+
+    if (
+        pandas_is_aarch64()
+        and uses_mask
+        and skipna
+        and not is_datetimelike
+        and K == 1
+    ):
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
+                    continue
+
+                counts[lab] += 1
+                if mask[i, 0]:
+                    continue
+
+                nobs[lab, 0] += 1
+                val = values[i, 0]
+                y = val - compensation[lab, 0]
+                t = sumx[lab, 0] + y
+                compensation[lab, 0] = t - sumx[lab, 0] - y
+                if compensation[lab, 0] != compensation[lab, 0]:
+                    compensation[lab, 0] = 0.
+                sumx[lab, 0] = t
+
+            for i in range(ncounts):
+                count = nobs[i, 0]
+                if count == 0:
+                    result_mask[i, 0] = True
+                else:
+                    out[i, 0] = sumx[i, 0] / count
+        return
 
     with nogil:
         for i in range(N):
@@ -2047,6 +2135,37 @@ cdef group_min_max(
                 group_min_or_max,
             )
             return
+
+    if (
+        pandas_is_aarch64()
+        and uses_mask
+        and skipna
+        and not is_datetimelike
+        and K == 1
+    ):
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
+                    continue
+
+                counts[lab] += 1
+                if mask[i, 0]:
+                    continue
+
+                nobs[lab, 0] += 1
+                val = values[i, 0]
+                if compute_max:
+                    if val > group_min_or_max[lab, 0]:
+                        group_min_or_max[lab, 0] = val
+                else:
+                    if val < group_min_or_max[lab, 0]:
+                        group_min_or_max[lab, 0] = val
+
+        _check_below_mincount(
+            out, uses_mask, result_mask, ngroups, K, nobs, min_count, group_min_or_max
+        )
+        return
 
     with nogil:
         for i in range(N):
