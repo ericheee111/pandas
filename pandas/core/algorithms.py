@@ -38,6 +38,7 @@ from pandas._typing import (
 from pandas.util._decorators import set_module
 from pandas.util._exceptions import find_stack_level
 
+from pandas.core import _boostkit_fastpaths
 from pandas.core.dtypes.cast import (
     construct_1d_object_array_from_listlike,
     np_find_common_type,
@@ -499,6 +500,9 @@ def _is_float64_monotonic_runs_candidate(values: np.ndarray) -> bool:
 def _unique_float64_monotonic_runs(
     values: np.ndarray,
 ) -> npt.NDArray[np.float64] | None:
+    if not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        return None
+
     if not _is_float64_monotonic_runs_candidate(values):
         return None
 
@@ -508,6 +512,9 @@ def _unique_float64_monotonic_runs(
 def _factorize_float64_monotonic_runs(
     values: np.ndarray,
 ) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.float64]] | None:
+    if not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        return None
+
     if not _is_float64_monotonic_runs_candidate(values):
         return None
 
@@ -528,7 +535,7 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         # Dispatch to Index's unique.
         return values.unique()
 
-    if mask is None:
+    if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS and mask is None:
         result = _unique_float64_monotonic_runs(values)
         if result is not None:
             return result
@@ -565,6 +572,9 @@ _ZERO_RANGE_ISIN_DTYPES = {"float64", "int64", "uint64"}
 def _isin_zero_range(
     comps_array: np.ndarray, values: np.ndarray
 ) -> npt.NDArray[np.bool_] | None:
+    if not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        return None
+
     if (
         len(comps_array) < _MINIMUM_COMP_ARR_LEN
         or len(values) > _MAX_ZERO_RANGE_VALUES
@@ -668,33 +678,50 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
     # GH60678
     # Ensure values don't contain <NA>, otherwise it throws exception with np.in1d
 
-    result = _isin_zero_range(comps_array, values)
-    if result is not None:
-        return result
+    if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        result = _isin_zero_range(comps_array, values)
+        if result is not None:
+            return result
 
     if (
         len(comps_array) > _MINIMUM_COMP_ARR_LEN
         and len(values) <= 26
         and comps_array.dtype != object
-        and (values.dtype != object or not any(v is NA for v in values))
+        and (
+            (values.dtype != object or not any(v is NA for v in values))
+            if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            else not any(v is NA for v in values)
+        )
     ):
         # If the values include nan we need to check for nan explicitly
         # since np.nan it not equal to np.nan
         if isna(values).any():
-            return np.logical_or(
-                np.isin(comps_array, values).ravel(), np.isnan(comps_array)
-            )
-        return np.isin(comps_array, values).ravel()
+            if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+                return np.logical_or(
+                    np.isin(comps_array, values).ravel(), np.isnan(comps_array)
+                )
 
-    if (
-        values.dtype != comps_array.dtype
-        or not values.dtype.isnative
-        or values.dtype.name not in _hashtables
-    ):
-        common = np_find_common_type(values.dtype, comps_array.dtype)
-        values = values.astype(common, copy=False)
-        comps_array = comps_array.astype(common, copy=False)
-    return _get_ismember_func(comps_array.dtype)(comps_array, values)
+            def f(c, v):
+                return np.logical_or(np.isin(c, v).ravel(), np.isnan(c))
+
+        elif _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+            return np.isin(comps_array, values).ravel()
+        else:
+            f = lambda a, b: np.isin(a, b).ravel()
+
+    else:
+        if (
+            not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            or values.dtype != comps_array.dtype
+            or not values.dtype.isnative
+            or values.dtype.name not in _hashtables
+        ):
+            common = np_find_common_type(values.dtype, comps_array.dtype)
+            values = values.astype(common, copy=False)
+            comps_array = comps_array.astype(common, copy=False)
+        f = _get_ismember_func(comps_array.dtype)
+
+    return f(comps_array, values)
 
 
 def _get_ismember_func(dtype: np.dtype):
@@ -768,7 +795,12 @@ def factorize_array(
         # e.g. test_where_datetimelike_categorical
         na_value = iNaT
 
-    if use_na_sentinel and na_value is None and mask is None:
+    if (
+        _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+        and use_na_sentinel
+        and na_value is None
+        and mask is None
+    ):
         result = _factorize_float64_monotonic_runs(values)
         if result is not None:
             return result
@@ -979,7 +1011,8 @@ def factorize(
 
     if sort and len(uniques) > 0:
         already_sorted = (
-            isinstance(uniques, np.ndarray)
+            _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            and isinstance(uniques, np.ndarray)
             and uniques.dtype == np.float64
             and uniques[0] <= uniques[-1]
             and algos.is_monotonic(uniques, timelike=False)[0]
