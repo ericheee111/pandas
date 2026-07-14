@@ -1009,6 +1009,42 @@ def count_level_2d(const uint8_t[:, :] mask,
     return counts
 
 
+cdef extern from "pandas/portable.h":
+    bint pandas_is_aarch64() noexcept nogil
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def count_level_2d_no_na(
+    const intp_t[:] labels,
+    Py_ssize_t max_bin,
+    Py_ssize_t n,
+):
+    cdef:
+        Py_ssize_t i, j, k = labels.shape[0]
+        intp_t lab
+        ndarray[int64_t, ndim=2] counts
+
+    if not pandas_is_aarch64():
+        return None
+
+    counts = np.zeros((n, max_bin), dtype="i8")
+    if n == 0:
+        return counts
+
+    with nogil:
+        for j in range(k):
+            lab = labels[j]
+            if lab >= 0:
+                counts[0, lab] += 1
+
+        for i in range(1, n):
+            for j in range(max_bin):
+                counts[i, j] = counts[0, j]
+
+    return counts
+
+
 @cython.wraparound(False)
 @cython.boundscheck(False)
 def generate_slices(const intp_t[:] labels, Py_ssize_t ngroups):
