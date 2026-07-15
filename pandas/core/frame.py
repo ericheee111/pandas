@@ -9488,6 +9488,16 @@ class DataFrame(NDFrame, OpsMixin):
     ):
         axis = self._get_axis_number(axis) if axis is not None else 1
 
+        if (
+            isinstance(other, DataFrame)
+            and axis == 1
+            and level is not None
+            and fill_value is None
+        ):
+            result = self._arith_method_with_multiindex_level(other, op, level)
+            if result is not None:
+                return result
+
         if self._should_reindex_frame_op(other, op, axis, fill_value, level):
             return self._arith_method_with_reindex(other, op)
 
@@ -9513,6 +9523,49 @@ class DataFrame(NDFrame, OpsMixin):
 
                 new_data = self._dispatch_frame_op(other, op)
 
+        return self._construct_result(new_data, other=other)
+
+    def _arith_method_with_multiindex_level(
+        self, other: DataFrame, op, level
+    ) -> DataFrame | None:
+        """
+        Fast path for DataFrame arithmetic broadcasting over a MultiIndex level.
+        """
+        if (
+            not isinstance(self.index, MultiIndex)
+            or isinstance(other.index, MultiIndex)
+            or not self.columns.equals(other.columns)
+            or not other.index.is_unique
+        ):
+            return None
+
+        try:
+            level_number = self.index._get_level_number(level)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+
+        level_index = self.index.levels[level_number]
+        if len(level_index) != len(other.index):
+            return None
+
+        level_to_other = other.index.get_indexer(level_index)
+        if (level_to_other == -1).any():
+            return None
+
+        taker = self.index.codes[level_number]
+        if (taker == -1).any():
+            return None
+
+        if not np.bincount(taker, minlength=len(level_index)).all():
+            return None
+
+        taker = level_to_other.take(taker)
+        right = other._reindex_with_indexers(
+            {0: [self.index, taker], 1: [None, None]}, allow_dups=True
+        )
+
+        with np.errstate(all="ignore"):
+            new_data = self._combine_frame(right, op, fill_value=None)
         return self._construct_result(new_data, other=other)
 
     def _construct_result(self, result, other) -> DataFrame:
