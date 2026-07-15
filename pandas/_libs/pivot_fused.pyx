@@ -13,8 +13,6 @@ All in a single C-level pass, eliminating Python overhead and intermediate alloc
 
 import numpy as np
 cimport numpy as cnp
-from libc.stdlib cimport malloc, free
-from libc.string cimport memset, memcpy
 from libc.math cimport isnan, NAN
 
 cnp.import_array()

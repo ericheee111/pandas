@@ -5819,7 +5819,7 @@ class DataFrame(NDFrame, OpsMixin):
             data[k] = com.apply_if_callable(v, data)
         return data
 
-    def _sanitize_column(self, value, dtype=None) -> tuple[ArrayLike, BlockValuesRefs | None]:
+    def _sanitize_column(self, value) -> tuple[ArrayLike, BlockValuesRefs | None]:
         """
         Ensures new columns (which go into the BlockManager as new blocks) are
         always copied (or a reference is being tracked to them under CoW)
@@ -5828,20 +5828,11 @@ class DataFrame(NDFrame, OpsMixin):
         Parameters
         ----------
         value : scalar, Series, or array-like
-        dtype : dtype, optional
-            If provided, use this dtype instead of inferring from value.
 
         Returns
         -------
         tuple of numpy.ndarray or ExtensionArray and optional BlockValuesRefs
         """
-        if IS_ARM and dtype is not None and (
-            isinstance(value, (int, float, complex, bool, str)) or value is None
-        ):
-            from pandas.core.dtypes.cast import construct_1d_arraylike_from_scalar
-            arr = construct_1d_arraylike_from_scalar(value, len(self.index), dtype)
-            return arr, None
-
         self._ensure_valid_index(value)
 
         # Using a DataFrame would mean coercing values to one dtype

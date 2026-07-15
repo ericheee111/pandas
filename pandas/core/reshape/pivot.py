@@ -311,46 +311,34 @@ def _try_fast_pivot_table(
     sort: bool,
     kwargs,
 ) -> DataFrame | None:
-    import os
-    DEBUG = os.environ.get('PIVOT_DEBUG', '0') == '1'
     if kwargs:
-        if DEBUG: print("[FAST_PATH] return None: kwargs not empty")
         return None
     if not dropna:
-        if DEBUG: print("[FAST_PATH] return None: dropna is False")
         return None
     if not sort:
-        if DEBUG: print("[FAST_PATH] return None: sort is False")
         return None
     if not isinstance(aggfunc, str):
-        if DEBUG: print("[FAST_PATH] return None: aggfunc not string")
         return None
     if aggfunc not in ("mean", "sum", "count"):
-        if DEBUG: print("[FAST_PATH] return None: aggfunc not in allowed list")
         return None
 
     n_idx = len(index)
     n_col = len(columns)
     if n_col == 0:
-        if DEBUG: print("[FAST_PATH] return None: n_col == 0")
         return None
     
     # n_idx == 0 case (only columns, no index) requires special handling
     # For now, only support it when margins=False to avoid complexity
     if n_idx == 0 and margins:
-        if DEBUG: print("[FAST_PATH] return None: n_idx == 0 with margins (not yet supported)")
         return None
 
     keys = index + columns
     for key in keys:
         if isinstance(key, Grouper):
-            if DEBUG: print(f"[FAST_PATH] return None: key {key} is Grouper")
             return None
         if not isinstance(key, str):
-            if DEBUG: print(f"[FAST_PATH] return None: key {key} not string")
             return None
         if key not in data.columns:
-            if DEBUG: print(f"[FAST_PATH] return None: key {key} not in data.columns")
             return None
 
     values_passed = values is not None
@@ -363,10 +351,8 @@ def _try_fast_pivot_table(
             values_list = [values]
         for v in values_list:
             if not isinstance(v, str) or v not in data.columns:
-                if DEBUG: print(f"[FAST_PATH] return None: value {v} not string or not in columns")
                 return None
             if v in keys:
-                if DEBUG: print(f"[FAST_PATH] return None: value {v} in keys")
                 return None
     else:
         values_multi = True
@@ -377,62 +363,45 @@ def _try_fast_pivot_table(
                     if np.issubdtype(data[col].dtype, np.number):
                         values_list.append(col)
                     else:
-                        # Non-numeric column found, fast path cannot handle it
-                        if DEBUG: print(f"[FAST_PATH] return None: non-numeric column {col} would be included as value")
                         return None
                 except TypeError:
-                    # Cannot determine dtype, fast path cannot handle it
-                    if DEBUG: print(f"[FAST_PATH] return None: cannot determine dtype of column {col}")
                     return None
         if not values_list:
-            if DEBUG: print("[FAST_PATH] return None: values_list empty")
             return None
 
     for key in keys:
         col_vals = data[key]._values
         if isinstance(col_vals, ABCExtensionArray):
             if isinstance(col_vals, PeriodArray):
-                if DEBUG: print(f"[FAST_PATH] return None: key {key} is PeriodArray")
                 return None
             if hasattr(col_vals, "tz") and col_vals.tz is not None:
-                if DEBUG: print(f"[FAST_PATH] return None: key {key} has tz")
                 return None
             if isinstance(col_vals.dtype, CategoricalDtype):
                 if not observed:
-                    if DEBUG: print(f"[FAST_PATH] return None: key {key} is Categorical and not observed")
                     return None
             elif not hasattr(col_vals, "_ndarray"):
-                if DEBUG: print(f"[FAST_PATH] return None: key {key} ExtensionArray has no _ndarray")
                 return None
         try:
             if isinstance(col_vals, ABCCategorical):
                 if col_vals.isna().any():
-                    if DEBUG: print(f"[FAST_PATH] return None: key {key} Categorical has NA")
                     return None
             elif np.any(isna(col_vals)):
-                if DEBUG: print(f"[FAST_PATH] return None: key {key} has NA")
                 return None
         except (TypeError, ValueError):
-            if DEBUG: print(f"[FAST_PATH] return None: key {key} isna raised exception")
             return None
 
     for v in values_list:
         val_arr = data[v]._values
         if isinstance(val_arr, ABCExtensionArray):
-            if DEBUG: print(f"[FAST_PATH] return None: value {v} is ExtensionArray")
             return None
         if not np.issubdtype(val_arr.dtype, np.number):
-            if DEBUG: print(f"[FAST_PATH] return None: value {v} not numeric")
             return None
         try:
             if np.any(isna(val_arr)):
-                if DEBUG: print(f"[FAST_PATH] return None: value {v} has NA")
                 return None
         except (TypeError, ValueError):
-            if DEBUG: print(f"[FAST_PATH] return None: value {v} isna raised exception")
             return None
 
-    if DEBUG: print("[FAST_PATH] All checks passed, proceeding with fast path")
     n_rows = len(data)
     idx_codes_list = []
     idx_uniques_list = []
@@ -582,9 +551,16 @@ def _try_fast_pivot_table(
                     else:
                         agg_result = agg_result.astype(np.int64)
                 else:
+                    val_f64 = val_arr.astype(np.float64, copy=False)
                     agg_result = np.bincount(
-                        flat_codes, weights=val_arr.astype(np.float64, copy=False), minlength=n_groups
+                        flat_codes, weights=val_f64, minlength=n_groups
                     )
+                    count_result = np.bincount(flat_codes, minlength=n_groups)
+                    has_missing = count_result.min() == 0
+                    if has_missing and fill_value is None:
+                        agg_result[count_result == 0] = np.nan
+                    elif has_missing and fill_value is not None:
+                        agg_result[count_result == 0] = fill_value
             elif aggfunc == "count":
                 agg_result = np.bincount(flat_codes, minlength=n_groups).astype(np.float64)
                 agg_result[agg_result == 0] = np.nan
@@ -1023,6 +999,12 @@ def _try_fast_pivot_table_multi_agg(
                 else:
                     agg_result = np.zeros(n_groups, dtype=np.float64)
                     np.add.at(agg_result, flat_codes, val_arr.astype(np.float64, copy=False))
+                    count_result = np.bincount(flat_codes, minlength=n_groups)
+                    has_missing = count_result.min() == 0
+                    if has_missing and fill_value is None:
+                        agg_result[count_result == 0] = np.nan
+                    elif has_missing and fill_value is not None:
+                        agg_result[count_result == 0] = fill_value
             elif func == "count":
                 agg_result = np.bincount(flat_codes, minlength=n_groups).astype(np.float64)
                 agg_result[agg_result == 0] = np.nan

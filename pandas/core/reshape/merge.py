@@ -3148,7 +3148,7 @@ def _factorize_keys(
     elif (
         isinstance(lk.dtype, CategoricalDtype)
         and isinstance(rk.dtype, CategoricalDtype)
-        and lk.dtype.ordered == rk.dtype.ordered
+        and (lk.dtype == rk.dtype or (IS_ARM and lk.dtype.ordered == rk.dtype.ordered))
     ):
         assert isinstance(lk, Categorical)
         assert isinstance(rk, Categorical)
@@ -3255,11 +3255,6 @@ def _factorize_keys(
 
     if IS_ARM:
         uses_mask = isinstance(rk, (BaseMaskedArray, ArrowExtensionArray))
-
-        rizer = klass(
-            max(len(lk), len(rk)),
-            uses_mask=isinstance(rk, (BaseMaskedArray, ArrowExtensionArray)),
-        )
 
         if isinstance(lk, BaseMaskedArray):
             assert isinstance(rk, BaseMaskedArray)

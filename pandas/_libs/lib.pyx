@@ -3421,7 +3421,13 @@ def fast_bool_index_objarray(ndarray[object, ndim=1] data, ndarray[uint8_t, ndim
         uint8_t *mask_ptr
         PyObject **result_ptr
         ndarray[object, ndim=1] result
-    
+
+    if not cnp.PyArray_ISCONTIGUOUS(data) or not cnp.PyArray_ISCONTIGUOUS(mask):
+        return data[mask.view(np.bool_)]
+
+    if data.shape[0] != mask.shape[0]:
+        return data[mask.view(np.bool_)]
+
     count = np.count_nonzero(mask)
     result = np.empty(count, dtype=object)
     
@@ -3520,28 +3526,34 @@ def fast_bool_mask_indexer(ndarray data, ndarray mask):
         Py_ssize_t n = data.shape[0]
         Py_ssize_t count = 0
         Py_ssize_t i
-        cnp.uint8_t* m = <cnp.uint8_t*>mask.data
+        cnp.uint8_t* m
         ndarray result
 
-    if not cnp.PyArray_ISCONTIGUOUS(data):
+    if not cnp.PyArray_ISCONTIGUOUS(data) or not cnp.PyArray_ISCONTIGUOUS(mask):
         return data[mask]
+
+    if data.shape[0] != mask.shape[0]:
+        return data[mask]
+
+    m = <cnp.uint8_t*>mask.data
 
     for i in range(n):
         count += m[i]
 
-    result = np.empty(count, dtype=data.dtype)
-
     if data.dtype.num == cnp.NPY_INT64:
+        result = np.empty(count, dtype=data.dtype)
         _copy_masked_numeric[cnp.int64_t](
             <cnp.int64_t*>data.data,
             <cnp.int64_t*>result.data,
             m, n)
     elif data.dtype.num == cnp.NPY_FLOAT64:
+        result = np.empty(count, dtype=data.dtype)
         _copy_masked_numeric[cnp.float64_t](
             <cnp.float64_t*>data.data,
             <cnp.float64_t*>result.data,
             m, n)
     elif data.dtype.num == cnp.NPY_OBJECT:
+        result = np.empty(count, dtype=data.dtype)
         _copy_masked_object(
             <PyObject**>data.data,
             <PyObject**>result.data,

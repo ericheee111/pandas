@@ -47,6 +47,17 @@ def roll_std_fixed_no_nan(
     minp: int,  # int64_t
     ddof: int,  # int
 ) -> np.ndarray: ...  # np.ndarray[float]
+def roll_mean_fixed_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_std_fixed_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+    ddof: int,  # int
+) -> np.ndarray: ...  # np.ndarray[float]
 def roll_skew(
     values: np.ndarray,  # np.ndarray[np.float64]
     start: np.ndarray,  # np.ndarray[np.int64]

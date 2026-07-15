@@ -5399,10 +5399,10 @@ class Index(IndexOpsMixin, PandasObject):
             and key.ndim != 0
             and isinstance(self._data, np.ndarray)
         ):
-            if len(key) == 0 and len(key) != len(self):
+            if len(key) != len(self):
                 raise ValueError(
-                    "The length of the boolean indexer cannot be 0 "
-                    "when the Index has length greater than 0."
+                    "The length of the boolean indexer does not match "
+                    "the length of the Index."
                 )
             if self._data.dtype == object:
                 result = lib.fast_bool_index_objarray(self._data, key.view(np.uint8))
@@ -5434,14 +5434,10 @@ class Index(IndexOpsMixin, PandasObject):
         # Fast path for boolean Series indexing
         if IS_ARM and isinstance(key, ABCSeries) and key.dtype == np.bool_:
             mask = key._values
-            if (
-                len(mask) == 0
-                and len(mask) != len(self)
-                and not isinstance(self.dtype, ExtensionDtype)
-            ):
+            if len(mask) != len(self):
                 raise ValueError(
-                    "The length of the boolean indexer cannot be 0 "
-                    "when the Index has length greater than 0."
+                    "The length of the boolean indexer does not match "
+                    "the length of the Index."
                 )
             if isinstance(self._data, np.ndarray):
                 result = lib.fast_bool_mask_indexer(self._data, mask)
