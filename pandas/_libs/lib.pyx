@@ -3039,6 +3039,85 @@ def map_infer_mask(
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
+def map_contains_regex(
+    ndarray arr,
+    object pat,
+    const uint8_t[:] mask,
+    *,
+    object na_value=False,
+) -> ndarray:
+    """
+    Specialized map for ``str.contains(pat, regex=True)``.
+
+    Calls ``pat.search(val)`` directly as a built-in method, avoiding
+    Python lambda frame creation overhead that ``map_infer_mask`` incurs.
+    """
+    cdef:
+        Py_ssize_t i
+        Py_ssize_t n = len(arr)
+        object val
+        object search = pat.search
+
+        ndarray result = np.empty(n, dtype=np.dtype(bool))
+
+        flatiter arr_it = PyArray_IterNew(arr)
+        flatiter result_it = PyArray_IterNew(result)
+
+    for i in range(n):
+        if mask[i]:
+            val = na_value
+        else:
+            val = PyArray_GETITEM(arr, PyArray_ITER_DATA(arr_it))
+            val = search(val) is not None
+
+        PyArray_SETITEM(result, PyArray_ITER_DATA(result_it), val)
+        PyArray_ITER_NEXT(arr_it)
+        PyArray_ITER_NEXT(result_it)
+
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def map_contains(
+    ndarray arr,
+    object pat,
+    const uint8_t[:] mask,
+    *,
+    object na_value=False,
+) -> ndarray:
+    """
+    Specialized map for ``str.contains(pat, regex=False, case=True)``.
+
+    Evaluates ``pat in val`` directly via the CPython C API, avoiding
+    Python lambda frame creation overhead that ``map_infer_mask`` incurs.
+    """
+    cdef:
+        Py_ssize_t i
+        Py_ssize_t n = len(arr)
+        object val
+
+        ndarray result = np.empty(n, dtype=np.dtype(bool))
+
+        flatiter arr_it = PyArray_IterNew(arr)
+        flatiter result_it = PyArray_IterNew(result)
+
+    for i in range(n):
+        if mask[i]:
+            val = na_value
+        else:
+            val = PyArray_GETITEM(arr, PyArray_ITER_DATA(arr_it))
+            val = pat in val
+
+        PyArray_SETITEM(result, PyArray_ITER_DATA(result_it), val)
+        PyArray_ITER_NEXT(arr_it)
+        PyArray_ITER_NEXT(result_it)
+
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
 def map_infer(
     ndarray arr, object f, *, bint convert=True, bint ignore_na=False
 ) -> "ArrayLike":
