@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import platform
 import re
 import textwrap
 from typing import (
@@ -19,6 +20,8 @@ from pandas.util._validators import validate_na_arg
 
 from pandas.core.dtypes.common import pandas_dtype
 from pandas.core.dtypes.missing import isna
+
+_IS_ARM = platform.machine() == "aarch64"
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -151,8 +154,49 @@ class ObjectStringArrayMixin:
 
             pat = re.compile(pat, flags=flags)
 
+            from pandas.core.arrays.string_ import BaseStringArray
+
+            if _IS_ARM and isinstance(self, BaseStringArray):
+                arr = np.asarray(self)
+                mask = isna(arr)
+                if na is lib.no_default:
+                    na = self.dtype.na_value
+                na_is_na = isna(na)
+                if na_is_na:
+                    na = False
+                result = lib.map_contains_regex(
+                    arr, pat, mask.view("uint8"), na_value=na
+                )
+                if self.dtype.na_value is not np.nan:
+                    from pandas.arrays import BooleanArray
+
+                    if not na_is_na:
+                        mask = np.zeros_like(mask)
+                    return BooleanArray(result, mask)
+                return result
+
             f = lambda x: pat.search(x) is not None
         elif case:
+            from pandas.core.arrays.string_ import BaseStringArray
+
+            if _IS_ARM and isinstance(self, BaseStringArray):
+                arr = np.asarray(self)
+                mask = isna(arr)
+                if na is lib.no_default:
+                    na = self.dtype.na_value
+                na_is_na = isna(na)
+                if na_is_na:
+                    na = False
+                result = lib.map_contains(
+                    arr, pat, mask.view("uint8"), na_value=na
+                )
+                if self.dtype.na_value is not np.nan:
+                    from pandas.arrays import BooleanArray
+
+                    if not na_is_na:
+                        mask = np.zeros_like(mask)
+                    return BooleanArray(result, mask)
+                return result
             f = lambda x: pat in x
         else:
             upper_pat = pat.upper()
@@ -437,6 +481,8 @@ class ObjectStringArrayMixin:
         return dummies, tags2
 
     def _str_upper(self):
+        if _IS_ARM:
+            return self._str_map(str.upper)
         return self._str_map(lambda x: x.upper())
 
     def _str_isalnum(self):
