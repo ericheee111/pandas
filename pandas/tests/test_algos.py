@@ -52,6 +52,18 @@ import pandas.core.common as com
 
 
 class TestFactorize:
+    def test_unique_large_array_uses_legacy_hashtable(self, monkeypatch):
+        class FailSwissTable:
+            def __init__(self, *args, **kwargs):
+                pytest.fail("large low-cardinality unique regresses with SwissTable")
+
+        monkeypatch.setitem(algos._swisstables, "float64", FailSwissTable)
+        values = np.zeros(1_000_001, dtype=np.float64)
+
+        result = algos.unique(values)
+
+        tm.assert_numpy_array_equal(result, np.array([0.0]))
+
     def test_factorize_array_mask_uses_legacy_hashtable(self, monkeypatch):
         class FailSwissTable:
             def __init__(self, *args, **kwargs):
