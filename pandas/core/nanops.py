@@ -625,7 +625,7 @@ def nansum(
     >>> from pandas.core import nanops
     >>> s = pd.Series([1, 2, np.nan])
     >>> nanops.nansum(s.values)
-        np.float64(3.0)
+    np.float64(3.0)
     """
     dtype = values.dtype
 

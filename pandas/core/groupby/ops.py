@@ -438,6 +438,7 @@ class WrappedCythonOp:
             and dtype == np.dtype(np.float64)
             and mask is None
             and result_mask is None
+            and min_count <= 0
             and kwargs.get("skipna", True)
             and not is_datetimelike
             and ngroups > 0

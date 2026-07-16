@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import platform
 from typing import (
     TYPE_CHECKING,
     Concatenate,
@@ -15,8 +14,6 @@ from typing import (
 import warnings
 
 import numpy as np
-
-_IS_ARM = platform.machine() == "aarch64"
 
 from pandas._libs import lib
 from pandas._libs.tslibs import (
@@ -145,11 +142,7 @@ class Resampler(BaseGroupBy, PandasObject):
     _timegrouper: TimeGrouper
     binner: DatetimeIndex | TimedeltaIndex | PeriodIndex  # depends on subclass
     exclusions: frozenset[Hashable] = frozenset()  # for SelectionMixin compat
-    _internal_names_set = (
-        {"obj", "ax", "_indexer", "_cache", "__setstate__"}
-        if _IS_ARM
-        else set({"obj", "ax", "_indexer"})
-    )
+    _internal_names_set = {"obj", "ax", "_indexer", "_cache", "__setstate__"}
 
     # to the groupby descriptor
     _attributes = [
