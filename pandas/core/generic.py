@@ -6533,8 +6533,35 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
             ):
                 return self.copy(deep=False)
             # GH 18099/22869: columnwise conversion to extension dtype
-            # GH 24704: self.items handles duplicate column names
-            results = [ser.astype(dtype, errors=errors) for _, ser in self.items()]
+            # Build directly from the converted arrays.  Going through Series
+            # objects and concat adds substantial per-column overhead and is
+            # unnecessary because the arrays already share our index.
+            from pandas.core.dtypes.astype import astype_array_safe, astype_is_view
+            from pandas.core.internals.managers import (
+                create_block_manager_from_column_arrays,
+            )
+
+            arrays = []
+            refs = []
+            for i in range(len(self.columns)):
+                block = self._mgr.blocks[self._mgr.blknos[i]]
+                values = block.iget(self._mgr.blklocs[i])
+                new_values = astype_array_safe(values, dtype, errors=errors)
+                arrays.append(new_values)
+                refs.append(
+                    block.refs
+                    if astype_is_view(values.dtype, new_values.dtype)
+                    else None
+                )
+
+            new_data = create_block_manager_from_column_arrays(
+                arrays,
+                [self.columns, self.index],
+                consolidate=False,
+                refs=refs,
+            )
+            result = self._constructor_from_mgr(new_data, axes=new_data.axes)
+            return result.__finalize__(self, method="astype")
 
         else:
             # else, only a single dtype is given
