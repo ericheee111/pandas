@@ -623,9 +623,13 @@ cdef class {{name}}HashTable(HashTable):
 
         return np.asarray(locs)
 
-    @cython.boundscheck(False)
+{{py:
+unique_method_name = "_unique"
+emit_adjacent = False
+}}
+{{def unique_impl}}    @cython.boundscheck(False)
     @cython.wraparound(False)
-    def _unique(self, const {{dtype}}_t[:] values, {{name}}Vector uniques,
+    def {{unique_method_name}}(self, const {{dtype}}_t[:] values, {{name}}Vector uniques,
                 Py_ssize_t count_prior=0, Py_ssize_t na_sentinel=-1,
                 object na_value=None, bint ignore_na=False,
                 object mask=None, bint return_inverse=False, bint use_result_mask=False):
@@ -749,6 +753,14 @@ cdef class {{name}}HashTable(HashTable):
                         append_data_uint8(rmd, 1)
                         continue
 
+                {{if dtype == 'float64' and emit_adjacent}}
+                if i > 0 and (not use_mask or not mask_values[i - 1]):
+                    if are_equivalent_float64_t(val, values[i - 1]):
+                        if return_inverse:
+                            labels[i] = labels[i - 1]
+                        continue
+                {{endif}}
+
                 k = kh_get_{{dtype}}(self.table, val)
 
                 if k == self.table.n_buckets:
@@ -781,12 +793,31 @@ cdef class {{name}}HashTable(HashTable):
                     # only relevant in case we need to construct the inverse
                     idx = self.table.vals[k]
                     labels[i] = idx
-
         if return_inverse:
             return uniques.to_array(), labels.base  # .base -> underlying ndarray
         if use_result_mask:
             return uniques.to_array(), result_mask.to_array()
         return uniques.to_array()
+{{enddef}}
+
+    {{if dtype == 'float64'}}
+    {{py:
+unique_method_name = "_unique"
+emit_adjacent = False
+    }}
+{{unique_impl()}}
+    {{py:
+unique_method_name = "_unique_boostkit"
+emit_adjacent = True
+    }}
+{{unique_impl()}}
+    {{else}}
+    {{py:
+unique_method_name = "_unique"
+emit_adjacent = False
+    }}
+{{unique_impl()}}
+    {{endif}}
 
     def unique(self, const {{dtype}}_t[:] values, *, bint return_inverse=False, object mask=None):
         """
@@ -814,6 +845,14 @@ cdef class {{name}}HashTable(HashTable):
         """
         uniques = {{name}}Vector()
         use_result_mask = True if mask is not None else False
+        {{if dtype == 'float64'}}
+        if _use_boostkit_fastpaths:
+            return self._unique_boostkit(
+                values, uniques, ignore_na=False,
+                return_inverse=return_inverse, mask=mask,
+                use_result_mask=use_result_mask
+            )
+        {{endif}}
         return self._unique(values, uniques, ignore_na=False,
                             return_inverse=return_inverse, mask=mask, use_result_mask=use_result_mask)
 
@@ -849,6 +888,14 @@ cdef class {{name}}HashTable(HashTable):
             The labels from values to uniques
         """
         uniques_vector = {{name}}Vector()
+        {{if dtype == 'float64'}}
+        if _use_boostkit_fastpaths:
+            return self._unique_boostkit(
+                values, uniques_vector, na_sentinel=na_sentinel,
+                na_value=na_value, ignore_na=ignore_na, mask=mask,
+                return_inverse=True
+            )
+        {{endif}}
         return self._unique(values, uniques_vector, na_sentinel=na_sentinel,
                             na_value=na_value, ignore_na=ignore_na, mask=mask,
                             return_inverse=True)
@@ -857,6 +904,15 @@ cdef class {{name}}HashTable(HashTable):
                    Py_ssize_t count_prior=0, Py_ssize_t na_sentinel=-1,
                    object na_value=None, object mask=None):
         # -> np.ndarray[np.intp]
+        {{if dtype == 'float64'}}
+        if _use_boostkit_fastpaths:
+            _, labels = self._unique_boostkit(
+                values, uniques, count_prior=count_prior,
+                na_sentinel=na_sentinel, na_value=na_value,
+                ignore_na=True, return_inverse=True, mask=mask
+            )
+            return labels
+        {{endif}}
         _, labels = self._unique(values, uniques, count_prior=count_prior,
                                  na_sentinel=na_sentinel, na_value=na_value,
                                  ignore_na=True, return_inverse=True, mask=mask)
