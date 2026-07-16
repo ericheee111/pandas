@@ -731,8 +731,14 @@ class BaseBlockManager(PandasObject):
         # TODO: Should deep=True be respected for axes?
         new_axes = [ax.view() for ax in self.axes]
 
-        res = self.apply("copy", deep=deep)
-        res.axes = new_axes
+        if not deep and self.ndim > 1:
+            # The generic apply machinery is unnecessary for a shallow copy:
+            # every block is retained in the same position and shape.
+            blocks = tuple(blk.copy(deep=False) for blk in self.blocks)
+            res = type(self).from_blocks(blocks, new_axes)
+        else:
+            res = self.apply("copy", deep=deep)
+            res.axes = new_axes
 
         if self.ndim > 1:
             # Avoid needing to re-compute these
