@@ -103,15 +103,21 @@ def concatenate_managers(
                     )
                     return BlockManager((nb,), axes)
     else:
-        if len(mgrs_indexers) > 0 and mgrs_indexers[0][0].nblocks > 0:
+        if len(mgrs_indexers) > 1 and mgrs_indexers[0][0].nblocks > 0:
             first_dtype = mgrs_indexers[0][0].blocks[0].dtype
             if first_dtype in [np.float64, np.float32]:
-                if (
-                    all(_is_homogeneous_mgr(mgr, first_dtype) for mgr, _ in mgrs_indexers)
-                    and len(mgrs_indexers) > 1
+                if all(
+                    _is_homogeneous_mgr(mgr, first_dtype) for mgr, _ in mgrs_indexers
                 ):
+                    has_any_indexers = any(
+                        indexers for _, indexers in mgrs_indexers
+                    )
                     shape = tuple(len(x) for x in axes)
-                    nb = _concat_homogeneous_fastpath(mgrs_indexers, shape, first_dtype)
+                    nb = _concat_homogeneous_fastpath(
+                        mgrs_indexers, shape, fi
+                        
+                        rst_dtype, has_any_indexers
+                    )
                     return BlockManager((nb,), axes)
 
     mgrs = _maybe_reindex_columns_na_proxy(axes, mgrs_indexers, needs_copy)
