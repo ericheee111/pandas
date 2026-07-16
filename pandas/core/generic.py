@@ -6565,6 +6565,13 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
 
         else:
             # else, only a single dtype is given
+            if isinstance(dtype, type) and issubclass(dtype, ExtensionDtype):
+                raise TypeError(
+                    f"Expected an instance of {dtype.__name__}, "
+                    "but got the class instead. Try instantiating 'dtype'."
+                )
+
+            dtype = pandas_dtype(dtype)
             new_data = self._mgr.astype(dtype=dtype, errors=errors)
             res = self._constructor_from_mgr(new_data, axes=new_data.axes)
             return res.__finalize__(self, method="astype")
