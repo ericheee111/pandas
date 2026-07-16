@@ -249,13 +249,14 @@ def pivot_table(
     index = _convert_by(index)
     columns = _convert_by(columns)
 
-    if IS_ARM and isinstance(aggfunc, list):
-        fast_result = _try_fast_pivot_table_multi_agg(
-            data, values, index, columns, aggfunc, fill_value, margins,
-            dropna, margins_name, observed, sort, kwargs,
-        )
-        if fast_result is not None:
-            return fast_result.__finalize__(data, method="pivot_table")
+    if isinstance(aggfunc, list):
+        if IS_ARM:
+            fast_result = _try_fast_pivot_table_multi_agg(
+                data, values, index, columns, aggfunc, fill_value, margins,
+                dropna, margins_name, observed, sort, kwargs,
+            )
+            if fast_result is not None:
+                return fast_result.__finalize__(data, method="pivot_table")
 
         pieces: list[DataFrame] = []
         keys = []
