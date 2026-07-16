@@ -16,10 +16,54 @@ from pandas import (
     to_datetime,
 )
 import pandas._testing as tm
+from pandas.core.internals import BlockManager
 from pandas.tests.frame.common import _check_mixed_float
 
 
 class TestFillNA:
+    @pytest.mark.parametrize("dtype", ["float64", "float32", "object"])
+    @pytest.mark.parametrize("inplace", [False, True])
+    def test_fillna_complete_dict_homogeneous_uses_manager_once(
+        self, monkeypatch, dtype, inplace
+    ):
+        df = DataFrame(
+            [[np.nan, 2.0], [3.0, np.nan], [np.nan, np.nan]],
+            columns=["a", "b"],
+            dtype=dtype,
+        )
+        original = BlockManager.fillna
+        calls = 0
+
+        def wrapped(self, value, limit, inplace):
+            nonlocal calls
+            calls += 1
+            return original(self, value=value, limit=limit, inplace=inplace)
+
+        monkeypatch.setattr(BlockManager, "fillna", wrapped)
+        result = df.fillna({"a": 10.0, "b": 20.0}, inplace=inplace)
+
+        assert calls == 1
+        expected = DataFrame(
+            [[10.0, 2.0], [3.0, 20.0], [10.0, 20.0]],
+            columns=["a", "b"],
+            dtype=dtype,
+        )
+        if inplace:
+            assert result is df
+            result = df
+        tm.assert_frame_equal(result, expected)
+
+    def test_fillna_partial_dict_does_not_use_manager_batch(self, monkeypatch):
+        df = DataFrame({"a": [np.nan, 1.0], "b": [np.nan, 2.0]})
+
+        def fail_if_called(*args, **kwargs):
+            pytest.fail("partial dictionaries must use per-column fillna")
+
+        monkeypatch.setattr(BlockManager, "fillna", fail_if_called)
+        result = df.fillna({"a": 10.0})
+        expected = DataFrame({"a": [10.0, 1.0], "b": [np.nan, 2.0]})
+        tm.assert_frame_equal(result, expected)
+
     def test_fillna_dict_inplace_nonunique_columns(self):
         df = DataFrame(
             {"A": [np.nan] * 3, "B": [NaT, Timestamp(1), NaT], "C": [np.nan, "foo", 2]}
