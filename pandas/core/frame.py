@@ -7789,15 +7789,30 @@ class DataFrame(NDFrame, OpsMixin):
                 raise KeyError(np.array(subset)[check].tolist())
             agg_obj = self.take(indices, axis=agg_axis)
 
+        nancount = (
+            agg_obj._nancount_float_block(agg_axis)
+            if subset is None and agg_axis == 0
+            else None
+        )
         if thresh is not lib.no_default:
-            count = agg_obj.count(axis=agg_axis)
+            count = (
+                agg_obj.count(axis=agg_axis) if nancount is None else nancount
+            )
             mask = count >= thresh
         elif how == "any":
             # faster equivalent to 'agg_obj.count(agg_axis) == self.shape[agg_axis]'
-            mask = notna(agg_obj).all(axis=agg_axis, bool_only=False)
+            mask = (
+                notna(agg_obj).all(axis=agg_axis, bool_only=False)
+                if nancount is None
+                else nancount == agg_obj.shape[agg_axis]
+            )
         elif how == "all":
             # faster equivalent to 'agg_obj.count(agg_axis) > 0'
-            mask = notna(agg_obj).any(axis=agg_axis, bool_only=False)
+            mask = (
+                notna(agg_obj).any(axis=agg_axis, bool_only=False)
+                if nancount is None
+                else nancount > 0
+            )
         else:
             raise ValueError(f"invalid how option: {how}")
 
@@ -13437,6 +13452,21 @@ class DataFrame(NDFrame, OpsMixin):
     # ----------------------------------------------------------------------
     # ndarray-like stats methods
 
+    def _nancount_float_block(self, axis: AxisInt) -> np.ndarray | None:
+        """Count non-NA values in a homogeneous NumPy float block."""
+        if len(self._mgr.blocks) != 1:
+            return None
+
+        values = self._mgr.blocks[0].values
+        if (
+            not isinstance(values, np.ndarray)
+            or values.ndim != 2
+            or values.dtype not in (np.dtype("float32"), np.dtype("float64"))
+        ):
+            return None
+
+        return libalgos.nancount_2d(values, axis)
+
     def count(self, axis: Axis = 0, numeric_only: bool = False) -> Series:
         """
         Count non-NA cells for each column or row.
@@ -13512,6 +13542,10 @@ class DataFrame(NDFrame, OpsMixin):
         # GH #423
         if len(frame._get_axis(axis)) == 0:
             result = self._constructor_sliced(0, index=frame._get_agg_axis(axis))
+        elif (counts := frame._nancount_float_block(axis)) is not None:
+            result = frame._constructor_sliced(
+                counts, index=frame._get_agg_axis(axis), copy=False
+            )
         else:
             result = notna(frame).sum(axis=axis)
 

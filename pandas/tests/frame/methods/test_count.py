@@ -1,3 +1,8 @@
+import numpy as np
+import pytest
+
+from pandas._libs import algos
+
 from pandas import (
     DataFrame,
     Series,
@@ -37,3 +42,31 @@ class TestDataFrameCount:
 
         tm.assert_series_equal(dm.count(), df.count())
         tm.assert_series_equal(dm.count(1), df.count(1))
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+def test_count_float_block_uses_nancount(monkeypatch, axis):
+    df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
+    original = algos.nancount_2d
+    called = False
+
+    def wrapped(values, op_axis):
+        nonlocal called
+        called = True
+        return original(values, op_axis)
+
+    monkeypatch.setattr(algos, "nancount_2d", wrapped)
+    result = df.count(axis=axis)
+    assert called
+    expected = Series([1, 1], index=df._get_agg_axis(axis), dtype="int64")
+    tm.assert_series_equal(result, expected)
+
+
+def test_count_nullable_float_does_not_use_nancount(monkeypatch):
+    df = DataFrame({"a": Series([1, None], dtype="Float64")})
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("nancount_2d must not receive an ExtensionBlock")
+
+    monkeypatch.setattr(algos, "nancount_2d", fail_if_called)
+    tm.assert_series_equal(df.count(), Series([1], index=["a"]))
