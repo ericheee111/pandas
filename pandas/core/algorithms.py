@@ -1183,7 +1183,7 @@ def value_counts_arraylike(
         and len(values) > 0
     ):
         frac, _ = np.modf(values)
-        if not frac.any():
+        if not frac.any() and np.isfinite(values).all():
             with np.errstate(invalid="ignore"):
                 int_values = values.astype(np.int64)
             vmin = int_values.min()
