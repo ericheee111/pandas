@@ -62,6 +62,32 @@ cdef:
     int64_t NPY_NAT = get_nat()
 
 
+ctypedef fused nancount_float_t:
+    float32_t
+    float64_t
+
+
+def nancount_2d(const nancount_float_t[:, :] values, int axis):
+    cdef:
+        Py_ssize_t i, j
+        ndarray[intp_t] out
+
+    if axis == 0:
+        out = np.zeros(values.shape[0], dtype=np.intp)
+        for i in range(values.shape[0]):
+            for j in range(values.shape[1]):
+                out[i] += values[i, j] == values[i, j]
+    elif axis == 1:
+        out = np.zeros(values.shape[1], dtype=np.intp)
+        for i in range(values.shape[0]):
+            for j in range(values.shape[1]):
+                out[j] += values[i, j] == values[i, j]
+    else:
+        raise ValueError("axis must be 0 or 1")
+
+    return out
+
+
 tiebreakers = {
     "average": TIEBREAK_AVERAGE,
     "min": TIEBREAK_MIN,

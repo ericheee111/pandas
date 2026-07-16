@@ -2,6 +2,7 @@ from datetime import datetime
 from itertools import permutations
 
 import numpy as np
+import pytest
 
 from pandas._libs import algos as libalgos
 
@@ -160,3 +161,24 @@ class TestInfinity:
         assert not NegInf <= np.nan
         assert not NegInf == np.nan
         assert NegInf != np.nan
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("axis", [0, 1])
+def test_nancount_2d(dtype, axis):
+    values = np.array([[1.0, np.nan, 3.0], [np.nan, 2.0, 4.0]], dtype=dtype)
+    result = libalgos.nancount_2d(values, axis)
+    expected = np.count_nonzero(~np.isnan(values), axis=1 if axis == 0 else 0)
+    tm.assert_numpy_array_equal(result, expected.astype(np.intp))
+
+
+def test_nancount_2d_rejects_bad_axis():
+    values = np.ones((2, 2), dtype=np.float64)
+    with pytest.raises(ValueError, match="axis must be 0 or 1"):
+        libalgos.nancount_2d(values, 2)
+
+
+def test_nancount_2d_rejects_integer_dtype():
+    values = np.ones((2, 2), dtype=np.int64)
+    with pytest.raises(TypeError):
+        libalgos.nancount_2d(values, 0)

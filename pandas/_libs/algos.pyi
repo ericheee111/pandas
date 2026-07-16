@@ -36,6 +36,10 @@ def kth_smallest(
     k: int,
 ) -> Any: ...  # numeric
 
+def nancount_2d(
+    values: np.ndarray, axis: int
+) -> npt.NDArray[np.intp]: ...
+
 # ----------------------------------------------------------------------
 # Pairwise correlation/covariance
 
