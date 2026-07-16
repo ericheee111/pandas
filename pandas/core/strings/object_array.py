@@ -156,7 +156,7 @@ class ObjectStringArrayMixin:
 
             from pandas.core.arrays.string_ import BaseStringArray
 
-            if _IS_ARM and isinstance(self, BaseStringArray):
+            if _IS_ARM and isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
                 arr = np.asarray(self)
                 mask = isna(arr)
                 if na is lib.no_default:
@@ -179,7 +179,7 @@ class ObjectStringArrayMixin:
         elif case:
             from pandas.core.arrays.string_ import BaseStringArray
 
-            if _IS_ARM and isinstance(self, BaseStringArray):
+            if _IS_ARM and isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
                 arr = np.asarray(self)
                 mask = isna(arr)
                 if na is lib.no_default:
