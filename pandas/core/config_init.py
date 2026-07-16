@@ -77,12 +77,12 @@ def use_numba_cb(key: str) -> None:
 use_swisstable_doc = """
 : bool
     Use Swiss Tables (SIMD-accelerated hash tables) for supported hash table
-    operations. This is experimental. Default is True.
+    operations. This is experimental. Default is False.
     Valid values: False,True
 """
 
 
-_use_swisstable: bool = True
+_use_swisstable: bool = False
 
 
 def use_swisstable_cb(key: str) -> None:
@@ -110,7 +110,7 @@ with cf.config_prefix("compute"):
     )
     cf.register_option(
         "use_swisstable",
-        True,
+        False,
         use_swisstable_doc,
         validator=is_bool,
         cb=use_swisstable_cb,

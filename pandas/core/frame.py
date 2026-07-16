@@ -4964,7 +4964,8 @@ class DataFrame(NDFrame, OpsMixin):
         value, refs = self._sanitize_column(value)
 
         if (
-            value.ndim == 1
+            key in self.columns
+            and value.ndim == 1
             and not isinstance(value.dtype, ExtensionDtype)
         ):
             if IS_ARM:
