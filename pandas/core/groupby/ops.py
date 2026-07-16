@@ -423,8 +423,9 @@ class WrappedCythonOp:
                 group_starts = np.searchsorted(comp_ids, np.arange(ngroups))
                 reduce_func = np.fmax if self.how == "max" else np.fmin
                 if values.ndim == 2:
-                    result = reduce_func.reduceat(values.T, group_starts, axis=0)
-                    return result.T
+                    rows_axis = 1 if values.shape[1] == len(comp_ids) else 0
+                    result = reduce_func.reduceat(values, group_starts, axis=rows_axis)
+                    return result if rows_axis == 1 else result.T
                 else:
                     return reduce_func.reduceat(values, group_starts)
 
@@ -450,25 +451,30 @@ class WrappedCythonOp:
                 group_sizes = np.diff(np.append(group_starts, len(comp_ids)))
                 if group_sizes.max() <= 1000:
                     if values.ndim == 2:
-                        arr = values.T
+                        rows_axis = 1 if values.shape[1] == len(comp_ids) else 0
+                        arr = values
                     else:
                         arr = values[:, np.newaxis]
+                        rows_axis = 0
                     nan_mask = np.isnan(arr)
                     if nan_mask.any():
                         clean = np.where(nan_mask, 0.0, arr)
-                        group_sum = np.add.reduceat(clean, group_starts, axis=0)
+                        group_sum = np.add.reduceat(clean, group_starts, axis=rows_axis)
                         non_nan = (~nan_mask).astype(np.float64)
-                        group_count = np.add.reduceat(non_nan, group_starts, axis=0)
+                        group_count = np.add.reduceat(non_nan, group_starts, axis=rows_axis)
                         result = np.divide(
                             group_sum, group_count,
                             out=np.full_like(group_sum, np.nan),
                             where=group_count > 0,
                         )
                     else:
-                        group_sum = np.add.reduceat(arr, group_starts, axis=0)
-                        result = group_sum / group_sizes[:, np.newaxis].astype(np.float64)
+                        group_sum = np.add.reduceat(arr, group_starts, axis=rows_axis)
+                        if rows_axis == 1:
+                            result = group_sum / group_sizes
+                        else:
+                            result = group_sum / group_sizes[:, np.newaxis].astype(np.float64)
                     if values.ndim == 2:
-                        return result.T
+                        return result if rows_axis == 1 else result.T
                     else:
                         return result[:, 0]
 
