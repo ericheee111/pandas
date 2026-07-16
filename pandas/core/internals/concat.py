@@ -114,9 +114,7 @@ def concatenate_managers(
                     )
                     shape = tuple(len(x) for x in axes)
                     nb = _concat_homogeneous_fastpath(
-                        mgrs_indexers, shape, fi
-                        
-                        rst_dtype, has_any_indexers
+                        mgrs_indexers, shape, first_dtype, has_any_indexers
                     )
                     return BlockManager((nb,), axes)
 
