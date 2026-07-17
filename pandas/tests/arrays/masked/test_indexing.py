@@ -83,6 +83,23 @@ def test_setitem_nan_in_float64_array(dtype, indexer, using_nan_is_na):
 @pytest.mark.parametrize(
     "dtype",
     [
+        "Float64",
+        pytest.param("float64[pyarrow]", marks=td.skip_if_no("pyarrow")),
+    ],
+)
+def test_where_scalar_preserves_missing(dtype):
+    arr = pd.array([1.0, pd.NA, 3.0], dtype=dtype)
+    mask = np.array([True, True, False])
+
+    result = arr._where(mask, 0.0)
+
+    expected = pd.array([1.0, pd.NA, 0.0], dtype=dtype)
+    pd.testing.assert_extension_array_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
         "Int64",
         pytest.param("int64[pyarrow]", marks=td.skip_if_no("pyarrow")),
     ],

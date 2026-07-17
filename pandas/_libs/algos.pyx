@@ -90,6 +90,21 @@ def nancount_2d(const nancount_float_t[:, :] values, int axis):
     return out
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def putmask_masked_float64(
+    float64_t[:] values,
+    cnp.npy_bool[:] validity,
+    const cnp.npy_bool[:] mask,
+    float64_t value,
+):
+    cdef Py_ssize_t i
+    for i in range(values.shape[0]):
+        if mask[i]:
+            values[i] = value
+            validity[i] = False
+
+
 tiebreakers = {
     "average": TIEBREAK_AVERAGE,
     "min": TIEBREAK_MIN,
