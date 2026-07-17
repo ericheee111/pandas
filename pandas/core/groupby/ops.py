@@ -423,6 +423,10 @@ class WrappedCythonOp:
                 group_starts = np.searchsorted(comp_ids, np.arange(ngroups))
                 reduce_func = np.fmax if self.how == "max" else np.fmin
                 if values.ndim == 2:
+                    # Block.values passes data in (cols, rows) layout, so rows
+                    # are along axis 1. len(comp_ids) == n_rows identifies the
+                    # rows axis. See ops.py:484 (values = values.T) and
+                    # blocks.py:347 (func(self.values)) for the layout proof.
                     rows_axis = 1 if values.shape[1] == len(comp_ids) else 0
                     result = reduce_func.reduceat(values, group_starts, axis=rows_axis)
                     return result if rows_axis == 1 else result.T
@@ -452,6 +456,9 @@ class WrappedCythonOp:
                 group_sizes = np.diff(np.append(group_starts, len(comp_ids)))
                 if group_sizes.max() <= 100:
                     if values.ndim == 2:
+                        # Block.values passes data in (cols, rows) layout,
+                        # so rows are along axis 1. See ops.py:484 and
+                        # blocks.py:347 for the layout proof.
                         rows_axis = 1 if values.shape[1] == len(comp_ids) else 0
                         arr = values
                     else:
