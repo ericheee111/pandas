@@ -448,10 +448,10 @@ def _try_fast_pivot_table(
     use_cython = False
     if margins and len(values_list) > 0 and aggfunc in ("sum", "mean", "count"):
         # Check if all value columns are numeric
-        all_numeric = all(
-            np.issubdtype(data[v]._values.dtype, np.number) for v in values_list
+        all_float = all(
+            np.issubdtype(data[v]._values.dtype, np.floating) for v in values_list
         )
-        if all_numeric:
+        if all_float:
             try:
                 from pandas._libs import pivot_fused
                 use_cython = True
@@ -495,26 +495,6 @@ def _try_fast_pivot_table(
             result_mat = result_3d[vi]
             row_margin = row_margins_2d[vi]
             col_margin = col_margins_2d[vi]
-            
-            # Preserve dtype for sum operations on integer data
-            if aggfunc == "sum":
-                orig_dtype = data[v]._values.dtype
-                if np.issubdtype(orig_dtype, np.integer):
-                    # Check if there are any NaN values in the result
-                    has_nan = np.any(np.isnan(result_mat))
-                    if has_nan and fill_value is None:
-                        # Keep as float64 because we need NaN
-                        pass
-                    elif has_nan and fill_value is not None:
-                        # Convert to int64 and fill NaN with fill_value
-                        result_mat = np.where(np.isnan(result_mat), fill_value, result_mat).astype(np.int64)
-                        row_margin = np.where(np.isnan(row_margin), fill_value, row_margin).astype(np.int64)
-                        col_margin = np.where(np.isnan(col_margin), fill_value, col_margin).astype(np.int64)
-                    else:
-                        # No NaN, convert to int64
-                        result_mat = result_mat.astype(np.int64)
-                        row_margin = row_margin.astype(np.int64)
-                        col_margin = col_margin.astype(np.int64)
             
             result_blocks[v] = result_mat
             # row_margins_2d has shape (n_values, n_row_total) - one value per row
