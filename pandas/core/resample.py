@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-import platform
+from pandas.compat import is_platform_arm
 from typing import (
     TYPE_CHECKING,
     Concatenate,
@@ -16,7 +16,7 @@ import warnings
 
 import numpy as np
 
-_IS_ARM = platform.machine() == "aarch64"
+_IS_ARM = is_platform_arm()
 
 from pandas._libs import lib
 from pandas._libs.tslibs import (

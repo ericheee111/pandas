@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import functools
-import platform
+from pandas.compat import is_platform_arm
 import re
 import textwrap
 from typing import (
@@ -21,7 +21,7 @@ from pandas.util._validators import validate_na_arg
 from pandas.core.dtypes.common import pandas_dtype
 from pandas.core.dtypes.missing import isna
 
-_IS_ARM = platform.machine() == "aarch64"
+_IS_ARM = is_platform_arm()
 
 if TYPE_CHECKING:
     from collections.abc import (

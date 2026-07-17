@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import collections
 import functools
-import platform
+from pandas.compat import is_platform_arm
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -20,7 +20,7 @@ from typing import (
 
 import numpy as np
 
-_IS_ARM = platform.machine() == "aarch64"
+_IS_ARM = is_platform_arm()
 
 from pandas._libs import (
     NaT,
@@ -455,6 +455,7 @@ class WrappedCythonOp:
                         rows_axis = 1 if values.shape[1] == len(comp_ids) else 0
                         arr = values
                     else:
+                        # unreachable: _cython_op_ndim_compat always passes 2D values
                         arr = values[:, np.newaxis]
                         rows_axis = 0
                     nan_mask = np.isnan(arr)
@@ -477,6 +478,7 @@ class WrappedCythonOp:
                     if values.ndim == 2:
                         return result if rows_axis == 1 else result.T
                     else:
+                        # unreachable: _cython_op_ndim_compat always passes 2D values
                         return result[:, 0]
 
         values = values.T

@@ -9,12 +9,12 @@ from typing import (
     NoReturn,
     cast,
 )
-import platform
+from pandas.compat import is_platform_arm
 import warnings
 
 import numpy as np
 
-_IS_ARM = platform.machine() == "aarch64"
+_IS_ARM = is_platform_arm()
 
 from pandas._libs import lib
 from pandas.errors import Pandas4Warning
@@ -63,12 +63,11 @@ class Properties(PandasDelegate, PandasObject, NoNewAttributesMixin):
     }
 
     def __init__(self, data: Series, orig) -> None:
-        if not _IS_ARM:
-            if not isinstance(data, ABCSeries):
-                raise TypeError(
-                    f"cannot convert an object of type {type(data)} "
-                    "to a datetimelike index"
-                )
+        if not isinstance(data, ABCSeries):
+            raise TypeError(
+                f"cannot convert an object of type {type(data)} "
+                "to a datetimelike index"
+            )
         self._parent = data
         self.orig = orig
         self.name = getattr(data, "name", None)
