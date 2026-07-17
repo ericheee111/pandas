@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import itertools
+from pandas.compat import is_platform_arm
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -10,6 +11,8 @@ from typing import (
 import warnings
 
 import numpy as np
+
+_IS_ARM = is_platform_arm()
 
 from pandas._config import get_option
 
@@ -625,6 +628,21 @@ def nansum(
     np.float64(3.0)
     """
     dtype = values.dtype
+
+    if _IS_ARM and skipna and mask is None and dtype.kind == "f":
+        dtype_sum = dtype
+        result = values.sum(axis=axis, dtype=dtype_sum)
+        if isinstance(result, np.ndarray):
+            if not np.isnan(result).any():
+                return _maybe_null_out(
+                    result, axis, None, values.shape, min_count=min_count
+                )
+        else:
+            if not np.isnan(result):
+                return _maybe_null_out(
+                    result, axis, None, values.shape, min_count=min_count
+                )
+
     values, mask = _get_values(values, skipna, fill_value=0, mask=mask)
     dtype_sum = _get_dtype_max(dtype)
     if dtype.kind == "f":
@@ -692,6 +710,16 @@ def nanmean(
         nanmean(values[:1000], axis=axis, skipna=skipna)
 
     dtype = values.dtype
+
+    if _IS_ARM and skipna and mask is None and dtype.kind == "f":
+        result = values.mean(axis=axis)
+        if isinstance(result, np.ndarray):
+            if not np.isnan(result).any():
+                return result
+        else:
+            if not np.isnan(result):
+                return result
+
     values, mask = _get_values(values, skipna, fill_value=0, mask=mask)
     dtype_sum = _get_dtype_max(dtype)
     dtype_count = np.dtype(np.float64)
