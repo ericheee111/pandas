@@ -396,6 +396,111 @@ cpdef factorize_float64_monotonic(const float64_t[::1] values):
     return labels, uniques[:count].copy()
 
 
+# ---------------------------------------------------------------------------
+# Dense-range int64 factorization fast path.
+#
+# When an int64 array's value span (max - min + 1) is small relative to its
+# length, factorization can be done with a single bitmap scan instead of
+# hash-table insertion.  This produces *sorted* uniques directly, so the
+# caller can skip ``safe_sort`` for ``sort=True``.
+#
+# Returns ``(codes: intp[n], uniques: int64[count])`` with uniques sorted
+# ascending, or ``None`` to fall back to the regular hashtable path.
+#
+# The thresholds below are conservative safety caps, not benchmark
+# parameters.  They are duplicated in ``algorithms.py`` only as the Python
+# pre-screen; the authoritative copy lives here (the Cython kernel is the
+# final arbiter and may still return ``None``).
+# ---------------------------------------------------------------------------
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cpdef factorize_int64_dense_range(const int64_t[::1] values):
+    # Conservative safety caps (see module docstring above).  These are
+    # *not* benchmark parameters: any int64 array that satisfies them
+    # benefits, regardless of its origin.
+    cdef Py_ssize_t min_len = 100_000
+    cdef uint64_t max_span = <uint64_t>1 << 20      # 1,048,576
+    cdef Py_ssize_t density_ratio = 8
+
+    cdef:
+        Py_ssize_t i, n = len(values)
+        Py_ssize_t offset, span_sz, count = 0
+        int64_t vmin, vmax, v
+        uint64_t umin, umax, span, uoff
+        ndarray[uint8_t] bitmap
+        ndarray[intp_t] codes
+        ndarray[int64_t] uniques
+        ndarray[intp_t] code_map
+        uint8_t[::1] bm
+        intp_t[::1] cd
+        intp_t[::1] cm
+        int64_t[::1] un
+
+    # Short inputs: leave to the hashtable (overhead not worthwhile).
+    if n < min_len:
+        return None
+
+    # --- Pass 1: min/max (nogil, pure int64 arithmetic) -----------------
+    vmin = values[0]
+    vmax = values[0]
+    with nogil:
+        for i in range(1, n):
+            v = values[i]
+            if v < vmin:
+                vmin = v
+            elif v > vmax:
+                vmax = v
+
+    # --- Span check (overflow-safe via unsigned arithmetic) -------------
+    # Cast to uint64 so that ``umax - umin`` never overflows int64.
+    umin = <uint64_t>vmin
+    umax = <uint64_t>vmax
+    span = umax - umin                       # safe: umax >= umin
+
+    if span > max_span:
+        return None
+    # Reject sparse ranges: span must be at most ``ratio * n``.
+    if span + 1 > <uint64_t>(n * density_ratio):
+        return None
+
+    # --- Allocation (GIL held) ------------------------------------------
+    span_sz = <Py_ssize_t>span + 1
+    bitmap = np.zeros((span_sz + 7) // 8, dtype=np.uint8)
+    codes = np.empty(n, dtype=np.intp)
+    uniques = np.empty(span_sz, dtype=np.int64)
+    code_map = np.empty(span_sz, dtype=np.intp)
+    bm = bitmap
+    cd = codes
+    un = uniques
+    cm = code_map
+
+    # --- Pass 2: mark bitmap + write tentative codes (nogil) ------------
+    with nogil:
+        for i in range(n):
+            v = values[i]
+            uoff = <uint64_t>v - umin        # safe: umin <= v <= umax
+            cd[i] = <intp_t>uoff             # tentative code == offset
+            bm[uoff >> 3] |= <uint8_t>(1 << (uoff & 7))
+
+    # --- Pass 3: bitmap scan → code_map + sorted uniques (nogil) --------
+    with nogil:
+        for offset in range(span_sz):
+            if bm[offset >> 3] & (<uint8_t>1 << (offset & 7)):
+                cm[offset] = count
+                un[count] = <int64_t>(umin + <uint64_t>offset)
+                count += 1
+            else:
+                cm[offset] = -1              # gap: value absent
+
+    # --- Pass 4: remap tentative codes (nogil) --------------------------
+    with nogil:
+        for i in range(n):
+            cd[i] = cm[cd[i]]
+
+    return codes, uniques[:count].copy()
+
+
 {{for dtype, c_type in [('float64', 'float64_t'), ('int64', 'int64_t')]}}
 
 @cython.wraparound(False)
