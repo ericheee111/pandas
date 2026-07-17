@@ -153,6 +153,38 @@ def factorize_bool_masked(
     )
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def nanvalidity_2d(
+    const nancount_float_t[:, :] values, int axis, bint all_valid
+):
+    """Reduce the non-NA mask without materializing it."""
+    cdef:
+        Py_ssize_t i, j
+        ndarray[cnp.npy_bool] out
+
+    if axis == 0:
+        out = np.empty(values.shape[0], dtype=np.bool_)
+        for i in range(values.shape[0]):
+            out[i] = all_valid
+            for j in range(values.shape[1]):
+                if (values[i, j] == values[i, j]) != all_valid:
+                    out[i] = not all_valid
+                    break
+    elif axis == 1:
+        out = np.empty(values.shape[1], dtype=np.bool_)
+        for j in range(values.shape[1]):
+            out[j] = all_valid
+            for i in range(values.shape[0]):
+                if (values[i, j] == values[i, j]) != all_valid:
+                    out[j] = not all_valid
+                    break
+    else:
+        raise ValueError("axis must be 0 or 1")
+
+    return out
+
+
 tiebreakers = {
     "average": TIEBREAK_AVERAGE,
     "min": TIEBREAK_MIN,

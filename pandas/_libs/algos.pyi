@@ -58,6 +58,12 @@ def factorize_bool_masked(
     use_na_sentinel: bool,
 ) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.bool_], npt.NDArray[np.bool_]]: ...
 
+def nanvalidity_2d(
+    values: np.ndarray,
+    axis: int,
+    all_valid: bool,
+) -> npt.NDArray[np.bool_]: ...
+
 # ----------------------------------------------------------------------
 # Pairwise correlation/covariance
 
