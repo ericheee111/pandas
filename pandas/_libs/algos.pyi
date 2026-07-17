@@ -52,6 +52,12 @@ def putmask_masked_float64(
     value: float,
 ) -> None: ...
 
+def factorize_bool_masked(
+    values: npt.NDArray[np.bool_],
+    mask: npt.NDArray[np.bool_],
+    use_na_sentinel: bool,
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.bool_], npt.NDArray[np.bool_]]: ...
+
 # ----------------------------------------------------------------------
 # Pairwise correlation/covariance
 

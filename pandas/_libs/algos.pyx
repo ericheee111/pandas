@@ -105,6 +105,54 @@ def putmask_masked_float64(
             validity[i] = False
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def factorize_bool_masked(
+    const cnp.npy_bool[:] values,
+    const cnp.npy_bool[:] mask,
+    bint use_na_sentinel,
+):
+    cdef:
+        Py_ssize_t i, n = values.shape[0]
+        int false_code = -1
+        int true_code = -1
+        int na_code = -1
+        int nuniques = 0
+        ndarray[intp_t] codes = np.empty(n, dtype=np.intp)
+        ndarray[cnp.npy_bool] uniques = np.empty(3, dtype=np.bool_)
+        ndarray[cnp.npy_bool] uniques_mask = np.zeros(3, dtype=np.bool_)
+
+    for i in range(n):
+        if mask[i]:
+            if use_na_sentinel:
+                codes[i] = -1
+            else:
+                if na_code == -1:
+                    na_code = nuniques
+                    uniques[nuniques] = False
+                    uniques_mask[nuniques] = True
+                    nuniques += 1
+                codes[i] = na_code
+        elif values[i]:
+            if true_code == -1:
+                true_code = nuniques
+                uniques[nuniques] = True
+                nuniques += 1
+            codes[i] = true_code
+        else:
+            if false_code == -1:
+                false_code = nuniques
+                uniques[nuniques] = False
+                nuniques += 1
+            codes[i] = false_code
+
+    return (
+        codes,
+        uniques[:nuniques],
+        uniques_mask[:nuniques],
+    )
+
+
 tiebreakers = {
     "average": TIEBREAK_AVERAGE,
     "min": TIEBREAK_MIN,
