@@ -5409,14 +5409,7 @@ class Index(IndexOpsMixin, PandasObject):
             else:
                 result = self._data.compress(key)
             cls = type(self)
-            new_index = object.__new__(cls)
-            new_index._data = result
-            new_index._name = self._name
-            new_index._cache = {}
-            new_index._id = object()
-            new_index._references = BlockValuesRefs()
-            new_index._references.add_index_reference(new_index)
-            return new_index
+            return cls._simple_new(result, name=self._name)
 
         getitem = self._data.__getitem__
 
@@ -5443,14 +5436,7 @@ class Index(IndexOpsMixin, PandasObject):
                 result = lib.fast_bool_mask_indexer(self._data, mask)
             else:
                 result = self._data[mask]
-            new_idx = object.__new__(type(self))
-            new_idx._data = result
-            new_idx._name = self._name
-            new_idx._cache = {}
-            new_idx._id = object()
-            new_idx._references = BlockValuesRefs()
-            new_idx._references.add_index_reference(new_idx)
-            return new_idx
+            return type(self)._simple_new(result, name=self._name)
 
         if com.is_bool_indexer(key):
             # if we have list[bools, length=1e5] then doing this check+convert
