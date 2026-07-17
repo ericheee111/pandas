@@ -3015,9 +3015,21 @@ def maybe_convert_object_int64(ndarray[object] objects):
     if not pandas_is_aarch64():
         return None
 
-    ints = cnp.PyArray_EMPTY(1, objects.shape, cnp.NPY_INT64, 0)
+    if n > 0:
+        val = objects[0]
+        if not PyLong_CheckExact(val):
+            return None
 
-    for i in range(n):
+        overflow = 0
+        converted = PyLong_AsLongLongAndOverflow(val, &overflow)
+        if overflow != 0:
+            return None
+
+    ints = cnp.PyArray_EMPTY(1, objects.shape, cnp.NPY_INT64, 0)
+    if n > 0:
+        ints[0] = <int64_t>converted
+
+    for i in range(1, n):
         val = objects[i]
         if not PyLong_CheckExact(val):
             return None
