@@ -157,51 +157,34 @@ class ObjectStringArrayMixin:
             from pandas.core.arrays.string_ import BaseStringArray
 
             if _IS_ARM and isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
-                arr = np.asarray(self)
-                mask = isna(arr)
-                if na is lib.no_default:
-                    na = self.dtype.na_value
-                na_is_na = isna(na)
-                if na_is_na:
-                    na = False
-                result = lib.map_contains_regex(
-                    arr, pat, mask.view("uint8"), na_value=na
-                )
-                if self.dtype.na_value is not np.nan:
-                    from pandas.arrays import BooleanArray
-
-                    if not na_is_na:
-                        mask = np.zeros_like(mask)
-                    return BooleanArray(result, mask)
-                return result
+                return self._str_contains_fast_path(lib.map_contains_regex, pat, na)
 
             f = lambda x: pat.search(x) is not None
         elif case:
             from pandas.core.arrays.string_ import BaseStringArray
 
             if _IS_ARM and isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
-                arr = np.asarray(self)
-                mask = isna(arr)
-                if na is lib.no_default:
-                    na = self.dtype.na_value
-                na_is_na = isna(na)
-                if na_is_na:
-                    na = False
-                result = lib.map_contains(
-                    arr, pat, mask.view("uint8"), na_value=na
-                )
-                if self.dtype.na_value is not np.nan:
-                    from pandas.arrays import BooleanArray
-
-                    if not na_is_na:
-                        mask = np.zeros_like(mask)
-                    return BooleanArray(result, mask)
-                return result
+                return self._str_contains_fast_path(lib.map_contains, pat, na)
             f = lambda x: pat in x
         else:
             upper_pat = pat.upper()
             f = lambda x: upper_pat in x.upper()
         return self._str_map(f, na, dtype=np.dtype("bool"))
+
+    def _str_contains_fast_path(self, map_fn, pat, na):
+        arr = np.asarray(self)
+        mask = isna(arr)
+        if na is lib.no_default:
+            na = self.dtype.na_value
+        na_is_na = isna(na)
+        if na_is_na:
+            na = False
+        result = map_fn(arr, pat, mask.view("uint8"), na_value=na)
+        from pandas.arrays import BooleanArray
+
+        if not na_is_na:
+            mask = np.zeros_like(mask)
+        return BooleanArray(result, mask)
 
     def _str_startswith(self, pat, na=lib.no_default):
         validate_na_arg(na, name="na")

@@ -427,6 +427,7 @@ class WrappedCythonOp:
                     result = reduce_func.reduceat(values, group_starts, axis=rows_axis)
                     return result if rows_axis == 1 else result.T
                 else:
+                    # unreachable: _cython_op_ndim_compat always passes 2D values
                     return reduce_func.reduceat(values, group_starts)
 
         # Fast path: use np.add.reduceat for float64 mean.
@@ -449,7 +450,7 @@ class WrappedCythonOp:
             if (diff >= 0).all() and np.count_nonzero(diff) + 1 == ngroups:
                 group_starts = np.searchsorted(comp_ids, np.arange(ngroups))
                 group_sizes = np.diff(np.append(group_starts, len(comp_ids)))
-                if group_sizes.max() <= 1000:
+                if group_sizes.max() <= 100:
                     if values.ndim == 2:
                         rows_axis = 1 if values.shape[1] == len(comp_ids) else 0
                         arr = values
