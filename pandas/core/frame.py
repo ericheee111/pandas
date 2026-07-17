@@ -49,7 +49,10 @@ from pandas._libs import (
 )
 from pandas.compat._arch import IS_ARM
 from pandas._libs.hashtable import duplicated
-from pandas._libs.lib import is_range_indexer
+from pandas._libs.lib import (
+    bool_list_to_indexer,
+    is_range_indexer,
+)
 from pandas.compat import CHAINED_WARNING_DISABLED
 from pandas.compat._constants import (
     REF_COUNT,
@@ -4366,6 +4369,21 @@ class DataFrame(NDFrame, OpsMixin):
             return self.where(key)
 
         # Do we have a (boolean) 1d indexer?
+        if IS_ARM and type(key) is list:
+            # ARM-only fast path for a python list of bools: validate and
+            # compute the positional indexer in a single pass (fusing the
+            # validation, conversion to a bool ndarray and ``nonzero``),
+            # detecting the common case where the True values are contiguous.
+            # On non-ARM (x86) we fall through to the generic bool-indexer
+            # path below, preserving the original behavior.
+            valid, indexer = bool_list_to_indexer(key)
+            if valid:
+                if len(key) != len(self.index):
+                    raise ValueError(
+                        f"Item wrong length {len(key)} instead of {len(self.index)}."
+                    )
+                return self._getitem_bool_indexer(indexer)
+
         if com.is_bool_indexer(key):
             return self._getitem_bool_array(key)
 
@@ -4430,6 +4448,18 @@ class DataFrame(NDFrame, OpsMixin):
 
         indexer = key.nonzero()[0]
         return self.take(indexer, axis=0)
+
+    def _getitem_bool_indexer(self, indexer):
+        # `indexer` is produced by ``bool_list_to_indexer`` and is either:
+        #   * a slice -> the True values form a single contiguous run, so we
+        #     can select via iloc and obtain a (copy-on-write) view instead of
+        #     gathering rows one-by-one;
+        #   * an intp ndarray -> the True positions, guaranteed to lie in
+        #     ``[0, len(self))`` because the boolean list was validated to have
+        #     the same length as the index, so we can skip the bounds check.
+        if isinstance(indexer, slice):
+            return self.iloc[indexer]
+        return self.take(indexer, axis=0, verify=False)
 
     def _getitem_multilevel(self, key):
         # self.columns is a MultiIndex

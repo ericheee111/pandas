@@ -3365,6 +3365,70 @@ def is_bool_list(obj: list) -> bool:
     return True
 
 
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def bool_list_to_indexer(obj: list) -> tuple:
+    """
+    Validate that ``obj`` is a list of Python bools and compute the positional
+    indexer used for boolean row selection (``df[mask]``).
+
+    This fuses what used to be three separate full passes over the list
+    (validation via ``is_bool_list``, conversion to a bool ndarray and
+    ``nonzero``) into a single pass, and additionally detects the common
+    case in which the ``True`` values form a single contiguous run.
+
+    Returns
+    -------
+    tuple
+        ``(False, None)``
+            ``obj`` is not a list of bools; the caller should fall back to
+            the generic indexing path.
+        ``(True, slice(start, stop))``
+            The ``True`` values form a single contiguous run ``[start, stop)``;
+            the caller may use a (copy-on-write) slice instead of a gather.
+        ``(True, ndarray[np.intp])``
+            A 1-D array of the ``True`` positions for the non-contiguous case.
+    """
+    cdef:
+        Py_ssize_t n = len(obj)
+        Py_ssize_t i
+        Py_ssize_t count = 0
+        Py_ssize_t first = -1
+        Py_ssize_t last = -1
+        Py_ssize_t j = 0
+        object item
+        ndarray[intp_t, ndim=1] positions
+
+    if n == 0:
+        # match is_bool_indexer, which returns False for an empty list
+        return (False, None)
+
+    for i in range(n):
+        item = obj[i]
+        if not util.is_bool_object(item):
+            return (False, None)
+        if item:
+            count += 1
+            if first == -1:
+                first = i
+            last = i
+
+    if count == 0:
+        # all False -> empty selection
+        return (True, slice(0, 0))
+    if last - first + 1 == count:
+        # the True values form a single contiguous run
+        return (True, slice(first, last + 1))
+
+    # non-contiguous: materialize the positions in a second pass
+    positions = np.empty(count, dtype=np.intp)
+    for i in range(n):
+        if obj[i]:
+            positions[j] = i
+            j += 1
+    return (True, positions)
+
+
 cpdef ndarray eq_NA_compat(ndarray[object] arr, object key):
     """
     Check for `arr == key`, treating all values as not-equal to pd.NA.
