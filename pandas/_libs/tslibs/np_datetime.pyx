@@ -73,14 +73,6 @@ cdef extern from *:
     #include <stdint.h>
     #include "pandas/portable.h"
 
-    static inline int pandas_is_aarch64(void) {
-    #if defined(__aarch64__)
-        return 1;
-    #else
-        return 0;
-    #endif
-    }
-
     static inline int pandas_add_overflowsafe_i8_aarch64(
             const int64_t * __restrict left,
             const int64_t * __restrict right,
@@ -101,7 +93,6 @@ cdef extern from *:
         return 0;
     }
     """
-    bint pandas_is_aarch64() noexcept nogil
     int pandas_add_overflowsafe_i8_aarch64(
         const int64_t *left,
         const int64_t *right,
@@ -109,6 +100,9 @@ cdef extern from *:
         int64_t n,
         int64_t nat,
     ) noexcept nogil
+
+cdef extern from "pandas/portable.h":
+    bint pandas_is_aarch64() noexcept nogil
 
 # ----------------------------------------------------------------------
 # numpy object inspection

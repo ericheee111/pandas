@@ -24,6 +24,14 @@ The full license is in the LICENSE file, distributed with this software.
 #define toupper_ascii(c) ((((unsigned)(c) - 'a') < 26) ? ((c) & 0x5f) : (c))
 #define tolower_ascii(c) ((((unsigned)(c) - 'A') < 26) ? ((c) | 0x20) : (c))
 
+static inline int pandas_is_aarch64(void) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+  return 1;
+#else
+  return 0;
+#endif
+}
+
 #if defined(_WIN32)
 #  define PD_FALLTHROUGH                                                       \
     do {                                                                       \

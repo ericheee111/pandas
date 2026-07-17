@@ -22,6 +22,7 @@ from functools import (
     partial,
     wraps,
 )
+from platform import machine
 from typing import (
     TYPE_CHECKING,
     Concatenate,
@@ -135,6 +136,8 @@ from pandas.core.util.numba_ import (
     maybe_use_numba,
     prepare_function_arguments,
 )
+
+_USE_NO_NA_COUNT_FASTPATH = machine().lower() in ("aarch64", "arm64")
 
 if TYPE_CHECKING:
     from pandas._libs.tslibs import BaseOffset
@@ -2160,6 +2163,21 @@ class GroupBy(BaseGroupBy[NDFrameT]):
         is_series = data.ndim == 1
 
         def hfunc(bvalues: ArrayLike) -> ArrayLike:
+            if (
+                _USE_NO_NA_COUNT_FASTPATH
+                and isinstance(bvalues, np.ndarray)
+                and bvalues.dtype.kind in "biu"
+            ):
+                counted = lib.count_level_2d_no_na(
+                    labels=ids,
+                    max_bin=ngroups,
+                    n=1 if bvalues.ndim == 1 else bvalues.shape[0],
+                )
+                if counted is not None:
+                    if is_series:
+                        return counted[0]
+                    return counted
+
             # TODO(EA2D): reshape would not be necessary with 2D EAs
             if bvalues.ndim == 1:
                 # EA
