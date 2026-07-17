@@ -31,6 +31,20 @@ from numpy cimport (
 
 cnp.import_array()
 
+
+cdef extern from *:
+    """
+    static inline int pandas_is_aarch64(void) {
+    #if defined(__aarch64__)
+        return 1;
+    #else
+        return 0;
+    #endif
+    }
+    """
+    bint pandas_is_aarch64() noexcept nogil
+
+
 from pandas._libs cimport util
 from pandas._libs.algos cimport (
     get_rank_nan_fill_val,
@@ -748,6 +762,34 @@ def group_sum(
     else:
         nan_val = NAN
 
+    if sum_t is float32_t or sum_t is float64_t:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    counts[lab] += 1
+
+                    for j in range(K):
+                        val = values[i, j]
+                        if val == val:
+                            nobs[lab, j] += 1
+                            y = val - compensation[lab, j]
+                            t = sumx[lab, j] + y
+                            compensation[lab, j] = t - sumx[lab, j] - y
+
+                            if not isfinite(compensation[lab, j]):
+                                compensation[lab, j] = 0
+
+                            sumx[lab, j] = t
+
+            _check_below_mincount(
+                out, uses_mask, result_mask, ncounts, K, nobs, min_count, sumx
+            )
+            return
+
     with nogil(sum_t is not object):
         for i in range(N):
             lab = labels[i]
@@ -1259,6 +1301,35 @@ def group_mean(
         nan_val = NPY_NAT
     else:
         nan_val = NAN
+
+    if mean_t is float32_t or mean_t is float64_t:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    counts[lab] += 1
+                    for j in range(K):
+                        val = values[i, j]
+                        if val == val:
+                            nobs[lab, j] += 1
+                            y = val - compensation[lab, j]
+                            t = sumx[lab, j] + y
+                            compensation[lab, j] = t - sumx[lab, j] - y
+                            if compensation[lab, j] != compensation[lab, j]:
+                                compensation[lab, j] = 0.
+                            sumx[lab, j] = t
+
+                for i in range(ncounts):
+                    for j in range(K):
+                        count = nobs[i, j]
+                        if count == 0:
+                            out[i, j] = nan_val
+                        else:
+                            out[i, j] = sumx[i, j] / count
+            return
 
     with nogil:
         for i in range(N):
@@ -1944,6 +2015,38 @@ cdef group_min_max(
     group_min_or_max[:] = _get_min_or_max(<numeric_t>0, compute_max, is_datetimelike)
 
     N, K = (<object>values).shape
+
+    if numeric_t is float32_t or numeric_t is float64_t:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    counts[lab] += 1
+                    for j in range(K):
+                        val = values[i, j]
+                        if val == val:
+                            nobs[lab, j] += 1
+                            if compute_max:
+                                if val > group_min_or_max[lab, j]:
+                                    group_min_or_max[lab, j] = val
+                            else:
+                                if val < group_min_or_max[lab, j]:
+                                    group_min_or_max[lab, j] = val
+
+            _check_below_mincount(
+                out,
+                uses_mask,
+                result_mask,
+                ngroups,
+                K,
+                nobs,
+                min_count,
+                group_min_or_max,
+            )
+            return
 
     with nogil:
         for i in range(N):
