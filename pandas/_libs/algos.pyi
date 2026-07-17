@@ -45,6 +45,13 @@ def nancount_2d(
     values: np.ndarray, axis: int
 ) -> npt.NDArray[np.intp]: ...
 
+def putmask_masked_float64(
+    values: npt.NDArray[np.float64],
+    validity: npt.NDArray[np.bool_],
+    mask: npt.NDArray[np.bool_],
+    value: float,
+) -> None: ...
+
 # ----------------------------------------------------------------------
 # Pairwise correlation/covariance
 

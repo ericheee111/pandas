@@ -399,6 +399,31 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         #  py38 builds.
         raise TypeError(f"Invalid value '{value!s}' for dtype '{self.dtype}'")
 
+    def _where(self, mask: npt.NDArray[np.bool_], value) -> Self:
+        if is_scalar(value) and not is_valid_na_for_dtype(value, self.dtype):
+            value = self._validate_setitem_value(value)
+            data = np.where(mask, self._data, value)
+            result_mask = self._mask & mask
+            return self._simple_new(data, result_mask)
+
+        return super()._where(mask, value)
+
+    def _putmask(self, mask: npt.NDArray[np.bool_], value) -> None:
+        if (
+            self._data.dtype == np.dtype("float64")
+            and is_scalar(value)
+            and not is_valid_na_for_dtype(value, self.dtype)
+        ):
+            if self._readonly:
+                raise ValueError("Cannot modify read-only array")
+            value = self._validate_setitem_value(value)
+            libalgos.putmask_masked_float64(
+                self._data, self._mask, mask, value
+            )
+            return
+
+        super()._putmask(mask, value)
+
     def __setitem__(self, key, value) -> None:
         if self._readonly:
             raise ValueError("Cannot modify read-only array")

@@ -174,8 +174,6 @@ class TestInfinity:
         assert not NegInf <= np.nan
         assert not NegInf == np.nan
         assert NegInf != np.nan
-
-
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("axis", [0, 1])
 def test_nancount_2d(dtype, axis):
@@ -195,3 +193,16 @@ def test_nancount_2d_rejects_integer_dtype():
     values = np.ones((2, 2), dtype=np.int64)
     with pytest.raises(TypeError):
         libalgos.nancount_2d(values, 0)
+
+
+def test_putmask_masked_float64():
+    values = np.array([1.0, 2.0, 3.0])
+    validity = np.array([False, True, True])
+    mask = np.array([False, True, False])
+
+    libalgos.putmask_masked_float64(values, validity, mask, 4.0)
+
+    expected_values = np.array([1.0, 4.0, 3.0])
+    expected_validity = np.array([False, False, True])
+    tm.assert_numpy_array_equal(values, expected_values)
+    tm.assert_numpy_array_equal(validity, expected_validity)
