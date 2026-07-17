@@ -183,6 +183,20 @@ def test_nancount_2d(dtype, axis):
     tm.assert_numpy_array_equal(result, expected.astype(np.intp))
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("all_valid", [False, True])
+def test_nanvalidity_2d(dtype, axis, all_valid):
+    values = np.array(
+        [[1.0, np.nan, 3.0], [np.nan, np.nan, 4.0]], dtype=dtype
+    )
+    result = libalgos.nanvalidity_2d(values, axis, all_valid)
+    valid = ~np.isnan(values)
+    op_axis = 1 if axis == 0 else 0
+    expected = valid.all(op_axis) if all_valid else valid.any(op_axis)
+    tm.assert_numpy_array_equal(result, expected)
+
+
 def test_nancount_2d_rejects_bad_axis():
     values = np.ones((2, 2), dtype=np.float64)
     with pytest.raises(ValueError, match="axis must be 0 or 1"):
