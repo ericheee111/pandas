@@ -463,6 +463,25 @@ class BaseBlockManager(PandasObject):
         )
 
     @final
+    def fillna_by_column(
+        self, values: list, limit: int | None, inplace: bool
+    ) -> Self:
+        if limit is not None:
+            limit = libalgos.validate_limit(None, limit=limit)
+
+        result_blocks: list[Block] = []
+        for block in self.blocks:
+            loc = block.mgr_locs.as_array[0]
+            applied = block.fillna(
+                value=values[loc], limit=limit, inplace=inplace
+            )
+            result_blocks = extend_blocks(applied, result_blocks)
+
+        return type(self).from_blocks(
+            result_blocks, [axis.view() for axis in self.axes]
+        )
+
+    @final
     def where(self, other, cond, align: bool) -> Self:
         if align:
             align_keys = ["other", "cond"]
