@@ -1502,6 +1502,13 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         arr = self._data
         mask = self._mask
 
+        if self.dtype.kind == "b":
+            codes, uniques, uniques_mask = libalgos.factorize_bool_masked(
+                arr, mask, use_na_sentinel
+            )
+            uniques_ea = self._simple_new(uniques, uniques_mask)
+            return codes, uniques_ea
+
         # Use a sentinel for na; recode and add NA to uniques if necessary below
         codes, uniques = factorize_array(arr, use_na_sentinel=True, mask=mask)
 
