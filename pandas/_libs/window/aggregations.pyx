@@ -1883,7 +1883,19 @@ def roll_apply(object obj,
             if raw:
                 output[i] = function(arr[s:e], *args, **kwargs)
             else:
-                output[i] = function(obj.iloc[s:e], *args, **kwargs)
+                # GH 45912: ``obj`` is a Series built once per column in
+                # ``_generate_cython_apply_func``.  ``start``/``end`` are
+                # clipped positional bounds produced by the window indexer,
+                # so ``slice(s, e)`` is always a valid positional slice.  Use
+                # the internal positional slicer directly instead of going
+                # through ``obj.iloc[s:e]``: ``iloc`` only forwards to
+                # ``_slice`` after a chain of validators
+                # (``check_dict_or_set_indexers``, ``apply_if_callable``,
+                # ``need_slice``, ``_validate_positional_slice``) that are
+                # no-ops for a slice with concrete integer bounds.  The
+                # returned Series has identical index, name, dtype, view/copy
+                # and Copy-on-Write refs as ``obj.iloc[s:e]``.
+                output[i] = function(obj._slice(slice(s, e)), *args, **kwargs)
         else:
             output[i] = NaN
 
