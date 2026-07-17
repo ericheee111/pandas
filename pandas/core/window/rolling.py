@@ -28,6 +28,7 @@ from pandas._libs.tslibs import (
     to_offset,
 )
 import pandas._libs.window.aggregations as window_aggregations
+from pandas.compat._arch import IS_ARM
 from pandas.compat._optional import import_optional_dependency
 from pandas.errors import DataError
 from pandas.util._decorators import set_module
@@ -357,9 +358,12 @@ class BaseWindow(SelectionMixin):
             raise TypeError(f"cannot handle this type -> {values.dtype}") from err
 
         # Convert inf to nan for C funcs
-        inf = np.isinf(values)
-        if inf.any():
-            values = np.where(inf, np.nan, values)
+        if IS_ARM and np.issubdtype(values.dtype, np.integer):
+            pass
+        else:
+            inf = np.isinf(values)
+            if inf.any():
+                values = np.where(inf, np.nan, values)
 
         return values
 
@@ -568,11 +572,52 @@ class BaseWindow(SelectionMixin):
             else window_indexer.window_size
         )
 
+        use_fast_path = IS_ARM and (
+            isinstance(self.window, int)
+            and not self.center
+            and self.step is None
+            and isinstance(window_indexer, FixedWindowIndexer)
+            and self.closed is None
+            and self._win_freq_i8 is None
+            and not numba_args
+            and name in ("mean", "std")
+            and self.method == "single"
+        )
+
         def homogeneous_func(values: np.ndarray):
             # calculation function
 
             if values.size == 0:
                 return values.copy()
+
+            if use_fast_path:
+                win_size = self.window
+                minp = min_periods
+                if np.issubdtype(values.dtype, np.integer):
+                    int_values = np.asarray(values, dtype=np.int64)
+                    with np.errstate(all="ignore"):
+                        if name == "mean":
+                            return window_aggregations.roll_mean_fixed_no_nan_int64(
+                                int_values, win_size, minp
+                            )
+                        else:
+                            ddof = kwargs.get("ddof", 1)
+                            return window_aggregations.roll_std_fixed_no_nan_int64(
+                                int_values, win_size, minp, ddof
+                            )
+                else:
+                    has_nan = np.isnan(values).any()
+                    if not has_nan:
+                        with np.errstate(all="ignore"):
+                            if name == "mean":
+                                return window_aggregations.roll_mean_fixed_no_nan(
+                                    values, win_size, minp
+                                )
+                            else:
+                                ddof = kwargs.get("ddof", 1)
+                                return window_aggregations.roll_std_fixed_no_nan(
+                                    values, win_size, minp, ddof
+                                )
 
             def calc(x):
                 start, end = window_indexer.get_window_bounds(
@@ -1744,6 +1789,13 @@ class RollingAndExpandingMixin(BaseWindow):
         def zsqrt_func(values, begin, end, min_periods):
             return zsqrt(window_func(values, begin, end, min_periods, ddof=ddof))
 
+        if IS_ARM:
+            return self._apply(
+                zsqrt_func,
+                name="std",
+                numeric_only=numeric_only,
+                ddof=ddof,
+            )
         return self._apply(
             zsqrt_func,
             name="std",

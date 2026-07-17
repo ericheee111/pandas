@@ -23,6 +23,7 @@ from pandas._libs import (
     lib,
     missing as libmissing,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.arrays import NDArrayBacked
 from pandas._libs.lib import ensure_string_array
 from pandas.compat import (
@@ -879,6 +880,58 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
                     value[isna(value)] = self.dtype.na_value
 
         super().__setitem__(key, value)
+
+    def fillna(
+        self,
+        value=None,
+        limit: int | None = None,
+        copy: bool = True,
+    ) -> Self:
+        if not IS_ARM:
+            return super().fillna(value=value, limit=limit, copy=copy)
+
+        mask = self.isna()
+        if limit is not None and limit < len(self):
+            modify = mask.cumsum() > limit
+            if modify.any():
+                mask = mask.copy()
+                mask[modify] = False
+
+        if not mask.any():
+            if copy:
+                return self.copy()
+            return self[:]
+
+        if lib.is_scalar(value):
+            if isna(value):
+                value = self.dtype.na_value
+            elif not isinstance(value, str):
+                raise TypeError(
+                    f"Invalid value '{value}' for dtype '{self.dtype}'. Value should "
+                    f"be a string or missing value, got '{type(value).__name__}' "
+                    "instead."
+                )
+            if copy:
+                new_data = np.where(mask, value, self._ndarray)
+            else:
+                if self._readonly:
+                    raise ValueError("Cannot modify read-only array")
+                new_data = self._ndarray
+                new_data[mask] = value
+            return type(self)(new_data, dtype=self.dtype, copy=False)
+
+        if hasattr(value, "__len__") and len(value) != len(self):
+            raise ValueError("Length of 'value' does not match.")
+
+        if copy:
+            new_values = self.copy()
+        else:
+            new_values = self[:]
+        if hasattr(value, "__len__"):
+            new_values[mask] = value[mask]
+        else:
+            new_values[mask] = value
+        return new_values
 
     def _putmask(self, mask: npt.NDArray[np.bool_], value) -> None:
         # the super() method NDArrayBackedExtensionArray._putmask uses

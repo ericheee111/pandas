@@ -47,6 +47,7 @@ from pandas._libs import (
     lib,
     properties,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.hashtable import duplicated
 from pandas._libs.lib import is_range_indexer
 from pandas.compat import CHAINED_WARNING_DISABLED
@@ -4639,6 +4640,22 @@ class DataFrame(NDFrame, OpsMixin):
         y  2  20
         z  3  50
         """
+        # Fast path for common case: df[int_key] = scalar_value
+        if IS_ARM and (
+            isinstance(key, int)
+            and not isinstance(value, (DataFrame, Series, np.ndarray, list))
+            and self.columns.is_unique
+        ):
+            if not CHAINED_WARNING_DISABLED:
+                if sys.getrefcount(self) <= REF_COUNT and not com.is_local_in_caller_frame(
+                    self
+                ):
+                    warnings.warn(
+                        _chained_assignment_msg, ChainedAssignmentError, stacklevel=2
+                    )
+            self._set_item(key, value)
+            return
+
         if not CHAINED_WARNING_DISABLED:
             if sys.getrefcount(self) <= REF_COUNT and not com.is_local_in_caller_frame(
                 self
@@ -4701,8 +4718,11 @@ class DataFrame(NDFrame, OpsMixin):
                 self[k1] = value[k2]
 
         elif not is_list_like(value):
-            for col in key:
-                self[col] = value
+            if IS_ARM and getattr(key, "ndim", 1) <= 1:
+                self._batch_setitem(key, value)
+            else:
+                for col in key:
+                    self[col] = value
 
         elif isinstance(value, np.ndarray) and value.ndim == 2:
             self._iset_not_inplace(key, value)
@@ -4758,6 +4778,42 @@ class DataFrame(NDFrame, OpsMixin):
                     self[iloc] = igetitem(value, i)
             finally:
                 self.columns = orig_columns
+
+    def _batch_setitem(self, key, value) -> None:
+        """Set multiple columns to a single scalar value at once.
+
+        Optimized path for df[list_of_cols] = scalar that avoids the overhead
+        of iterating through each column and calling __setitem__ individually.
+        """
+        if not len(key):
+            return
+
+        existing_locs = []
+        new_cols = []
+
+        for col in key:
+            try:
+                loc = self._info_axis.get_loc(col)
+            except KeyError:
+                new_cols.append(col)
+                continue
+            if not isinstance(loc, int):
+                new_cols.append(col)
+                continue
+            existing_locs.append(loc)
+
+        if new_cols:
+            for col in new_cols:
+                self._set_item(col, value)
+
+        if existing_locs:
+            value_arr, refs = self._sanitize_column(value)
+            if len(existing_locs) == 1:
+                self._iset_item_mgr(existing_locs[0], value_arr, refs=refs)
+            else:
+                locs_arr = np.array(existing_locs, dtype=np.intp)
+                value_2d = np.broadcast_to(value_arr, (len(existing_locs), len(value_arr))).T
+                self._iset_item_mgr(locs_arr, value_2d, refs=refs)
 
     def _setitem_frame(self, key, value) -> None:
         # support boolean setting with DataFrame input, e.g.
@@ -4869,6 +4925,42 @@ class DataFrame(NDFrame, OpsMixin):
         Series/TimeSeries will be conformed to the DataFrames index to
         ensure homogeneity.
         """
+        # Fast path: for scalar values on existing single-column blocks,
+        # do in-place fill to avoid array allocation
+        if IS_ARM and isinstance(value, (int, float, complex, bool, np.integer, np.floating)):
+            try:
+                loc = self._info_axis.get_loc(key)
+            except KeyError:
+                pass
+            else:
+                if isinstance(loc, int):
+                    blkno = self._mgr.blknos[loc]
+                    blk = self._mgr.blocks[blkno]
+                    if (
+                        len(blk._mgr_locs) == 1
+                        and not isinstance(blk.dtype, ExtensionDtype)
+                        and self._mgr._has_no_reference_block(blkno)
+                    ):
+                        # Quick dtype compatibility check for common cases
+                        blk_kind = blk.dtype.kind
+                        val_is_float = isinstance(value, (float, np.floating))
+                        val_is_int = isinstance(value, (int, np.integer))
+                        val_is_bool = isinstance(value, (bool, np.bool_))
+                        
+                        can_hold = False
+                        if blk_kind == 'f':  # float block
+                            can_hold = val_is_float or val_is_int or val_is_bool
+                        elif blk_kind == 'i' or blk_kind == 'u':  # int/uint block
+                            can_hold = val_is_int or val_is_bool
+                        elif blk_kind == 'b':  # bool block
+                            can_hold = val_is_bool
+                        elif blk_kind == 'c':  # complex block
+                            can_hold = True
+                        
+                        if can_hold:
+                            blk.values[:] = value
+                            return
+
         value, refs = self._sanitize_column(value)
 
         if (
@@ -4876,12 +4968,25 @@ class DataFrame(NDFrame, OpsMixin):
             and value.ndim == 1
             and not isinstance(value.dtype, ExtensionDtype)
         ):
-            # broadcast across multiple columns if necessary
-            if not self.columns.is_unique or isinstance(self.columns, MultiIndex):
-                existing_piece = self[key]
-                if isinstance(existing_piece, DataFrame):
-                    value = np.tile(value, (len(existing_piece.columns), 1)).T
-                    refs = None
+            if IS_ARM:
+                try:
+                    loc = self._info_axis.get_loc(key)
+                except KeyError:
+                    loc = None
+                if loc is not None and not isinstance(loc, int):
+                    existing_piece = self[key]
+                    if isinstance(existing_piece, DataFrame):
+                        value = np.tile(value, (len(existing_piece.columns), 1)).T
+                        refs = None
+            else:
+                # broadcast across multiple columns if necessary
+                if key in self.columns and (
+                    not self.columns.is_unique or isinstance(self.columns, MultiIndex)
+                ):
+                    existing_piece = self[key]
+                    if isinstance(existing_piece, DataFrame):
+                        value = np.tile(value, (len(existing_piece.columns), 1)).T
+                        refs = None
 
         self._set_item_mgr(key, value, refs)
 

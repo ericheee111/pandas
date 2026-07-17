@@ -28,6 +28,7 @@ from pandas._libs import (
     join as libjoin,
     lib,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.lib import is_range_indexer
 from pandas._typing import (
     AnyArrayLike,
@@ -1087,48 +1088,80 @@ class _MergeOperation:
         """
         reindex along index and concat along columns.
         """
-        # Take views so we do not alter the originals
-        left = self.left[:]
-        right = self.right[:]
-
         llabels, rlabels = _items_overlap_with_suffix(
             self.left._info_axis, self.right._info_axis, self.suffixes
         )
 
-        if left_indexer is not None and not is_range_indexer(left_indexer, len(left)):
-            # Pinning the index here (and in the right code just below) is not
-            #  necessary, but makes the `.take` more performant if we have e.g.
-            #  a MultiIndex for left.index.
-            lmgr = left._mgr.reindex_indexer(
-                join_index,
-                left_indexer,
-                axis=1,
-                only_slice=True,
-                allow_dups=True,
-                use_na_proxy=True,
-            )
-            left = left._constructor_from_mgr(lmgr, axes=lmgr.axes)
-        left.index = join_index
+        if not IS_ARM:
+            # Take views so we do not alter the originals
+            left = self.left[:]
+            right = self.right[:]
 
-        if right_indexer is not None and not is_range_indexer(
-            right_indexer, len(right)
+            if left_indexer is not None and not is_range_indexer(left_indexer, len(left)):
+                lmgr = left._mgr.reindex_indexer(
+                    join_index,
+                    left_indexer,
+                    axis=1,
+                    only_slice=True,
+                    allow_dups=True,
+                    use_na_proxy=True,
+                )
+                left = left._constructor_from_mgr(lmgr, axes=lmgr.axes)
+            left.index = join_index
+
+            if right_indexer is not None and not is_range_indexer(
+                right_indexer, len(right)
+            ):
+                rmgr = right._mgr.reindex_indexer(
+                    join_index,
+                    right_indexer,
+                    axis=1,
+                    only_slice=True,
+                    allow_dups=True,
+                    use_na_proxy=True,
+                )
+                right = right._constructor_from_mgr(rmgr, axes=rmgr.axes)
+            right.index = join_index
+
+            from pandas import concat
+
+            left.columns = llabels
+            right.columns = rlabels
+            result = concat([left, right], axis=1)
+            return result
+
+        from pandas.core.internals.concat import concatenate_managers
+
+        left_mgr = self.left._mgr
+        right_mgr = self.right._mgr
+
+        left_indexers: dict[int, npt.NDArray[np.intp]] = {}
+        right_indexers: dict[int, npt.NDArray[np.intp]] = {}
+
+        if left_indexer is not None and not is_range_indexer(
+            left_indexer, len(self.left)
         ):
-            rmgr = right._mgr.reindex_indexer(
-                join_index,
-                right_indexer,
-                axis=1,
-                only_slice=True,
-                allow_dups=True,
-                use_na_proxy=True,
-            )
-            right = right._constructor_from_mgr(rmgr, axes=rmgr.axes)
-        right.index = join_index
+            left_indexers[1] = left_indexer
+        if right_indexer is not None and not is_range_indexer(
+            right_indexer, len(self.right)
+        ):
+            right_indexers[1] = right_indexer
 
-        from pandas import concat
+        mgrs_indexers = [
+            (left_mgr, left_indexers),
+            (right_mgr, right_indexers),
+        ]
 
-        left.columns = llabels
-        right.columns = rlabels
-        result = concat([left, right], axis=1)
+        result_columns = llabels.append(rlabels)
+        result_axes = [result_columns, join_index]
+
+        result_mgr = concatenate_managers(
+            mgrs_indexers, result_axes, concat_axis=0, copy=False
+        )
+
+        result = self.left._constructor_from_mgr(
+            result_mgr, axes=result_mgr.axes
+        )
         return result
 
     def get_result(self) -> DataFrame:
@@ -1294,7 +1327,7 @@ class _MergeOperation:
                         if left_has_missing is None:
                             left_has_missing = (
                                 False
-                                if left_indexer is None
+                                if left_indexer is None or (IS_ARM and self.how == "inner")
                                 else (left_indexer == -1).any()
                             )
 
@@ -1308,7 +1341,7 @@ class _MergeOperation:
                         if right_has_missing is None:
                             right_has_missing = (
                                 False
-                                if right_indexer is None
+                                if right_indexer is None or (IS_ARM and self.how == "inner")
                                 else (right_indexer == -1).any()
                             )
 
@@ -1323,6 +1356,8 @@ class _MergeOperation:
                 take_right = self.right_join_keys[i]
 
             if take_left is not None or take_right is not None:
+                is_inner = IS_ARM and self.how == "inner"
+
                 if take_left is None:
                     lvals = result[name]._values
                 elif left_indexer is None:
@@ -1330,8 +1365,14 @@ class _MergeOperation:
                 else:
                     # TODO: can we pin down take_left's type earlier?
                     take_left = extract_array(take_left, extract_numpy=True)
-                    lfill = na_value_for_dtype(take_left.dtype)
-                    lvals = algos.take_nd(take_left, left_indexer, fill_value=lfill)
+                    # Fast path: when no missing values, use numpy.take directly
+                    if IS_ARM and isinstance(take_left, np.ndarray) and (
+                        is_inner or (left_indexer >= 0).all()
+                    ):
+                        lvals = take_left.take(left_indexer)
+                    else:
+                        lfill = na_value_for_dtype(take_left.dtype)
+                        lvals = algos.take_nd(take_left, left_indexer, fill_value=lfill)
 
                 if take_right is None:
                     rvals = result[name]._values
@@ -1340,20 +1381,26 @@ class _MergeOperation:
                 else:
                     # TODO: can we pin down take_right's type earlier?
                     taker = extract_array(take_right, extract_numpy=True)
-                    rfill = na_value_for_dtype(taker.dtype)
-                    rvals = algos.take_nd(taker, right_indexer, fill_value=rfill)
+                    # Fast path: when no missing values, use numpy.take directly
+                    if IS_ARM and isinstance(taker, np.ndarray) and (
+                        is_inner or (right_indexer >= 0).all()
+                    ):
+                        rvals = taker.take(right_indexer)
+                    else:
+                        rfill = na_value_for_dtype(taker.dtype)
+                        rvals = algos.take_nd(taker, right_indexer, fill_value=rfill)
 
                 # if we have an all missing left_indexer
                 # make sure to just use the right values or vice-versa
-                if left_indexer is not None and (left_indexer == -1).all():
+                if not is_inner and left_indexer is not None and (left_indexer == -1).all():
                     key_col = Index(rvals, dtype=rvals.dtype, copy=False)
                     result_dtype = rvals.dtype
-                elif right_indexer is not None and (right_indexer == -1).all():
+                elif not is_inner and right_indexer is not None and (right_indexer == -1).all():
                     key_col = Index(lvals, dtype=lvals.dtype, copy=False)
                     result_dtype = lvals.dtype
                 else:
                     key_col = Index(lvals, dtype=lvals.dtype, copy=False)
-                    if left_indexer is not None:
+                    if not is_inner and left_indexer is not None:
                         mask_left = left_indexer == -1
                         key_col = key_col.where(~mask_left, rvals)
                     result_dtype = find_common_type([lvals.dtype, rvals.dtype])
@@ -2083,38 +2130,306 @@ def get_join_indexers(
     lkey: ArrayLike
     rkey: ArrayLike
     if len(left_keys) > 1:
-        # get left & right join labels and num. of levels at each location
-        mapped = (
-            _factorize_keys(left_keys[n], right_keys[n], sort=sort)
-            for n in range(len(left_keys))
+        # Fast path for multiple int64 columns: compute composite keys directly
+        # using numpy vectorized operations to avoid multiple factorize calls
+        # Note: outer join is excluded because the original full_outer_join is already
+        # highly optimized in Cython and difficult to beat with Python-level optimizations
+        all_int64 = IS_ARM and (
+            not sort
+            and how in ("inner", "left", "right")
+            and all(
+                isinstance(lk, np.ndarray) and lk.dtype == np.int64
+                for lk in left_keys
+            )
+            and all(
+                isinstance(rk, np.ndarray) and rk.dtype == np.int64
+                for rk in right_keys
+            )
         )
-        zipped = zip(*mapped, strict=True)
-        llab, rlab, shape = (list(x) for x in zipped)
+        
+        if all_int64:
+            # Use numpy vectorized hash to compute composite keys
+            # This avoids 7 separate factorize calls
+            n = len(left_keys[0])
+            
+            # Compute composite hash using simple mixing with uint64
+            left_composite = np.zeros(n, dtype=np.uint64)
+            right_composite = np.zeros(right_n, dtype=np.uint64)
+            
+            # Use different multipliers for each column to avoid collisions
+            multipliers = [
+                np.uint64(0x9E3779B97F4A7C15),  # golden ratio
+                np.uint64(0xBF58476D1CE4E5B9),
+                np.uint64(0x94D049BB133111EB),
+                np.uint64(0x517CC1B727220A95),
+                np.uint64(0x6C62272E07BB0142),
+                np.uint64(0x62B821756295C58D),
+                np.uint64(0x7B821756295C58D6),
+            ]
+            
+            for i, (lk, rk) in enumerate(zip(left_keys, right_keys)):
+                mult = multipliers[i % len(multipliers)]
+                left_composite ^= lk.view(np.uint64) * mult
+                right_composite ^= rk.view(np.uint64) * mult
+            
+            # Convert back to int64 for factorize
+            left_composite = left_composite.view(np.int64)
+            right_composite = right_composite.view(np.int64)
+            
+            # Use Int64Factorizer to check uniqueness and build hash table
+            rizer = libhashtable.Int64Factorizer(right_n)
+            rlab = rizer.factorize(right_composite)
+            right_unique = rizer.get_count() == right_n
+            
+            if right_unique:
+                # Fast hash-based join (right keys are unique)
+                ridx_matched, lidx_matched = rizer.hash_inner_join(left_composite)
+                
+                if how == "inner":
+                    lidx, ridx = lidx_matched, ridx_matched
+                elif how == "left":
+                    # Left join: result in left table order (no sorting needed)
+                    # hash_inner_join already returns results in left table order
+                    if len(lidx_matched) == left_n:
+                        # All left rows matched - no unmatched rows
+                        lidx, ridx = lidx_matched, ridx_matched
+                    else:
+                        # Find unmatched left rows using O(n) boolean mask
+                        matched_left_mask = np.zeros(left_n, dtype=bool)
+                        matched_left_mask[lidx_matched] = True
+                        unmatched_left = np.where(~matched_left_mask)[0]
+                        
+                        lidx = np.concatenate([lidx_matched, unmatched_left])
+                        ridx = np.concatenate([
+                            ridx_matched,
+                            np.full(len(unmatched_left), -1, dtype=np.intp)
+                        ])
+                elif how == "right":
+                    # Right join: result in right table order (sorted by key values)
+                    # Use factorize + groupsort_indexer for O(n) sorting
+                    from pandas._libs.algos import groupsort_indexer
+                    
+                    if len(ridx_matched) == right_n:
+                        # All right rows matched - sort by key values
+                        matched_composite = right_composite[ridx_matched]
+                        factorizer = libhashtable.Int64Factorizer(len(matched_composite))
+                        labels = factorizer.factorize(matched_composite)
+                        num_groups = factorizer.get_count()
+                        sorter, _ = groupsort_indexer(labels, num_groups)
+                        lidx = lidx_matched[sorter]
+                        ridx = ridx_matched[sorter]
+                    else:
+                        # Find unmatched right rows
+                        matched_right_mask = np.zeros(right_n, dtype=bool)
+                        matched_right_mask[ridx_matched] = True
+                        unmatched_right = np.where(~matched_right_mask)[0]
+                        
+                        # Sort matched rows by key values
+                        matched_composite = right_composite[ridx_matched]
+                        factorizer = libhashtable.Int64Factorizer(len(matched_composite))
+                        labels = factorizer.factorize(matched_composite)
+                        num_groups = factorizer.get_count()
+                        sorter, _ = groupsort_indexer(labels, num_groups)
+                        lidx_matched = lidx_matched[sorter]
+                        ridx_matched = ridx_matched[sorter]
+                        
+                        # Sort unmatched right rows by key values
+                        ur_composite = right_composite[unmatched_right]
+                        factorizer = libhashtable.Int64Factorizer(len(ur_composite))
+                        labels = factorizer.factorize(ur_composite)
+                        num_groups = factorizer.get_count()
+                        sorter, _ = groupsort_indexer(labels, num_groups)
+                        unmatched_right = unmatched_right[sorter]
+                        
+                        lidx = np.concatenate([
+                            lidx_matched,
+                            np.full(len(unmatched_right), -1, dtype=np.intp)
+                        ])
+                        ridx = np.concatenate([ridx_matched, unmatched_right])
+                elif how == "outer":
+                    # Outer join: result sorted by key values (original behavior)
+                    from pandas._libs.algos import groupsort_indexer
+                    
+                    matched_left_mask = np.zeros(left_n, dtype=bool)
+                    if len(lidx_matched) > 0:
+                        matched_left_mask[lidx_matched] = True
+                    all_left_matched = matched_left_mask.all()
+                    
+                    matched_right_mask = np.zeros(right_n, dtype=bool)
+                    if len(ridx_matched) > 0:
+                        matched_right_mask[ridx_matched] = True
+                    all_right_matched = matched_right_mask.all()
+                    
+                    if all_left_matched and all_right_matched:
+                        matched_composite = left_composite[lidx_matched]
+                        factorizer = libhashtable.Int64Factorizer(len(matched_composite))
+                        labels = factorizer.factorize(matched_composite)
+                        num_groups = factorizer.get_count()
+                        sorter, _ = groupsort_indexer(labels, num_groups)
+                        lidx = lidx_matched[sorter]
+                        ridx = ridx_matched[sorter]
+                    else:
+                        unmatched_right = np.where(~matched_right_mask)[0]
+                        
+                        if not all_left_matched:
+                            unmatched_left = np.where(~matched_left_mask)[0]
+                        else:
+                            unmatched_left = np.array([], dtype=np.intp)
+                        
+                        if len(lidx_matched) > 0:
+                            matched_composite = left_composite[lidx_matched]
+                            factorizer = libhashtable.Int64Factorizer(len(matched_composite))
+                            labels = factorizer.factorize(matched_composite)
+                            num_groups = factorizer.get_count()
+                            sorter, _ = groupsort_indexer(labels, num_groups)
+                            lidx_matched = lidx_matched[sorter]
+                            ridx_matched = ridx_matched[sorter]
+                        
+                        if len(unmatched_left) > 0:
+                            ul_composite = left_composite[unmatched_left]
+                            factorizer = libhashtable.Int64Factorizer(len(ul_composite))
+                            labels = factorizer.factorize(ul_composite)
+                            num_groups = factorizer.get_count()
+                            sorter, _ = groupsort_indexer(labels, num_groups)
+                            unmatched_left = unmatched_left[sorter]
+                        
+                        if len(unmatched_right) > 0:
+                            ur_composite = right_composite[unmatched_right]
+                            factorizer = libhashtable.Int64Factorizer(len(ur_composite))
+                            labels = factorizer.factorize(ur_composite)
+                            num_groups = factorizer.get_count()
+                            sorter, _ = groupsort_indexer(labels, num_groups)
+                            unmatched_right = unmatched_right[sorter]
+                        
+                        lidx = np.concatenate([
+                            lidx_matched,
+                            unmatched_left,
+                            np.full(len(unmatched_right), -1, dtype=np.intp)
+                        ])
+                        ridx = np.concatenate([
+                            ridx_matched,
+                            np.full(len(unmatched_left), -1, dtype=np.intp),
+                            unmatched_right
+                        ])
+                
+                if lidx is not None and is_range_indexer(lidx, left_n):
+                    lidx = None
+                if ridx is not None and is_range_indexer(ridx, right_n):
+                    ridx = None
+                return lidx, ridx
+            
+            # Fall back to original path for non-unique right keys
+            mapped = (
+                _factorize_keys(left_keys[n], right_keys[n], sort=sort)
+                for n in range(len(left_keys))
+            )
+            zipped = zip(*mapped, strict=True)
+            llab, rlab, shape = (list(x) for x in zipped)
 
-        # get flat i8 keys from label lists
-        lkey, rkey = _get_join_keys(llab, rlab, tuple(shape), sort)
+            lkey, rkey = _get_join_keys(llab, rlab, tuple(shape), sort)
+            
+            left = Index(lkey, copy=False)
+            right = Index(rkey, copy=False)
+
+            if (
+                left.is_monotonic_increasing
+                and right.is_monotonic_increasing
+                and (left.is_unique or right.is_unique)
+            ):
+                _, lidx, ridx = left.join(right, how=how, return_indexers=True, sort=sort)
+            else:
+                lidx, ridx = get_join_indexers_non_unique(
+                    left._values, right._values, sort, how
+                )
+
+            if lidx is not None and is_range_indexer(lidx, left_n):
+                lidx = None
+            if ridx is not None and is_range_indexer(ridx, right_n):
+                ridx = None
+            return lidx, ridx
+        else:
+            # Original path for non-int64 or sort=True (non-outer)
+            mapped = (
+                _factorize_keys(left_keys[n], right_keys[n], sort=sort)
+                for n in range(len(left_keys))
+            )
+            zipped = zip(*mapped, strict=True)
+            llab, rlab, shape = (list(x) for x in zipped)
+
+            # get flat i8 keys from label lists
+            lkey, rkey = _get_join_keys(llab, rlab, tuple(shape), sort)
     else:
         lkey = left_keys[0]
         rkey = right_keys[0]
 
-    left = Index(lkey, copy=False)
-    right = Index(rkey, copy=False)
-
-    if (
-        left.is_monotonic_increasing
-        and right.is_monotonic_increasing
-        and (left.is_unique or right.is_unique)
+    if IS_ARM and (
+        how == "inner"
+        and not sort
+        and len(left_keys) == 1
+        and hasattr(lkey, "dtype")
+        and lkey.dtype.kind in "iufb"
     ):
-        _, lidx, ridx = left.join(right, how=how, return_indexers=True, sort=sort)
+        lidx, ridx = get_join_indexers_non_unique(lkey, rkey, sort, how)
     else:
-        lidx, ridx = get_join_indexers_non_unique(
-            left._values, right._values, sort, how
-        )
+        left = Index(lkey, copy=False)
+        right = Index(rkey, copy=False)
 
-    if lidx is not None and is_range_indexer(lidx, len(left)):
+        if (
+            left.is_monotonic_increasing
+            and right.is_monotonic_increasing
+            and (left.is_unique or right.is_unique)
+        ):
+            _, lidx, ridx = left.join(right, how=how, return_indexers=True, sort=sort)
+        else:
+            lidx, ridx = get_join_indexers_non_unique(
+                left._values, right._values, sort, how
+            )
+
+    if lidx is not None and is_range_indexer(lidx, len(lkey)):
         lidx = None
-    if ridx is not None and is_range_indexer(ridx, len(right)):
+    if ridx is not None and is_range_indexer(ridx, len(rkey)):
         ridx = None
+    return lidx, ridx
+
+
+def _dense_int_inner_join(
+    lkey: npt.NDArray[np.intp],
+    rkey: npt.NDArray[np.intp],
+    count: int,
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]:
+    """
+    Specialized inner join for dense integer keys in [0, count).
+    Uses fully vectorized numpy operations instead of Cython hash join.
+    """
+    n_left = len(lkey)
+
+    right_order = np.argsort(rkey, kind="stable")
+    rkey_sorted = rkey[right_order]
+
+    codes = np.arange(count, dtype=lkey.dtype)
+    right_starts = np.searchsorted(rkey_sorted, codes, side="left")
+    right_ends = np.searchsorted(rkey_sorted, codes, side="right")
+    right_sizes = right_ends - right_starts
+
+    valid_left = lkey >= 0
+    left_keys = np.where(valid_left, lkey, 0)
+    left_matches = np.where(valid_left, right_sizes[left_keys], 0)
+
+    total = int(left_matches.sum())
+    if total == 0:
+        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
+
+    lidx = np.repeat(np.arange(n_left, dtype=np.intp), left_matches)
+
+    output_keys = lkey[lidx]
+
+    cum_matches = np.empty(n_left + 1, dtype=np.intp)
+    cum_matches[0] = 0
+    np.cumsum(left_matches, out=cum_matches[1:])
+    pos_in_group = np.arange(total, dtype=np.intp) - cum_matches[lidx]
+
+    ridx = right_order[right_starts[output_keys] + pos_in_group]
+
     return lidx, ridx
 
 
@@ -2132,7 +2447,7 @@ def get_join_indexers_non_unique(
     left : ArrayLike
     right : ArrayLike
     sort : bool, default False
-    how : {'inner', 'outer', 'left', 'right'}, default 'inner'
+    how : {'outer', 'inner', 'left', 'right'}, default 'inner'
 
     Returns
     -------
@@ -2150,7 +2465,10 @@ def get_join_indexers_non_unique(
     elif how == "right":
         ridx, lidx = libjoin.left_outer_join(rkey, lkey, count, sort=sort)
     elif how == "inner":
-        lidx, ridx = libjoin.inner_join(lkey, rkey, count, sort=sort)
+        if IS_ARM and not sort and count > 0 and count <= 100_000:
+            lidx, ridx = _dense_int_inner_join(lkey, rkey, count)
+        else:
+            lidx, ridx = libjoin.inner_join(lkey, rkey, count, sort=sort)
     elif how == "outer":
         lidx, ridx = libjoin.full_outer_join(lkey, rkey, count)
     return lidx, ridx
@@ -2302,6 +2620,15 @@ class _OrderedMerge(_MergeOperation):
         )
         self._maybe_add_join_keys(result, left_indexer, right_indexer)
 
+        if IS_ARM:
+            return result.__finalize__(
+                types.SimpleNamespace(
+                    input_objs=[self.left, self.right],
+                    left=self.left,
+                    right=self.right,
+                ),
+                method="merge",
+            )
         return result
 
 
@@ -2821,16 +3148,44 @@ def _factorize_keys(
     elif (
         isinstance(lk.dtype, CategoricalDtype)
         and isinstance(rk.dtype, CategoricalDtype)
-        and lk.dtype == rk.dtype
+        and (lk.dtype == rk.dtype or (IS_ARM and lk.dtype.ordered == rk.dtype.ordered))
     ):
         assert isinstance(lk, Categorical)
         assert isinstance(rk, Categorical)
-        # Cast rk to encoding so we can compare codes with lk
 
-        rk = lk._encode_with_my_categories(rk)
+        if IS_ARM:
+            if not lk.categories.equals(rk.categories):
+                from pandas.api.types import union_categoricals
 
-        lk = ensure_int64(lk.codes)
-        rk = ensure_int64(rk.codes)
+                unified = union_categoricals([lk, rk])
+                lk_codes = unified[: len(lk)].codes
+                rk_codes = unified[len(lk) :].codes
+                count = len(unified.categories)
+            else:
+                lk_codes = lk.codes
+                rk_codes = rk.codes
+                count = len(lk.categories)
+
+            llab = lk_codes.astype(np.intp)
+            rlab = rk_codes.astype(np.intp)
+
+            lmask = llab == -1
+            lany = lmask.any()
+            rmask = rlab == -1
+            rany = rmask.any()
+            if lany or rany:
+                if lany:
+                    np.putmask(llab, lmask, count)
+                if rany:
+                    np.putmask(rlab, rmask, count)
+                count += 1
+
+            return llab, rlab, count
+        else:
+            # Cast rk to encoding so we can compare codes with lk
+            rk = lk._encode_with_my_categories(rk)
+            lk = ensure_int64(lk.codes)
+            rk = ensure_int64(rk.codes)
 
     elif isinstance(lk, ExtensionArray) and lk.dtype == rk.dtype:
         if isinstance(lk.dtype, ArrowDtype) or (
@@ -2898,30 +3253,74 @@ def _factorize_keys(
 
     klass, lk, rk = _convert_arrays_and_get_rizer_klass(lk, rk)
 
-    rizer = klass(
-        max(len(lk), len(rk)),
-        uses_mask=isinstance(rk, (BaseMaskedArray, ArrowExtensionArray)),
-    )
+    if IS_ARM:
+        uses_mask = isinstance(rk, (BaseMaskedArray, ArrowExtensionArray))
 
-    if isinstance(lk, BaseMaskedArray):
-        assert isinstance(rk, BaseMaskedArray)
-        lk_data, lk_mask = lk._data, lk._mask
-        rk_data, rk_mask = rk._data, rk._mask
-    elif isinstance(lk, ArrowExtensionArray):
-        assert isinstance(rk, ArrowExtensionArray)
-        # we can only get here with numeric dtypes
-        # TODO: Remove when we have a Factorizer for Arrow
-        lk_data = lk.to_numpy(na_value=1, dtype=lk.dtype.numpy_dtype)
-        rk_data = rk.to_numpy(na_value=1, dtype=lk.dtype.numpy_dtype)
-        lk_mask, rk_mask = lk.isna(), rk.isna()
+        if isinstance(lk, BaseMaskedArray):
+            assert isinstance(rk, BaseMaskedArray)
+            lk_data, lk_mask = lk._data, lk._mask
+            rk_data, rk_mask = rk._data, rk._mask
+        elif isinstance(lk, ArrowExtensionArray):
+            assert isinstance(rk, ArrowExtensionArray)
+            # we can only get here with numeric dtypes
+            # TODO: Remove when we have a Factorizer for Arrow
+            lk_data = lk.to_numpy(na_value=1, dtype=lk.dtype.numpy_dtype)
+            rk_data = rk.to_numpy(na_value=1, dtype=rk.dtype.numpy_dtype)
+            lk_mask, rk_mask = lk.isna(), rk.isna()
+        else:
+            # Argument 1 to "factorize" of "ObjectFactorizer" has incompatible type
+            # "Union[ndarray[Any, dtype[signedinteger[_64Bit]]],
+            # ndarray[Any, dtype[object_]]]"; expected "ndarray[Any, dtype[object_]]"
+            lk_data, rk_data = lk, rk  # type: ignore[assignment]
+            lk_mask, rk_mask = None, None
+
+        hash_join_available = how == "inner" and not sort and lk.dtype.kind in "iufb"
+        if hash_join_available and lk_mask is None and lk.dtype.kind in "iu" and len(rk_data) > 0:
+            rk_min = int(rk_data.min())
+            rk_max = int(rk_data.max())
+            rk_range = rk_max - rk_min + 1
+            if 0 < rk_range <= 10_000_000:
+                rk_offsets = (rk_data - rk_min).astype(np.intp)
+                lookup = np.full(rk_range, -1, dtype=np.int32)
+                arange_n = np.arange(len(rk_data), dtype=np.int32)
+                lookup[rk_offsets] = arange_n
+                if np.array_equal(lookup[rk_offsets], arange_n):
+                    offset_lk = (lk_data - rk_min).astype(np.intp)
+                    valid = (offset_lk >= 0) & (offset_lk < rk_range)
+                    lidx = np.flatnonzero(valid)
+                    ridx = lookup[offset_lk[lidx]].astype(np.intp)
+                    matched = ridx != -1
+                    lidx = lidx[matched]
+                    ridx = ridx[matched]
+                    return lidx, ridx, -1
+
+        rizer = klass(
+            max(len(lk), len(rk)),
+            uses_mask=uses_mask,
+        )
     else:
-        # Argument 1 to "factorize" of "ObjectFactorizer" has incompatible type
-        # "Union[ndarray[Any, dtype[signedinteger[_64Bit]]],
-        # ndarray[Any, dtype[object_]]]"; expected "ndarray[Any, dtype[object_]]"
-        lk_data, rk_data = lk, rk  # type: ignore[assignment]
-        lk_mask, rk_mask = None, None
+        rizer = klass(
+            max(len(lk), len(rk)),
+            uses_mask=isinstance(rk, (BaseMaskedArray, ArrowExtensionArray)),
+        )
 
-    hash_join_available = how == "inner" and not sort and lk.dtype.kind in "iufb"
+        if isinstance(lk, BaseMaskedArray):
+            assert isinstance(rk, BaseMaskedArray)
+            lk_data, lk_mask = lk._data, lk._mask
+            rk_data, rk_mask = rk._data, rk._mask
+        elif isinstance(lk, ArrowExtensionArray):
+            assert isinstance(rk, ArrowExtensionArray)
+            # we can only get here with numeric dtypes
+            # TODO: Remove when we have a Factorizer for Arrow
+            lk_data = lk.to_numpy(na_value=1, dtype=lk.dtype.numpy_dtype)
+            rk_data = rk.to_numpy(na_value=1, dtype=lk.dtype.numpy_dtype)
+            lk_mask, rk_mask = lk.isna(), rk.isna()
+        else:
+            lk_data, rk_data = lk, rk  # type: ignore[assignment]
+            lk_mask, rk_mask = None, None
+
+        hash_join_available = how == "inner" and not sort and lk.dtype.kind in "iufb"
+
     if hash_join_available:
         rlab = rizer.factorize(rk_data, mask=rk_mask)
         if rizer.get_count() == len(rlab):

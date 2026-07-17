@@ -33,6 +33,7 @@ from pandas._libs import (
     lib,
     writers,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.internals import BlockValuesRefs
 import pandas._libs.join as libjoin
 from pandas._libs.lib import (
@@ -5392,6 +5393,24 @@ class Index(IndexOpsMixin, PandasObject):
         corresponding `Index` subclass.
 
         """
+        if IS_ARM and (
+            isinstance(key, np.ndarray)
+            and key.dtype == np.bool_
+            and key.ndim != 0
+            and isinstance(self._data, np.ndarray)
+        ):
+            if len(key) != len(self):
+                raise ValueError(
+                    "The length of the boolean indexer does not match "
+                    "the length of the Index."
+                )
+            if self._data.dtype == object:
+                result = lib.fast_bool_index_objarray(self._data, key.view(np.uint8))
+            else:
+                result = self._data.compress(key)
+            cls = type(self)
+            return cls._simple_new(result, name=self._name)
+
         getitem = self._data.__getitem__
 
         key = lib.item_from_zerodim(key)
@@ -5404,6 +5423,20 @@ class Index(IndexOpsMixin, PandasObject):
             # This case is separated from the conditional above to avoid
             # pessimization com.is_bool_indexer and ndim checks.
             return self._getitem_slice(key)
+
+        # Fast path for boolean Series indexing
+        if IS_ARM and isinstance(key, ABCSeries) and key.dtype == np.bool_:
+            mask = key._values
+            if len(mask) != len(self):
+                raise ValueError(
+                    "The length of the boolean indexer does not match "
+                    "the length of the Index."
+                )
+            if isinstance(self._data, np.ndarray):
+                result = lib.fast_bool_mask_indexer(self._data, mask)
+            else:
+                result = self._data[mask]
+            return type(self)._simple_new(result, name=self._name)
 
         if com.is_bool_indexer(key):
             # if we have list[bools, length=1e5] then doing this check+convert
