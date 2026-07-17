@@ -34,13 +34,15 @@ cnp.import_array()
 
 cdef extern from *:
     """
+    static inline int pandas_is_aarch64(void) {
     #if defined(__aarch64__)
-    #define PANDAS_AARCH64 1
+        return 1;
     #else
-    #define PANDAS_AARCH64 0
+        return 0;
     #endif
+    }
     """
-    bint PANDAS_AARCH64
+    bint pandas_is_aarch64() noexcept nogil
 
 
 from pandas._libs cimport util
@@ -761,7 +763,7 @@ def group_sum(
         nan_val = NAN
 
     if sum_t is float32_t or sum_t is float64_t:
-        if PANDAS_AARCH64 and not uses_mask and skipna and not is_datetimelike:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
             with nogil:
                 for i in range(N):
                     lab = labels[i]
@@ -1301,7 +1303,7 @@ def group_mean(
         nan_val = NAN
 
     if mean_t is float32_t or mean_t is float64_t:
-        if PANDAS_AARCH64 and not uses_mask and skipna and not is_datetimelike:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
             with nogil:
                 for i in range(N):
                     lab = labels[i]
@@ -2015,7 +2017,7 @@ cdef group_min_max(
     N, K = (<object>values).shape
 
     if numeric_t is float32_t or numeric_t is float64_t:
-        if PANDAS_AARCH64 and not uses_mask and skipna and not is_datetimelike:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
             with nogil:
                 for i in range(N):
                     lab = labels[i]
