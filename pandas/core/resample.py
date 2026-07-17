@@ -150,7 +150,9 @@ class Resampler(BaseGroupBy, PandasObject):
         if _IS_ARM
         else {"obj", "ax", "_indexer"}
     )
-    _protected_names = frozenset({"_cache", "__setstate__"})
+    _protected_names = (
+        frozenset({"_cache", "__setstate__"}) if _IS_ARM else frozenset()
+    )
 
     # to the groupby descriptor
     _attributes = [
