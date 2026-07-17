@@ -20,6 +20,7 @@ from cpython.datetime cimport (
     time,
     timedelta,
 )
+from cpython.dict cimport PyDict_GetItemWithError
 from cpython.iterator cimport PyIter_Check
 from cpython.long cimport (
     PyLong_AsLongLongAndOverflow,
@@ -3519,6 +3520,7 @@ def fast_multiget(
     cdef:
         Py_ssize_t i, n = len(keys)
         object val
+        PyObject* item
         ndarray[object] output = np.empty(n, dtype="O")
 
     if n == 0:
@@ -3527,8 +3529,9 @@ def fast_multiget(
 
     for i in range(n):
         val = keys[i]
-        if val in mapping:
-            output[i] = mapping[val]
+        item = PyDict_GetItemWithError(mapping, val)
+        if item != NULL:
+            output[i] = <object>item
         else:
             output[i] = default
 
