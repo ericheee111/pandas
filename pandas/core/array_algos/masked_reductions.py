@@ -6,7 +6,7 @@ for missing values.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-import platform
+from pandas.compat import is_platform_arm
 import warnings
 
 import numpy as np
@@ -15,7 +15,7 @@ from pandas._libs import missing as libmissing
 
 from pandas.core.nanops import check_below_min_count
 
-_IS_ARM = platform.machine() == "aarch64"
+_IS_ARM = is_platform_arm()
 
 if TYPE_CHECKING:
     from collections.abc import Callable

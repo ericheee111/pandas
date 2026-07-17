@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import decimal
 import operator
-import platform
+from pandas.compat import is_platform_arm
 from typing import (
     TYPE_CHECKING,
     Literal,
@@ -19,7 +19,7 @@ import warnings
 
 import numpy as np
 
-_IS_ARM = platform.machine() == "aarch64"
+_IS_ARM = is_platform_arm()
 
 from pandas._libs import (
     algos,
