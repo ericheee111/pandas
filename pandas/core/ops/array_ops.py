@@ -384,6 +384,7 @@ def arithmetic_op(left: ArrayLike, right: Any, op):
             and left.dtype == np.dtype(np.int64)
             and right.dtype == np.dtype(np.int64)
             and left.ndim == right.ndim == 1
+            and left.shape == right.shape
             and left.flags.c_contiguous
             and right.flags.c_contiguous
         ):
