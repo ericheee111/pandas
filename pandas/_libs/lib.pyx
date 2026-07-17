@@ -81,16 +81,8 @@ cdef extern from "pandas/parser/pd_parser.h":
 
 PandasParser_IMPORT
 
-cdef extern from *:
-    """
-    #if defined(__aarch64__)
-    #define PANDAS_AARCH64 1
-    #else
-    #define PANDAS_AARCH64 0
-    #endif
-    """
-    enum:
-        PANDAS_AARCH64
+cdef extern from "pandas/portable.h":
+    bint pandas_is_aarch64() noexcept nogil
 
 from pandas._libs cimport util
 from pandas._libs.util cimport (
@@ -3020,7 +3012,7 @@ def maybe_convert_object_int64(ndarray[object] objects):
         long long converted
         int overflow
 
-    if not PANDAS_AARCH64:
+    if not pandas_is_aarch64():
         return None
 
     ints = cnp.PyArray_EMPTY(1, objects.shape, cnp.NPY_INT64, 0)
