@@ -377,9 +377,22 @@ def arithmetic_op(left: ArrayLike, right: Any, op):
         # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
         _bool_arith_check(op, left, right)  # type: ignore[arg-type]
 
-        # error: Argument 1 to "_na_arithmetic_op" has incompatible type
-        # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
-        res_values = _na_arithmetic_op(left, right, op)  # type: ignore[arg-type]
+        if (
+            op is operator.truediv
+            and isinstance(left, np.ndarray)
+            and isinstance(right, np.ndarray)
+            and left.dtype == np.dtype(np.int64)
+            and right.dtype == np.dtype(np.int64)
+            and left.ndim == right.ndim == 1
+            and left.flags.c_contiguous
+            and right.flags.c_contiguous
+        ):
+            res_values = libops.int64_true_divide(left, right)
+        else:
+            # error: Argument 1 to "_na_arithmetic_op" has incompatible type
+            # "Union[ExtensionArray, ndarray[Any, Any]]"; expected
+            # "ndarray[Any, Any]"
+            res_values = _na_arithmetic_op(left, right, op)  # type: ignore[arg-type]
 
     return res_values
 
