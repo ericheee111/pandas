@@ -117,6 +117,7 @@ from pandas.core.dtypes.common import (
     is_bool_dtype,
     is_dict_like,
     is_extension_array_dtype,
+    is_1d_only_ea_dtype,
     is_list_like,
     is_number,
     is_numeric_dtype,
@@ -7125,7 +7126,10 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
                 axis == 0
                 and self.columns.is_unique
                 and len(blocks) == 1
-                and isinstance(blocks[0].values, np.ndarray)
+                and (
+                    isinstance(blocks[0].values, np.ndarray)
+                    or not is_1d_only_ea_dtype(blocks[0].dtype)
+                )
                 and blocks[0].values.ndim == 2
                 and all(column in value for column in self.columns)
             ):
@@ -7140,6 +7144,30 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
                     ).reshape(1, -1)
                     new_data = self._mgr.fillna(
                         value=fill_values, limit=limit, inplace=inplace
+                    )
+                    result = self._constructor_from_mgr(new_data, axes=new_data.axes)
+                    if inplace:
+                        self._update_inplace(result)
+                        return self
+                    return result.__finalize__(self, method="fillna")
+
+            if (
+                axis == 0
+                and self.columns.is_unique
+                and len(blocks) > 1
+                and all(len(block.mgr_locs) == 1 for block in blocks)
+                and all(column in value for column in self.columns)
+            ):
+                dict_values = [value[column] for column in self.columns]
+                if all(
+                    is_scalar(dict_values[block.mgr_locs.as_array[0]])
+                    and can_hold_element(
+                        block.values, dict_values[block.mgr_locs.as_array[0]]
+                    )
+                    for block in blocks
+                ):
+                    new_data = self._mgr.fillna_by_column(
+                        dict_values, limit=limit, inplace=inplace
                     )
                     result = self._constructor_from_mgr(new_data, axes=new_data.axes)
                     if inplace:
