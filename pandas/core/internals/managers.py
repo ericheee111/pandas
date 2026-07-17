@@ -2446,10 +2446,7 @@ def _stack_arrays(tuples, dtype: np.dtype):
     first = arrays[0]
     shape = (len(arrays), *first.shape)
 
-    stacked = np.empty(shape, dtype=dtype)
-    for i, arr in enumerate(arrays):
-        stacked[i] = arr
-
+    stacked = np.array(arrays, dtype=dtype)
     return stacked, placement
 
 

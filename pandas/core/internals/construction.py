@@ -107,6 +107,13 @@ def arrays_to_mgr(
 
     Needs to handle a lot of exceptional cases.
     """
+    if not verify_integrity:
+        # DataFrame._from_arrays documents these inputs as pre-validated.
+        refs = [None] * len(arrays)
+        return create_block_manager_from_column_arrays(
+            arrays, [columns, index], consolidate=consolidate, refs=refs
+        )
+
     if verify_integrity:
         # figure out the index, if necessary
         if index is None:
