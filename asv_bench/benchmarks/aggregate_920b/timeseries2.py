@@ -290,18 +290,15 @@ class _Official_timeseries_DatetimeAccessor:
         self.series.dt.year
 
 
-def _select_case_params(case_type, method_name, param_indices):
-    method = getattr(case_type, method_name)
-    raw_params = getattr(method, "params", getattr(case_type, "params", ()))
-    params = list(raw_params)
-    if params and not isinstance(params[0], (tuple, list)):
-        params = [params]
-    else:
-        params = [list(axis) for axis in params]
-    return tuple(params[axis][index] for axis, index in enumerate(param_indices))
+from .._aggregate_common import (
+    _AggregateBenchmark,
+    select_case_params as _select_case_params,
+)
+
+from .attrs_caching2 import _Official_attrs_caching_DataFrameAttributes
 
 
-class DatetimeAccessor:
+class DatetimeAccessor(_AggregateBenchmark):
     """Aggregate timeseries.DatetimeAccessor with frozen 920b weights."""
 
     case_params = (
@@ -324,179 +321,47 @@ class DatetimeAccessor:
     )
     case_types = (_Official_timeseries_DatetimeAccessor, _Official_timeseries_DatetimeAccessor, _Official_timeseries_DatetimeAccessor, _Official_timeseries_DatetimeAccessor,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
+class ResetIndex(_AggregateBenchmark):
+    """Aggregate index reset and assignment operations with frozen 920b weights."""
 
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
+    case_params = (
+        _select_case_params(_Official_timeseries_ResetIndex, 'time_reset_datetimeindex', (0,)),  # timeseries.ResetIndex.time_reset_datetimeindex(None)
+        _select_case_params(_Official_timeseries_ResetIndex, 'time_reset_datetimeindex', (1,)),  # timeseries.ResetIndex.time_reset_datetimeindex('US/Eastern')
+        _select_case_params(_Official_attrs_caching_DataFrameAttributes, 'time_set_index', ()),  # attrs_caching.DataFrameAttributes.time_set_index
+    )
+    run_repeat = (
+        1,  # timeseries.ResetIndex.time_reset_datetimeindex(None)
+        1,  # timeseries.ResetIndex.time_reset_datetimeindex('US/Eastern')
+        1,  # attrs_caching.DataFrameAttributes.time_set_index
+    )
+    case_methods = (
+        'time_reset_datetimeindex',
+        'time_reset_datetimeindex',
+        'time_set_index',
+    )
+    case_types = (_Official_timeseries_ResetIndex, _Official_timeseries_ResetIndex, _Official_attrs_caching_DataFrameAttributes)
 
 
-class ResampleDataFrame:
-    """Aggregate timeseries.ResampleDataFrame with frozen 920b weights."""
+class ResampleDataFrame(_AggregateBenchmark):
+    """Aggregate timeseries resample operations with frozen 920b weights."""
 
     case_params = (
         _select_case_params(_Official_timeseries_ResampleDataFrame, 'time_method', (0,)),  # timeseries.ResampleDataFrame.time_method('max')
         _select_case_params(_Official_timeseries_ResampleDataFrame, 'time_method', (1,)),  # timeseries.ResampleDataFrame.time_method('mean')
         _select_case_params(_Official_timeseries_ResampleDataFrame, 'time_method', (2,)),  # timeseries.ResampleDataFrame.time_method('min')
+        _select_case_params(_Official_timeseries_ResampleDatetetime64, 'time_resample', ()),  # timeseries.ResampleDatetetime64.time_resample
     )
     run_repeat = (
         1,  # timeseries.ResampleDataFrame.time_method('max')
         1,  # timeseries.ResampleDataFrame.time_method('mean')
         1,  # timeseries.ResampleDataFrame.time_method('min')
-    )
-    case_methods = (
-        'time_method',
-        'time_method',
-        'time_method',
-    )
-    case_types = (_Official_timeseries_ResampleDataFrame, _Official_timeseries_ResampleDataFrame, _Official_timeseries_ResampleDataFrame,)
-
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
-
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class ResampleDatetetime64:
-    """Aggregate timeseries.ResampleDatetetime64 with frozen 920b weights."""
-
-    case_params = (
-        _select_case_params(_Official_timeseries_ResampleDatetetime64, 'time_resample', ()),  # timeseries.ResampleDatetetime64.time_resample
-    )
-    run_repeat = (
         1,  # timeseries.ResampleDatetetime64.time_resample
     )
     case_methods = (
+        'time_method',
+        'time_method',
+        'time_method',
         'time_resample',
     )
-    case_types = (_Official_timeseries_ResampleDatetetime64,)
-
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
-
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
+    case_types = (_Official_timeseries_ResampleDataFrame, _Official_timeseries_ResampleDataFrame, _Official_timeseries_ResampleDataFrame, _Official_timeseries_ResampleDatetetime64,)

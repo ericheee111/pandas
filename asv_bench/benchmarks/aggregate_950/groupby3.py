@@ -802,18 +802,13 @@ class _Official_groupby_Resample:
         self.df_multiindex.groupby(level='groups').resample('10s', level='timedeltas').mean()
 
 
-def _select_case_params(case_type, method_name, param_indices):
-    method = getattr(case_type, method_name)
-    raw_params = getattr(method, "params", getattr(case_type, "params", ()))
-    params = list(raw_params)
-    if params and not isinstance(params[0], (tuple, list)):
-        params = [params]
-    else:
-        params = [list(axis) for axis in params]
-    return tuple(params[axis][index] for axis, index in enumerate(param_indices))
+from .._aggregate_common import (
+    _AggregateBenchmark,
+    select_case_params as _select_case_params,
+)
 
 
-class AggFunctions:
+class AggFunctions(_AggregateBenchmark):
     """Aggregate groupby.AggFunctions with frozen 950 weights."""
 
     case_params = (
@@ -833,55 +828,8 @@ class AggFunctions:
     )
     case_types = (_Official_groupby_AggFunctions, _Official_groupby_AggFunctions, _Official_groupby_AggFunctions,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Cumulative:
+class Cumulative(_AggregateBenchmark):
     """Aggregate groupby.Cumulative with frozen 950 weights."""
 
     case_params = (
@@ -955,55 +903,8 @@ class Cumulative:
     )
     case_types = (_Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative, _Official_groupby_Cumulative,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Fillna:
+class Fillna(_AggregateBenchmark):
     """Aggregate groupby.Fillna with frozen 950 weights."""
 
     case_params = (
@@ -1026,55 +927,8 @@ class Fillna:
     )
     case_types = (_Official_groupby_Fillna, _Official_groupby_Fillna, _Official_groupby_Fillna, _Official_groupby_Fillna,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class GroupByCythonAgg:
+class GroupByCythonAgg(_AggregateBenchmark):
     """Aggregate groupby.GroupByCythonAgg with frozen 950 weights."""
 
     case_params = (
@@ -1109,55 +963,8 @@ class GroupByCythonAgg:
     )
     case_types = (_Official_groupby_GroupByCythonAgg, _Official_groupby_GroupByCythonAgg, _Official_groupby_GroupByCythonAgg, _Official_groupby_GroupByCythonAgg, _Official_groupby_GroupByCythonAgg, _Official_groupby_GroupByCythonAgg, _Official_groupby_GroupByCythonAgg, _Official_groupby_GroupByCythonAgg,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class GroupByMethods:
+class GroupByMethods(_AggregateBenchmark):
     """Aggregate groupby.GroupByMethods with frozen 950 weights."""
 
     case_params = (
@@ -1309,55 +1116,8 @@ class GroupByMethods:
     )
     case_types = (_Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Groups:
+class Groups(_AggregateBenchmark):
     """Aggregate groupby.Groups with frozen 950 weights."""
 
     case_params = (
@@ -1392,55 +1152,8 @@ class Groups:
     )
     case_types = (_Official_groupby_Groups, _Official_groupby_Groups, _Official_groupby_Groups, _Official_groupby_Groups, _Official_groupby_Groups, _Official_groupby_Groups, _Official_groupby_Groups, _Official_groupby_Groups,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Nth:
+class Nth(_AggregateBenchmark):
     """Aggregate groupby.Nth with frozen 950 weights."""
 
     case_params = (
@@ -1523,55 +1236,8 @@ class Nth:
     )
     case_types = (_Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth, _Official_groupby_Nth,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class RankWithTies:
+class RankWithTies(_AggregateBenchmark):
     """Aggregate groupby.RankWithTies with frozen 950 weights."""
 
     case_params = (
@@ -1642,55 +1308,8 @@ class RankWithTies:
     )
     case_types = (_Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies, _Official_groupby_RankWithTies,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class String:
+class String(_AggregateBenchmark):
     """Aggregate groupby.String with frozen 950 weights."""
 
     case_params = (
@@ -1742,50 +1361,3 @@ class String:
         'time_str_func',
     )
     case_types = (_Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String, _Official_groupby_String,)
-
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
-
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)

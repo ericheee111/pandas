@@ -771,18 +771,13 @@ class _Official_frame_methods_Update:
         self.df_sample.update(self.df)
 
 
-def _select_case_params(case_type, method_name, param_indices):
-    method = getattr(case_type, method_name)
-    raw_params = getattr(method, "params", getattr(case_type, "params", ()))
-    params = list(raw_params)
-    if params and not isinstance(params[0], (tuple, list)):
-        params = [params]
-    else:
-        params = [list(axis) for axis in params]
-    return tuple(params[axis][index] for axis, index in enumerate(param_indices))
+from .._aggregate_common import (
+    _AggregateBenchmark,
+    select_case_params as _select_case_params,
+)
 
 
-class Apply:
+class Apply(_AggregateBenchmark):
     """Aggregate frame_methods.Apply with frozen 920b weights."""
 
     case_params = (
@@ -799,55 +794,8 @@ class Apply:
     )
     case_types = (_Official_frame_methods_Apply, _Official_frame_methods_Apply,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class AsType:
+class AsType(_AggregateBenchmark):
     """Aggregate frame_methods.AsType with frozen 920b weights."""
 
     case_params = (
@@ -882,55 +830,8 @@ class AsType:
     )
     case_types = (_Official_frame_methods_AsType, _Official_frame_methods_AsType, _Official_frame_methods_AsType, _Official_frame_methods_AsType, _Official_frame_methods_AsType, _Official_frame_methods_AsType, _Official_frame_methods_AsType, _Official_frame_methods_AsType,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Count:
+class Count(_AggregateBenchmark):
     """Aggregate frame_methods.Count with frozen 920b weights."""
 
     case_params = (
@@ -953,55 +854,8 @@ class Count:
     )
     case_types = (_Official_frame_methods_Count, _Official_frame_methods_Count, _Official_frame_methods_Count, _Official_frame_methods_Count,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Dropna:
+class Dropna(_AggregateBenchmark):
     """Aggregate frame_methods.Dropna with frozen 920b weights."""
 
     case_params = (
@@ -1036,55 +890,8 @@ class Dropna:
     )
     case_types = (_Official_frame_methods_Dropna, _Official_frame_methods_Dropna, _Official_frame_methods_Dropna, _Official_frame_methods_Dropna, _Official_frame_methods_Dropna, _Official_frame_methods_Dropna, _Official_frame_methods_Dropna, _Official_frame_methods_Dropna,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Fillna:
+class Fillna(_AggregateBenchmark):
     """Aggregate frame_methods.Fillna with frozen 920b weights."""
 
     case_params = (
@@ -1143,55 +950,8 @@ class Fillna:
     )
     case_types = (_Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna, _Official_frame_methods_Fillna,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Reindex:
+class Reindex(_AggregateBenchmark):
     """Aggregate frame_methods.Reindex with frozen 920b weights."""
 
     case_params = (
@@ -1217,55 +977,8 @@ class Reindex:
     )
     case_types = (_Official_frame_methods_Reindex, _Official_frame_methods_Reindex, _Official_frame_methods_Reindex, _Official_frame_methods_Reindex, _Official_frame_methods_Reindex,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class SeriesNuniqueWithNan:
+class SeriesNuniqueWithNan(_AggregateBenchmark):
     """Aggregate frame_methods.SeriesNuniqueWithNan with frozen 920b weights."""
 
     case_params = (
@@ -1279,55 +992,8 @@ class SeriesNuniqueWithNan:
     )
     case_types = (_Official_frame_methods_SeriesNuniqueWithNan,)
 
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
 
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
-
-
-class Where:
+class Where(_AggregateBenchmark):
     """Aggregate frame_methods.Where with frozen 920b weights."""
 
     case_params = (
@@ -1355,50 +1021,3 @@ class Where:
         'time_where',
     )
     case_types = (_Official_frame_methods_Where, _Official_frame_methods_Where, _Official_frame_methods_Where, _Official_frame_methods_Where, _Official_frame_methods_Where, _Official_frame_methods_Where,)
-
-    def setup(self):
-        lengths = {
-            len(self.case_params),
-            len(self.run_repeat),
-            len(self.case_methods),
-            len(self.case_types),
-        }
-        if lengths != {len(self.case_params)}:
-            raise ValueError('aggregate case metadata lengths differ')
-        self.cases = []
-        caches = {}
-        try:
-            for case_type, method_name, params in zip(
-                self.case_types, self.case_methods, self.case_params
-            ):
-                if case_type not in caches:
-                    cache_owner = case_type()
-                    setup_cache = getattr(cache_owner, 'setup_cache', None)
-                    cache = setup_cache() if setup_cache is not None else None
-                    caches[case_type] = cache
-                cache = caches[case_type]
-                call_params = ((cache,) if cache is not None else ()) + tuple(params)
-                case = case_type()
-                case_setup = getattr(case, 'setup', None)
-                if case_setup is not None:
-                    case_setup(*call_params)
-                self.cases.append((case, method_name, call_params))
-        except BaseException:
-            self.teardown()
-            raise
-
-    def time_aggregate(self):
-        for (case, method_name, call_params), repeat in zip(
-            self.cases, self.run_repeat
-        ):
-            method = getattr(case, method_name)
-            for _ in range(repeat):
-                method(*call_params)
-
-    def teardown(self):
-        cases = getattr(self, 'cases', [])
-        while cases:
-            case, _method_name, call_params = cases.pop()
-            case_teardown = getattr(case, 'teardown', None)
-            if case_teardown is not None:
-                case_teardown(*call_params)
