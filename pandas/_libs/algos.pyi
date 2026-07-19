@@ -31,6 +31,11 @@ def groupsort_indexer(
     np.ndarray,  # ndarray[int64_t, ndim=1]
     np.ndarray,  # ndarray[int64_t, ndim=1]
 ]: ...
+def count_categorical_codes(
+    codes: np.ndarray,
+    ncategories: int,
+    dropna: bool,
+) -> npt.NDArray[np.int64]: ...
 def kth_smallest(
     arr: np.ndarray,  # numeric[:]
     k: int,

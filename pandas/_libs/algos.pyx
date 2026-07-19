@@ -99,6 +99,13 @@ tiebreakers = {
 }
 
 
+ctypedef fused categorical_code_t:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
+
+
 class Infinity:
     """
     Provide a positive Infinity comparison method for ranking.
@@ -279,6 +286,30 @@ def groupsort_indexer(const intp_t[:] index, Py_ssize_t ngroups):
             where[label] += 1
 
     return indexer.base, counts.base
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def count_categorical_codes(
+    const categorical_code_t[:] codes,
+    Py_ssize_t ncategories,
+    bint dropna,
+):
+    cdef:
+        Py_ssize_t i, code
+        int64_t[::1] counts = np.zeros(
+            ncategories if dropna else ncategories + 1, dtype=np.int64
+        )
+
+    with nogil:
+        for i in range(len(codes)):
+            code = codes[i]
+            if code >= 0:
+                counts[code] += 1
+            elif not dropna:
+                counts[ncategories] += 1
+
+    return counts.base
 
 
 cdef Py_ssize_t swap(numeric_t *a, numeric_t *b) noexcept nogil:
