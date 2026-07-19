@@ -4008,7 +4008,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
     # Indexing Methods
 
     @final
-    def take(self, indices, axis: Axis = 0, **kwargs) -> Self:
+    def take(self, indices, axis: Axis = 0, verify: bool = True, **kwargs) -> Self:
         """
         Return the elements in the given *positional* indices along an axis.
 
@@ -4101,7 +4101,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
         new_data = self._mgr.take(
             indices,
             axis=self._get_block_manager_axis(axis),
-            verify=True,
+            verify=verify,
         )
         return self._constructor_from_mgr(new_data, axes=new_data.axes).__finalize__(
             self, method="take"

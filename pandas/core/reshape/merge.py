@@ -429,6 +429,26 @@ def _cross_merge(
             "left_index=True"
         )
 
+    # Architecture isolation: on ARM (aarch64) the cartesian product is
+    # expanded directly with broadcast/tile kernels and a zero-copy block
+    # assembly (see ``_cross_merge_arm``), which avoids the factorize/hash +
+    # Cython join machinery and the synthetic constant-key column. On x86
+    # the original synthetic-column inner-join path below is used unchanged,
+    # so x86 behaviour and performance are not affected. The fast path is
+    # also skipped for ``indicator``/``validate``, which need the full merge
+    # machinery.
+    if IS_ARM and not indicator and validate is None:
+        try:
+            return _cross_merge_arm(left, right, suffixes)
+        except Exception:
+            # Safety net: fall back to the synthetic-column path below if the
+            # ARM fast path unexpectedly fails for some input.
+            pass
+
+    # Generic path (x86, and ARM fallback for indicator/validate or an
+    # unexpected fast-path failure): synthesise a constant key column on both
+    # sides and inner-merge on it, then drop the synthetic column. For cross
+    # joins ``sort`` is a no-op (the synthetic key has a single unique value).
     cross_col = f"_cross_{uuid.uuid4()}"
     left = left.assign(**{cross_col: 1})
     right = right.assign(**{cross_col: 1})
@@ -451,6 +471,190 @@ def _cross_merge(
     )
     del res[cross_col]
     return res
+
+
+def _cross_merge_arm(
+    left: DataFrame,
+    right: DataFrame,
+    suffixes: Suffixes,
+) -> DataFrame:
+    """ARM-only fast path for a cross (cartesian) merge.
+
+    The row pairing of a cross join is fully determined (every left row is
+    paired with every right row, in order), so each column can be expanded
+    directly -- left columns via a broadcast-store (each value repeated
+    n_right times) and right columns via a block memcpy (tiled n_left times)
+    -- without materialising any take indexer and without the per-element
+    indirect gather of ``reindex_indexer``. The expanded columns are
+    assembled with a zero-copy block manager, bypassing the factorize/hash +
+    Cython join + synthetic constant-column machinery used by the generic
+    path in :func:`_cross_merge`.
+
+    Column types that cannot be expanded directly fall back to a block
+    reindex+concat path (still avoiding the synthetic column). Any
+    unexpected failure propagates to the caller, which falls back to the
+    generic synthetic-column path.
+    """
+    n_left = len(left)
+    n_right = len(right)
+    total = n_left * n_right
+
+    llabels, rlabels = _items_overlap_with_suffix(
+        left.columns, right.columns, suffixes
+    )
+
+    if total == 0:
+        # One side is empty: the cartesian product is empty. Preserve
+        # the suffixed column layout and the per-side dtypes without
+        # mutating the inputs.
+        from pandas import concat
+
+        left_part = left.iloc[:0].set_axis(llabels, axis=1)
+        right_part = right.iloc[:0].set_axis(rlabels, axis=1)
+        result = concat([left_part, right_part], axis=1)
+        result.index = default_index(0)
+        return result.__finalize__(
+            types.SimpleNamespace(
+                input_objs=[left, right], left=left, right=right
+            ),
+            method="merge",
+        )
+
+    # Direct cartesian expansion via broadcast/tile kernels with a
+    # zero-copy block assembly.
+    #
+    # Applicable to columns backed by a plain ndarray or by an
+    # NDArrayBacked ExtensionArray (StringArray(python), DatetimeArray, ...),
+    # and to pyarrow-backed ExtensionArrays (ArrowStringArray, ...) via
+    # zero-copy chunked views; other ExtensionArrays fall through to the
+    # block reindex+concat path below.
+    from pandas._libs.arrays import NDArrayBacked
+    from pandas.core.internals.managers import (
+        create_block_manager_from_column_arrays,
+    )
+
+    def _expand(arr: np.ndarray, n_other: int, *, is_left: bool) -> np.ndarray:
+        if is_left:
+            # each value repeated n_other times consecutively
+            return np.ascontiguousarray(
+                np.broadcast_to(arr[:, None], (len(arr), n_other))
+            ).reshape(-1)
+        # the whole array tiled n_other times
+        return np.tile(arr, n_other)
+
+    def _expand_ea(val, n_other: int, *, is_left: bool):
+        # Expand a single column for the cartesian product. Returns the
+        # expanded column (ndarray or ExtensionArray) or raises if the
+        # column type can't be expanded directly, in which case the caller
+        # falls back to the block reindex+concat path below.
+        if isinstance(val, np.ndarray):
+            return _expand(val, n_other, is_left=is_left)
+        if isinstance(val, NDArrayBacked):
+            # StringArray(python storage), DatetimeArray, ... backed by a
+            # plain ndarray; expand the backing ndarray and re-wrap.
+            return val._simple_new(
+                _expand(val._ndarray, n_other, is_left=is_left), val.dtype
+            )
+        pa_arr = getattr(val, "_pa_array", None)
+        if pa_arr is not None:
+            # pyarrow-backed ExtensionArray (e.g. ArrowStringArray): the
+            # expansion can be done with ZERO element/data copies by
+            # reusing the underlying Arrow buffers.
+            #  - right (tile): a ChunkedArray of n_other references to the
+            #    same chunk -> the whole array tiled n_other times.
+            #  - left (repeat): a ChunkedArray of one constant chunk per
+            #    source element, each referencing that element's value ->
+            #    each value repeated n_other times.
+            import pyarrow as pa
+
+            if pa_arr.num_chunks != 1:
+                pa_arr = pa_arr.combine_chunks()
+            chunk = pa_arr.chunk(0)
+            if is_left:
+                new_ca = pa.chunked_array(
+                    [pa.repeat(chunk[i], n_other) for i in range(len(chunk))]
+                )
+            else:
+                new_ca = pa.chunked_array([chunk] * n_other)
+            return type(val)._from_sequence(new_ca, dtype=val.dtype)
+        raise ValueError("column type not directly expandable")
+
+    left_vals = [
+        extract_array(left[c], extract_numpy=True) for c in left.columns
+    ]
+    right_vals = [
+        extract_array(right[c], extract_numpy=True) for c in right.columns
+    ]
+
+    arrays: list[AnyArrayLike] = []
+    refs: list = []
+    try:
+        for val in left_vals:
+            arrays.append(_expand_ea(val, n_right, is_left=True))
+            refs.append(None)
+        for val in right_vals:
+            arrays.append(_expand_ea(val, n_left, is_left=False))
+            refs.append(None)
+        mgr = create_block_manager_from_column_arrays(
+            arrays,
+            [llabels.append(rlabels), default_index(total)],
+            False,
+            refs,
+        )
+        result = left._constructor_from_mgr(mgr, axes=mgr.axes)
+        return result.__finalize__(
+            types.SimpleNamespace(
+                input_objs=[left, right], left=left, right=right
+            ),
+            method="merge",
+        )
+    except Exception:
+        # Be defensive: any column type that can't be expanded directly
+        # (or any unexpected issue in the block assembly) falls back to
+        # the block reindex+concat path below rather than raising.
+        pass
+
+    # Block reindex+concat fallback for ExtensionArray columns that could
+    # not be expanded directly. Computes the take indexers directly with
+    # numpy and reuses the block reindex + concat machinery, still avoiding
+    # the synthetic constant key column.
+    from pandas.core.internals.concat import concatenate_managers
+
+    result_index = default_index(total)
+
+    # left_indexer[i] = i // n_right  -> each left row repeated n_right
+    # times consecutively; right_indexer[i] = i % n_right -> the right
+    # rows tiled n_left times.
+    left_indexer = np.repeat(
+        np.arange(n_left, dtype=np.intp), n_right
+    )
+    right_indexer = np.tile(
+        np.arange(n_right, dtype=np.intp), n_left
+    )
+
+    left_indexers: dict[int, npt.NDArray[np.intp]] = {}
+    right_indexers: dict[int, npt.NDArray[np.intp]] = {}
+    if not is_range_indexer(left_indexer, n_left):
+        left_indexers[1] = left_indexer
+    if not is_range_indexer(right_indexer, n_right):
+        right_indexers[1] = right_indexer
+
+    result_columns = llabels.append(rlabels)
+    result_axes = [result_columns, result_index]
+
+    result_mgr = concatenate_managers(
+        [(left._mgr, left_indexers), (right._mgr, right_indexers)],
+        result_axes,
+        concat_axis=0,
+        copy=False,
+    )
+    result = left._constructor_from_mgr(result_mgr, axes=result_mgr.axes)
+    return result.__finalize__(
+        types.SimpleNamespace(
+            input_objs=[left, right], left=left, right=right
+        ),
+        method="merge",
+    )
 
 
 def _groupby_and_merge(
