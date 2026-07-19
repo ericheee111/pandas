@@ -56,6 +56,19 @@ def test_groupsort_indexer():
     tm.assert_numpy_array_equal(result, expected)
 
 
+def test_count_categorical_codes():
+    for dtype in ["int8", "int16", "int32", "int64"]:
+        codes = np.array([0, 1, 1, -1, 2], dtype=dtype)
+
+        result = libalgos.count_categorical_codes(codes, 4, dropna=True)
+        expected = np.array([1, 2, 1, 0], dtype=np.int64)
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = libalgos.count_categorical_codes(codes, 4, dropna=False)
+        expected = np.array([1, 2, 1, 0, 1], dtype=np.int64)
+        tm.assert_numpy_array_equal(result, expected)
+
+
 class TestPadBackfill:
     def test_backfill(self):
         old = np.array([1, 5, 10], dtype=np.int64)
