@@ -792,6 +792,14 @@ def factorize_array(
     from pandas.core.config_init import get_use_swisstable
 
     original = values
+    # AArch64-only fast path for object arrays that are entirely exact Python
+    # ints. Masks or explicit NA sentinels stay on the object path so missing
+    # value semantics are unchanged; non-matching arrays silently fall back.
+    if values.dtype == object and mask is None and na_value is None:
+        maybe_int64 = lib.maybe_convert_object_int64(values)
+        if maybe_int64 is not None:
+            values = maybe_int64
+
     if values.dtype.kind in "mM":
         # _get_hashtable_algo will cast dt64/td64 to i8 via _ensure_data, so we
         #  need to do the same to na_value. We are assuming here that the passed

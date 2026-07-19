@@ -21,6 +21,10 @@ from cpython.datetime cimport (
     timedelta,
 )
 from cpython.iterator cimport PyIter_Check
+from cpython.long cimport (
+    PyLong_AsLongLongAndOverflow,
+    PyLong_CheckExact,
+)
 from cpython.number cimport PyNumber_Check
 from cpython.object cimport (
     Py_EQ,
@@ -76,6 +80,9 @@ cdef extern from "pandas/parser/pd_parser.h":
     void PandasParser_IMPORT()
 
 PandasParser_IMPORT
+
+cdef extern from "pandas/portable.h":
+    bint pandas_is_aarch64() noexcept nogil
 
 from pandas._libs cimport util
 from pandas._libs.util cimport (
@@ -2987,6 +2994,53 @@ def maybe_convert_objects(ndarray[object] objects,
             return result
 
     return objects
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def maybe_convert_object_int64(ndarray[object] objects):
+    """
+    Convert an object array of exact Python ints to int64, or return None.
+
+    This intentionally excludes bools, integer subclasses, and out-of-range
+    Python ints so callers can fall back to object semantics unchanged.
+    """
+    cdef:
+        Py_ssize_t i, n = len(objects)
+        ndarray[int64_t] ints
+        object val
+        long long converted
+        int overflow
+
+    if not pandas_is_aarch64():
+        return None
+
+    if n > 0:
+        val = objects[0]
+        if not PyLong_CheckExact(val):
+            return None
+
+        overflow = 0
+        converted = PyLong_AsLongLongAndOverflow(val, &overflow)
+        if overflow != 0:
+            return None
+
+    ints = cnp.PyArray_EMPTY(1, objects.shape, cnp.NPY_INT64, 0)
+    if n > 0:
+        ints[0] = <int64_t>converted
+
+    for i in range(1, n):
+        val = objects[i]
+        if not PyLong_CheckExact(val):
+            return None
+
+        overflow = 0
+        converted = PyLong_AsLongLongAndOverflow(val, &overflow)
+        if overflow != 0:
+            return None
+        ints[i] = <int64_t>converted
+
+    return ints
 
 
 class _NoDefault(Enum):
