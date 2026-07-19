@@ -4025,6 +4025,11 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
             The axis on which to select elements. ``0`` means that we are
             selecting rows, ``1`` means that we are selecting columns.
             For `Series` this parameter is unused and defaults to 0.
+        verify : bool, default True
+            Check that the indices are within bounds. If ``False``, skip
+            bounds checking for performance. Intended for internal use only;
+            external callers should leave this as ``True`` to avoid
+            out-of-bounds access.
         **kwargs
             For compatibility with :meth:`numpy.take`. Has no effect on the
             output.

@@ -150,10 +150,8 @@ def is_bool_indexer(key: Any) -> bool:
     elif isinstance(key, list):
         # check if np.array(key).dtype would be bool
         if len(key) > 0:
-            if type(key) is not list:
-                # GH#42461 cython will raise TypeError if we pass a subclass
-                key = list(key)
-            return lib.is_bool_list(key)
+            # GH#42461 cython will raise TypeError if we pass a subclass
+            return lib.is_bool_list(list(key))
 
     return False
 

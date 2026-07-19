@@ -440,10 +440,14 @@ def _cross_merge(
     if IS_ARM and not indicator and validate is None:
         try:
             return _cross_merge_arm(left, right, suffixes)
-        except Exception:
+        except Exception as e:
             # Safety net: fall back to the synthetic-column path below if the
             # ARM fast path unexpectedly fails for some input.
-            pass
+            warnings.warn(
+                f"ARM cross-merge fast path failed, falling back: {e}",
+                RuntimeWarning,
+                stacklevel=find_stack_level(),
+            )
 
     # Generic path (x86, and ARM fallback for indicator/validate or an
     # unexpected fast-path failure): synthesise a constant key column on both
@@ -507,7 +511,7 @@ def _cross_merge_arm(
         # One side is empty: the cartesian product is empty. Preserve
         # the suffixed column layout and the per-side dtypes without
         # mutating the inputs.
-        from pandas import concat
+        from pandas import concat  # late import to avoid circular dependency
 
         left_part = left.iloc[:0].set_axis(llabels, axis=1)
         right_part = right.iloc[:0].set_axis(rlabels, axis=1)
@@ -528,6 +532,7 @@ def _cross_merge_arm(
     # and to pyarrow-backed ExtensionArrays (ArrowStringArray, ...) via
     # zero-copy chunked views; other ExtensionArrays fall through to the
     # block reindex+concat path below.
+    # late imports to avoid circular dependencies
     from pandas._libs.arrays import NDArrayBacked
     from pandas.core.internals.managers import (
         create_block_manager_from_column_arrays,
@@ -552,8 +557,8 @@ def _cross_merge_arm(
         if isinstance(val, NDArrayBacked):
             # StringArray(python storage), DatetimeArray, ... backed by a
             # plain ndarray; expand the backing ndarray and re-wrap.
-            return val._simple_new(
-                _expand(val._ndarray, n_other, is_left=is_left), val.dtype
+            return type(val)._simple_new(
+                _expand(val._ndarray, n_other, is_left=is_left), dtype=val.dtype
             )
         pa_arr = getattr(val, "_pa_array", None)
         if pa_arr is not None:
@@ -608,17 +613,19 @@ def _cross_merge_arm(
             ),
             method="merge",
         )
-    except Exception:
-        # Be defensive: any column type that can't be expanded directly
-        # (or any unexpected issue in the block assembly) falls back to
-        # the block reindex+concat path below rather than raising.
+    except (ValueError, TypeError):
+        # Any column type that can't be expanded directly (or any issue
+        # in the block assembly) falls back to the block reindex+concat
+        # path below rather than raising.
         pass
 
     # Block reindex+concat fallback for ExtensionArray columns that could
     # not be expanded directly. Computes the take indexers directly with
     # numpy and reuses the block reindex + concat machinery, still avoiding
     # the synthetic constant key column.
-    from pandas.core.internals.concat import concatenate_managers
+    from pandas.core.internals.concat import (  # late import to avoid circular dependency
+        concatenate_managers,
+    )
 
     result_index = default_index(total)
 

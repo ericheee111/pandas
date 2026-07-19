@@ -4369,14 +4369,16 @@ class DataFrame(NDFrame, OpsMixin):
             return self.where(key)
 
         # Do we have a (boolean) 1d indexer?
-        if IS_ARM and type(key) is list:
+        if IS_ARM and isinstance(key, list):
             # ARM-only fast path for a python list of bools: validate and
             # compute the positional indexer in a single pass (fusing the
             # validation, conversion to a bool ndarray and ``nonzero``),
             # detecting the common case where the True values are contiguous.
             # On non-ARM (x86) we fall through to the generic bool-indexer
             # path below, preserving the original behavior.
-            valid, indexer = bool_list_to_indexer(key)
+            # GH#42461: Cython rejects list subclasses (e.g. FrozenList);
+            # convert to a plain list before calling bool_list_to_indexer.
+            valid, indexer = bool_list_to_indexer(list(key))
             if valid:
                 if len(key) != len(self.index):
                     raise ValueError(
@@ -4457,6 +4459,10 @@ class DataFrame(NDFrame, OpsMixin):
         #   * an intp ndarray -> the True positions, guaranteed to lie in
         #     ``[0, len(self))`` because the boolean list was validated to have
         #     the same length as the index, so we can skip the bounds check.
+        # Precondition: caller must ensure indexer values are in
+        # ``[0, len(self.index))``. The ARM fast path in ``__getitem__``
+        # guarantees this by checking ``len(key) == len(self.index)`` before
+        # calling this method.
         if isinstance(indexer, slice):
             return self.iloc[indexer]
         return self.take(indexer, axis=0, verify=False)

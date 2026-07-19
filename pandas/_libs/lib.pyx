@@ -3579,10 +3579,12 @@ def bool_list_to_indexer(obj: list) -> tuple:
     Validate that ``obj`` is a list of Python bools and compute the positional
     indexer used for boolean row selection (``df[mask]``).
 
-    This fuses what used to be three separate full passes over the list
+    This reduces what used to be three separate full passes over the list
     (validation via ``is_bool_list``, conversion to a bool ndarray and
-    ``nonzero``) into a single pass, and additionally detects the common
-    case in which the ``True`` values form a single contiguous run.
+    ``nonzero``) to one pass (contiguous ``True`` case) or two passes
+    (non-contiguous case, where a second pass materialises the positions),
+    and additionally detects the common case in which the ``True`` values
+    form a single contiguous run.
 
     Returns
     -------
