@@ -4674,7 +4674,7 @@ class Index(IndexOpsMixin, PandasObject):
     @final
     def _join_non_unique(
         self, other: Index, how: JoinHow = "left", sort: bool = False
-    ) -> tuple[Index, npt.NDArray[np.intp], npt.NDArray[np.intp]]:
+    ) -> tuple[Index, npt.NDArray[np.intp] | None, npt.NDArray[np.intp] | None]:
         from pandas.core.reshape.merge import get_join_indexers_non_unique
 
         # We only get here if dtypes match
@@ -4685,9 +4685,9 @@ class Index(IndexOpsMixin, PandasObject):
         )
 
         if how == "right":
-            join_index = other.take(right_idx)
+            join_index = other.take(right_idx) if right_idx is not None else other[:]
         else:
-            join_index = self.take(left_idx)
+            join_index = self.take(left_idx) if left_idx is not None else self[:]
 
         if how == "outer":
             mask = left_idx == -1
