@@ -16,10 +16,172 @@ from pandas import (
     to_datetime,
 )
 import pandas._testing as tm
+from pandas.core.internals import BlockManager
 from pandas.tests.frame.common import _check_mixed_float
 
 
 class TestFillNA:
+    @pytest.mark.parametrize("dtype", ["float64", "float32", "object"])
+    @pytest.mark.parametrize("inplace", [False, True])
+    def test_fillna_complete_dict_homogeneous_manager_batch(
+        self, monkeypatch, dtype, inplace
+    ):
+        df = DataFrame(
+            [[np.nan, 2.0], [3.0, np.nan], [np.nan, np.nan]],
+            columns=["a", "b"],
+            dtype=dtype,
+        )
+        original = BlockManager.fillna
+        calls = 0
+
+        def wrapped(self, value, limit, inplace):
+            nonlocal calls
+            calls += 1
+            return original(self, value=value, limit=limit, inplace=inplace)
+
+        monkeypatch.setattr(BlockManager, "fillna", wrapped)
+        result = df.fillna({"a": 10.0, "b": 20.0}, inplace=inplace)
+
+        assert calls == 1
+        expected = DataFrame(
+            [[10.0, 2.0], [3.0, 20.0], [10.0, 20.0]],
+            columns=["a", "b"],
+            dtype=dtype,
+        )
+        if inplace:
+            assert result is df
+            result = df
+        tm.assert_frame_equal(result, expected)
+
+    def test_fillna_partial_dict_does_not_use_manager_batch(self, monkeypatch):
+        df = DataFrame({"a": [np.nan, 1.0], "b": [np.nan, 2.0]})
+
+        def fail_if_called(*args, **kwargs):
+            pytest.fail("partial dictionaries must use per-column fillna")
+
+        monkeypatch.setattr(BlockManager, "fillna", fail_if_called)
+        result = df.fillna({"a": 10.0})
+        expected = DataFrame({"a": [10.0, 1.0], "b": [np.nan, 2.0]})
+        tm.assert_frame_equal(result, expected)
+
+    def test_fillna_complete_dict_inplace_asymmetric_nulls(self):
+        df = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+
+        result = df.fillna({"a": 10.0, "b": 20.0}, inplace=True)
+
+        expected = DataFrame({"a": [10.0, 10.0], "b": [1.0, 2.0]})
+        assert result is df
+        tm.assert_frame_equal(df, expected)
+
+    def test_fillna_complete_dict_inplace_uses_2d_manager_value(
+        self, monkeypatch
+    ):
+        df = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+        original = BlockManager.fillna
+        value_shapes = []
+
+        def wrapped(self, value, limit, inplace):
+            value_shapes.append(value.shape)
+            return original(self, value=value, limit=limit, inplace=inplace)
+
+        monkeypatch.setattr(BlockManager, "fillna", wrapped)
+        result = df.fillna({"a": 10.0, "b": 20.0}, inplace=True)
+
+        expected = DataFrame({"a": [10.0, 10.0], "b": [1.0, 2.0]})
+        assert value_shapes == [(1, 2)]
+        assert result is df
+        tm.assert_frame_equal(df, expected)
+
+    def test_fillna_complete_dict_inplace_with_limit(self):
+        df = DataFrame(
+            {"a": [1.0, np.nan, 1.0], "b": [np.nan, 1.0, 1.0]}
+        )
+
+        result = df.fillna({"a": 10.0, "b": 20.0}, limit=1, inplace=True)
+
+        expected = DataFrame(
+            {"a": [1.0, 10.0, 1.0], "b": [20.0, 1.0, 1.0]}
+        )
+        assert result is df
+        tm.assert_frame_equal(df, expected)
+
+    def test_fillna_complete_dict_inplace_copy_on_write(self):
+        df = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+        view = df.copy(deep=False)
+
+        result = df.fillna({"a": 10.0, "b": 20.0}, inplace=True)
+
+        expected = DataFrame({"a": [10.0, 10.0], "b": [1.0, 2.0]})
+        assert result is df
+        tm.assert_frame_equal(df, expected)
+        expected_view = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+        tm.assert_frame_equal(view, expected_view)
+
+    @pytest.mark.parametrize(
+        "data, value, expected",
+        [
+            (
+                {
+                    "a": [Timestamp("2020-01-01"), NaT],
+                    "b": [NaT, Timestamp("2020-01-04")],
+                },
+                {
+                    "a": Timestamp("2021-01-01"),
+                    "b": Timestamp("2022-01-01"),
+                },
+                {
+                    "a": [Timestamp("2020-01-01"), Timestamp("2021-01-01")],
+                    "b": [Timestamp("2022-01-01"), Timestamp("2020-01-04")],
+                },
+            ),
+            (
+                {
+                    "a": [TimedeltaIndex(["1D"])[0], NaT],
+                    "b": [NaT, TimedeltaIndex(["4D"])[0]],
+                },
+                {
+                    "a": TimedeltaIndex(["10D"])[0],
+                    "b": TimedeltaIndex(["20D"])[0],
+                },
+                {
+                    "a": TimedeltaIndex(["1D", "10D"]),
+                    "b": TimedeltaIndex(["20D", "4D"]),
+                },
+            ),
+        ],
+    )
+    def test_fillna_complete_dict_inplace_datetimelike(
+        self, data, value, expected
+    ):
+        df = DataFrame(data)
+
+        result = df.fillna(value, inplace=True)
+
+        assert result is df
+        tm.assert_frame_equal(df, DataFrame(expected))
+
+    def test_fillna_complete_dict_unconsolidated_blocks(self):
+        df = DataFrame({"a": [np.nan, 1.0]})
+        df["b"] = [np.nan, 2.0]
+        assert len(df._mgr.blocks) == 2
+
+        result = df.fillna({"a": 10.0, "b": 20.0})
+
+        expected = DataFrame({"a": [10.0, 1.0], "b": [20.0, 2.0]})
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("inplace", [False, True])
+    def test_fillna_complete_dict_cannot_hold_element(self, inplace):
+        df = DataFrame({"a": [np.nan, 1.0], "b": [2.0, np.nan]})
+
+        result = df.fillna({"a": "x", "b": "y"}, inplace=inplace)
+
+        expected = DataFrame({"a": ["x", 1.0], "b": [2.0, "y"]})
+        if inplace:
+            assert result is df
+            result = df
+        tm.assert_frame_equal(result, expected)
+
     def test_fillna_dict_inplace_nonunique_columns(self):
         df = DataFrame(
             {"A": [np.nan] * 3, "B": [NaT, Timestamp(1), NaT], "C": [np.nan, "foo", 2]}

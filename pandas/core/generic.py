@@ -7086,6 +7086,33 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
             new_data = self._mgr.fillna(value=value, limit=limit, inplace=inplace)
 
         elif isinstance(value, (dict, ABCSeries)):
+            blocks = self._mgr.blocks
+            if (
+                axis == 0
+                and self.columns.is_unique
+                and len(blocks) == 1
+                and isinstance(blocks[0].values, np.ndarray)
+                and blocks[0].values.ndim == 2
+                and all(column in value for column in self.columns)
+            ):
+                dict_values = [value[column] for column in self.columns]
+                if all(
+                    is_scalar(fill_value)
+                    and can_hold_element(blocks[0].values, fill_value)
+                    for fill_value in dict_values
+                ):
+                    fill_values = np.asarray(
+                        dict_values, dtype=blocks[0].values.dtype
+                    ).reshape(1, -1)
+                    new_data = self._mgr.fillna(
+                        value=fill_values, limit=limit, inplace=inplace
+                    )
+                    result = self._constructor_from_mgr(new_data, axes=new_data.axes)
+                    if inplace:
+                        self._update_inplace(result)
+                        return self
+                    return result.__finalize__(self, method="fillna")
+
             result = self if inplace else self.copy(deep=False)
             if axis == 1:
                 # Check that all columns in result have the same dtype
