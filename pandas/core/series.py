@@ -951,10 +951,11 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
         values = self._row_apply_values
         if values is None:
             values = self._values
-        elif values is not self._values:
-            # A CoW write may have replaced the block holding the cached row.
-            return lib.no_default
         return values[loc]
+
+    def _invalidate_row_apply_cache(self) -> None:
+        if self._row_apply_values is not None:
+            object.__setattr__(self, "_row_apply_values", None)
 
     def _slice(self, slobj: slice, axis: AxisInt = 0) -> Series:
         # axis kwarg is retained for compat with NDFrame method
@@ -1103,6 +1104,7 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
                     _chained_assignment_msg, ChainedAssignmentError, stacklevel=2
                 )
 
+        self._invalidate_row_apply_cache()
         check_dict_or_set_indexers(key)
         key = com.apply_if_callable(key, self)
 

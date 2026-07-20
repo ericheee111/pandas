@@ -488,11 +488,18 @@ def test_apply_axis1_homogeneous_mutation_exception_preserved():
         df.apply(mutate_then_read, axis=1)
 
 
-def test_apply_axis1_single_row_homogeneous_mutation_visible():
+@pytest.mark.parametrize("setter", ["bracket", "loc", "iloc", "at", "iat"])
+def test_apply_axis1_single_row_homogeneous_mutation_visible(setter):
     df = DataFrame({"A": [1.0], "B": [10.0]})
 
     def mutate_then_read(row):
-        row["A"] = row["A"] + 100
+        value = row["A"] + 100
+        if setter == "bracket":
+            row["A"] = value
+        elif setter in ("loc", "at"):
+            getattr(row, setter)["A"] = value
+        else:
+            getattr(row, setter)[0] = value
         return row["A"]
 
     result = df.apply(mutate_then_read, axis=1)
