@@ -923,6 +923,8 @@ class _LocationIndexer(NDFrameIndexerBase):
                     _chained_assignment_msg, ChainedAssignmentError, stacklevel=2
                 )
 
+        if isinstance(self.obj, ABCSeries):
+            self.obj._invalidate_row_apply_cache()
         check_dict_or_set_indexers(key)
         if isinstance(key, tuple):
             key = (list(x) if is_iterator(x) else x for x in key)
@@ -2538,6 +2540,8 @@ class _ScalarAccessIndexer(NDFrameIndexerBase):
         return self.obj._get_value(*key, takeable=self._takeable)
 
     def __setitem__(self, key, value) -> None:
+        if isinstance(self.obj, ABCSeries):
+            self.obj._invalidate_row_apply_cache()
         if isinstance(key, tuple):
             key = tuple(com.apply_if_callable(x, self.obj) for x in key)
         else:
