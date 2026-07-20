@@ -3368,3 +3368,296 @@ class TestMergeCommonColsFastPath:
         right = DataFrame({"b": [3, 4]})
         with pytest.raises(MergeError, match="No common columns"):
             left.merge(right)
+
+
+class TestHashJoinLeftRight:
+    """Tests for the hash-based left/right join fast path.
+
+    When the dimension side (right for left join, left for right join) has
+    unique keys, a hash lookup is used instead of the sort-merge groupsort
+    algorithm.  These tests exercise that path and its fallbacks.
+    """
+
+    def test_left_join_unique_right_int64(self):
+        # Core fast path: left join with unique int64 right keys
+        left = DataFrame({"k": [1, 2, 3, 4, 5], "v": [10, 20, 30, 40, 50]})
+        right = DataFrame({"k": [3, 1, 5, 7], "w": ["a", "b", "c", "d"]})
+        result = left.merge(right, on="k", how="left")
+        expected = DataFrame(
+            {
+                "k": [1, 2, 3, 4, 5],
+                "v": [10, 20, 30, 40, 50],
+                "w": ["b", None, "a", None, "c"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_unique_right_preserves_left_order(self):
+        # Result must be in left order, not key-sorted order
+        left = DataFrame(
+            {"k": [5, 3, 1, 4, 2], "v": [50, 30, 10, 40, 20]}
+        )
+        right = DataFrame({"k": np.arange(1, 6), "w": list("abcde")})
+        result = left.merge(right, on="k", how="left")
+        tm.assert_series_equal(result["v"], left["v"], check_names=False)
+        tm.assert_series_equal(result["k"], left["k"], check_names=False)
+
+    def test_right_join_unique_left_int64(self):
+        left = DataFrame({"k": [1, 2, 3], "v": [10, 20, 30]})
+        right = DataFrame({"k": [3, 1, 4], "w": ["a", "b", "c"]})
+        result = left.merge(right, on="k", how="right")
+        expected = DataFrame(
+            {
+                "k": [3, 1, 4],
+                "v": [30, 10, None],
+                "w": ["a", "b", "c"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_non_unique_right_fallback(self):
+        # Non-unique right keys -> fallback to groupsort path
+        left = DataFrame({"k": [1, 2, 3], "v": [10, 20, 30]})
+        right = DataFrame({"k": [1, 1, 3], "w": ["a", "b", "c"]})
+        result = left.merge(right, on="k", how="left")
+        expected = DataFrame(
+            {
+                "k": [1, 1, 2, 3],
+                "v": [10, 10, 20, 30],
+                "w": ["a", "b", None, "c"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_float_keys_with_nan(self):
+        # NaN in right -> uniqueness check fails -> fallback
+        left = DataFrame({"k": [1.0, 2.0, 3.0], "v": [10, 20, 30]})
+        right = DataFrame(
+            {"k": [2.0, 1.0, np.nan], "w": ["a", "b", "c"]}
+        )
+        result = left.merge(right, on="k", how="left")
+        expected = DataFrame(
+            {
+                "k": [1.0, 2.0, 3.0],
+                "v": [10, 20, 30],
+                "w": ["b", "a", None],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_float_keys_no_nan_unique_right(self):
+        # Float keys, no NaN, unique right -> hash path used
+        left = DataFrame({"k": [1.0, 2.0, 3.0, 4.0], "v": [10, 20, 30, 40]})
+        right = DataFrame({"k": [3.0, 1.0, 2.0], "w": ["a", "b", "c"]})
+        result = left.merge(right, on="k", how="left")
+        expected = DataFrame(
+            {
+                "k": [1.0, 2.0, 3.0, 4.0],
+                "v": [10, 20, 30, 40],
+                "w": ["b", "c", "a", None],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_sort_true_uses_fallback(self):
+        # sort=True must not use the hash path (result must be sorted)
+        left = DataFrame({"k": [3, 1, 2], "v": [30, 10, 20]})
+        right = DataFrame({"k": [1, 2, 3], "w": ["a", "b", "c"]})
+        result = left.merge(right, on="k", how="left", sort=True)
+        assert result["k"].is_monotonic_increasing
+        expected = DataFrame(
+            {
+                "k": [1, 2, 3],
+                "v": [10, 20, 30],
+                "w": ["a", "b", "c"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_multikey_unique_right(self):
+        # Multi-key composite int64 with unique right -> hash path via
+        # _get_join_keys composite
+        left = DataFrame(
+            {"k1": [1, 2, 3], "k2": [10, 20, 30], "v": [100, 200, 300]}
+        )
+        right = DataFrame(
+            {
+                "k1": [2, 1, 3],
+                "k2": [20, 10, 30],
+                "w": ["a", "b", "c"],
+            }
+        )
+        result = left.merge(right, on=["k1", "k2"], how="left")
+        expected = DataFrame(
+            {
+                "k1": [1, 2, 3],
+                "k2": [10, 20, 30],
+                "v": [100, 200, 300],
+                "w": ["b", "a", "c"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_large_matches_reference(self):
+        # Large-scale: verify w-column matches a map-based reference
+        rng = np.random.default_rng(42)
+        n = 100_000
+        n_keys = 5_000
+        left = DataFrame(
+            {"k": rng.integers(0, n_keys, size=n), "v": np.arange(n)}
+        )
+        right = DataFrame(
+            {"k": np.arange(n_keys), "w": np.arange(n_keys) * 2}
+        )
+        result = left.merge(right, on="k", how="left")
+        expected_w = left["k"].map(dict(zip(right["k"], right["w"], strict=True)))
+        tm.assert_series_equal(
+            result["w"], expected_w, check_names=False
+        )
+
+    def test_left_join_all_unmatched(self):
+        # No keys match -> all right columns NaN, left preserved
+        left = DataFrame({"k": [1, 2, 3], "v": [10, 20, 30]})
+        right = DataFrame({"k": [4, 5, 6], "w": ["a", "b", "c"]})
+        result = left.merge(right, on="k", how="left")
+        assert len(result) == 3
+        tm.assert_series_equal(result["k"], left["k"], check_names=False)
+        tm.assert_series_equal(result["v"], left["v"], check_names=False)
+        assert result["w"].isna().all()
+
+    def test_right_join_all_unmatched(self):
+        left = DataFrame({"k": [1, 2, 3], "v": [10, 20, 30]})
+        right = DataFrame({"k": [4, 5, 6], "w": ["a", "b", "c"]})
+        result = left.merge(right, on="k", how="right")
+        expected = DataFrame(
+            {
+                "k": [4, 5, 6],
+                "v": [np.nan, np.nan, np.nan],
+                "w": ["a", "b", "c"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_bool_keys(self):
+        # bool dtype -> kind 'b', hash path applicable
+        left = DataFrame(
+            {"k": [True, False, True], "v": [1, 2, 3]}
+        )
+        right = DataFrame({"k": [True, False], "w": ["y", "n"]})
+        result = left.merge(right, on="k", how="left")
+        expected = DataFrame(
+            {
+                "k": [True, False, True],
+                "v": [1, 2, 3],
+                "w": ["y", "n", "y"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_int32_keys(self):
+        # int32 keys -> hash path applicable
+        left = DataFrame(
+            {"k": np.array([1, 2, 3], dtype=np.int32), "v": [10, 20, 30]}
+        )
+        right = DataFrame(
+            {
+                "k": np.array([3, 1], dtype=np.int32),
+                "w": ["a", "b"],
+            }
+        )
+        result = left.merge(right, on="k", how="left")
+        expected = DataFrame(
+            {
+                "k": np.array([1, 2, 3], dtype=np.int32),
+                "v": [10, 20, 30],
+                "w": ["b", None, "a"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("how", ["left", "right", "inner"])
+    def test_merge_indicator_hash_path(self, how):
+        # Indicator column must work correctly with hash join path
+        left = DataFrame({"k": [1, 2, 3], "v": [10, 20, 30]})
+        right = DataFrame({"k": [2, 3, 4], "w": ["a", "b", "c"]})
+        result = left.merge(right, on="k", how=how, indicator=True)
+        assert "_merge" in result.columns
+
+    def test_left_join_nullable_int_na_on_fact_side(self):
+        # Nullable Int64 with pd.NA on fact (left) side, clean unique right.
+        # Hash lookup must respect mask: NA rows must NOT match any real key.
+        left = DataFrame(
+            {"k": pd.array([1, 2, pd.NA], dtype="Int64"), "v": [10, 20, 30]}
+        )
+        right = DataFrame(
+            {"k": pd.array([2, 1], dtype="Int64"), "w": ["a", "b"]}
+        )
+        result = left.merge(right, on="k", how="left")
+        assert len(result) == 3
+        assert pd.isna(result.loc[2, "w"])  # NA row must not match
+
+    def test_left_join_float_nan_on_fact_side(self):
+        # Float keys with NaN on fact (left) side, clean unique right (no NaN).
+        # NaN in left must not match anything in right.
+        left = DataFrame(
+            {"k": [1.0, np.nan, 2.0], "v": [10, 20, 30]}
+        )
+        right = DataFrame({"k": [2.0, 1.0], "w": ["a", "b"]})
+        result = left.merge(right, on="k", how="left")
+        expected = DataFrame(
+            {
+                "k": [1.0, np.nan, 2.0],
+                "v": [10, 20, 30],
+                "w": ["b", None, "a"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_right_join_non_unique_left_fallback(self):
+        # Right join where left keys are NOT unique → fallback path
+        # (merge.py how=="right" else branch at factorize fallback)
+        left = DataFrame({"k": [1, 1, 2], "v": [10, 20, 30]})
+        right = DataFrame({"k": [2, 1], "w": ["a", "b"]})
+        result = left.merge(right, on="k", how="right")
+        expected = DataFrame(
+            {
+                "k": [2, 1, 1],
+                "v": [30, 10, 20],
+                "w": ["a", "b", "b"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_empty_right(self):
+        # Empty right table → all right columns NaN, left preserved
+        left = DataFrame({"k": [1, 2, 3], "v": [10, 20, 30]})
+        right = DataFrame({"k": np.array([], dtype=np.int64), "w": []})
+        result = left.merge(right, on="k", how="left")
+        assert len(result) == 3
+        tm.assert_series_equal(result["k"], left["k"], check_names=False)
+        tm.assert_series_equal(result["v"], left["v"], check_names=False)
+        assert result["w"].isna().all()
+
+    def test_left_join_uint_keys(self):
+        # uint keys (kind 'u' in "iufb") — hash path applicable
+        left = DataFrame(
+            {
+                "k": np.array([1, 2, 3], dtype=np.uint32),
+                "v": [10, 20, 30],
+            }
+        )
+        right = DataFrame(
+            {
+                "k": np.array([3, 1], dtype=np.uint32),
+                "w": ["a", "b"],
+            }
+        )
+        result = left.merge(right, on="k", how="left")
+        expected = DataFrame(
+            {
+                "k": np.array([1, 2, 3], dtype=np.uint32),
+                "v": [10, 20, 30],
+                "w": ["b", None, "a"],
+            }
+        )
+        tm.assert_frame_equal(result, expected)

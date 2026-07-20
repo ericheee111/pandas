@@ -2689,7 +2689,7 @@ def get_join_indexers_non_unique(
     right: ArrayLike,
     sort: bool = False,
     how: JoinHow = "inner",
-) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]:
+) -> tuple[npt.NDArray[np.intp] | None, npt.NDArray[np.intp] | None]:
     """
     Get join indexers for left and right.
 
@@ -2702,10 +2702,12 @@ def get_join_indexers_non_unique(
 
     Returns
     -------
-    np.ndarray[np.intp]
-        Indexer into left.
-    np.ndarray[np.intp]
-        Indexer into right.
+    np.ndarray[np.intp] or None
+        Indexer into left.  ``None`` when the left side is an identity
+        range (left join hash-join fast path).
+    np.ndarray[np.intp] or None
+        Indexer into right.  ``None`` when the right side is an identity
+        range (right join hash-join fast path).
     """
     lkey, rkey, count = _factorize_keys(left, right, sort=sort, how=how)
     if count == -1:
@@ -3381,7 +3383,7 @@ def _factorize_keys(
     rk: ArrayLike,
     sort: bool = True,
     how: str | None = None,
-) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], int]:
+) -> tuple[npt.NDArray[np.intp] | None, npt.NDArray[np.intp] | None, int]:
     """
     Encode left and right keys as enumerated types.
 
@@ -3402,10 +3404,14 @@ def _factorize_keys(
 
     Returns
     -------
-    np.ndarray[np.intp]
+    np.ndarray[np.intp] or None
         Left (resp. right if called with `key='right'`) labels, as enumerated type.
-    np.ndarray[np.intp]
+        ``None`` when the left/right hash-join fast path is used and the fact-side
+        indexer is an identity range (``how='left'`` → left is identity,
+        ``how='right'`` → right is identity).
+    np.ndarray[np.intp] or None
         Right (resp. left if called with `key='right'`) labels, as enumerated type.
+        ``None`` for the symmetric case described above.
     int
         Number of unique elements in union of left and right labels. -1 if we used
         a hash-join.
@@ -3589,8 +3595,16 @@ def _factorize_keys(
             lk_data, rk_data = lk, rk  # type: ignore[assignment]
             lk_mask, rk_mask = None, None
 
-        hash_join_available = how == "inner" and not sort and lk.dtype.kind in "iufb"
-        if hash_join_available and lk_mask is None and lk.dtype.kind in "iu" and len(rk_data) > 0:
+        hash_join_available = (
+            how in ("inner", "left", "right") and not sort and lk.dtype.kind in "iufb"
+        )
+        if (
+            hash_join_available
+            and how == "inner"
+            and lk_mask is None
+            and lk.dtype.kind in "iu"
+            and len(rk_data) > 0
+        ):
             rk_min = int(rk_data.min())
             rk_max = int(rk_data.max())
             rk_range = rk_max - rk_min + 1
@@ -3634,15 +3648,38 @@ def _factorize_keys(
             lk_data, rk_data = lk, rk  # type: ignore[assignment]
             lk_mask, rk_mask = None, None
 
-        hash_join_available = how == "inner" and not sort and lk.dtype.kind in "iufb"
+        hash_join_available = (
+            how == "inner" and not sort and lk.dtype.kind in "iufb"
+        )
 
+    # Hash-join fast path (inner/left/right).
+    #
+    # NaN safety invariant: when the dimension side contains NA values,
+    # ``factorize`` with ``ignore_na=True`` skips them, so
+    # ``get_count() < len(labels)`` and the uniqueness check fails →
+    # automatic fallback to the groupsort path.  When only the fact side
+    # has NA, ``HashTable.lookup`` respects the mask and returns
+    # ``na_position`` (which stays -1 after ``factorize``) for NA rows,
+    # so they are correctly treated as unmatched.
     if hash_join_available:
-        rlab = rizer.factorize(rk_data, mask=rk_mask)
-        if rizer.get_count() == len(rlab):
-            ridx, lidx = rizer.hash_inner_join(lk_data, lk_mask)
-            return lidx, ridx, -1
-        else:
+        if how in ("inner", "left"):
+            rlab = rizer.factorize(rk_data, mask=rk_mask)
+            if rizer.get_count() == len(rlab):
+                if how == "inner":
+                    ridx, lidx = rizer.hash_inner_join(lk_data, lk_mask)
+                    return lidx, ridx, -1
+                else:  # how == "left"
+                    ridx = rizer.table.lookup(lk_data, lk_mask)
+                    return None, ridx, -1
+            else:
+                llab = rizer.factorize(lk_data, mask=lk_mask)
+        else:  # how == "right"
             llab = rizer.factorize(lk_data, mask=lk_mask)
+            if rizer.get_count() == len(llab):
+                lidx = rizer.table.lookup(rk_data, rk_mask)
+                return lidx, None, -1
+            else:
+                rlab = rizer.factorize(rk_data, mask=rk_mask)
     else:
         llab = rizer.factorize(lk_data, mask=lk_mask)
         rlab = rizer.factorize(rk_data, mask=rk_mask)
