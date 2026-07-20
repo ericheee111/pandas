@@ -1,4 +1,5 @@
 import pickle
+import platform
 
 import numpy as np
 import pytest
@@ -15,6 +16,26 @@ import pandas._testing as tm
 
 
 class TestMisc:
+    def test_fast_string_kernels(self):
+        values = np.array(["Sha", "SGP", "fra"], dtype=object)
+
+        result = lib.fast_string_upper(values)
+        expected = np.array(["SHA", "SGP", "FRA"], dtype=object)
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = lib.fast_string_contains(values, "a")
+        expected = np.array([True, False, True])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = lib.fast_string_len(values)
+        expected = np.array([3, 3, 3], dtype=np.int64)
+        tm.assert_numpy_array_equal(result, expected)
+
+        mixed = np.array(["foo", None], dtype=object)
+        assert lib.fast_string_upper(mixed) is None
+        assert lib.fast_string_contains(mixed, "o") is None
+        assert lib.fast_string_len(mixed) is None
+
     def test_max_len_string_array(self):
         arr = a = np.array(["foo", "b", np.nan], dtype="object")
         assert libwriters.max_len_string_array(arr) == 3
@@ -306,6 +327,22 @@ def test_ensure_string_array_list_of_lists():
 
     # Each item in result should still be a list, not a stringified version
     expected = np.array(["['t', 'e', 's', 't']", "['w', 'o', 'r', 'd']"], dtype=object)
+    tm.assert_numpy_array_equal(result, expected)
+
+
+def test_ensure_string_array_large_unicode():
+    values = np.resize(np.array(["SHA", "SGP", "FRA"], dtype="U3"), 100_000)
+
+    result = lib.ensure_string_array(values)
+
+    expected = values.astype(object)
+    tm.assert_numpy_array_equal(result, expected)
+    if platform.machine() == "aarch64":
+        assert result[0] is result[3]
+
+    non_native = values.astype(values.dtype.newbyteorder("S"))
+    result = lib.ensure_string_array(non_native)
+    expected = non_native.astype(object)
     tm.assert_numpy_array_equal(result, expected)
 
 

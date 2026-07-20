@@ -37,10 +37,19 @@ from cpython.tuple cimport (
     PyTuple_New,
     PyTuple_SET_ITEM,
 )
+from cpython.unicode cimport (
+    PyUnicode_4BYTE_KIND,
+    PyUnicode_CheckExact,
+    PyUnicode_Contains,
+    PyUnicode_FromKindAndData,
+    PyUnicode_GET_LENGTH,
+)
 from cython cimport (
     Py_ssize_t,
     floating,
 )
+from libc.stdint cimport uint32_t
+from libc.string cimport memcmp
 
 from pandas._config import using_string_dtype
 
@@ -703,6 +712,88 @@ ctypedef fused ndarr_object:
     ndarray[object, ndim=1]
     ndarray[object, ndim=2]
 
+
+cdef extern from *:
+    """
+    static inline int pandas_string_array_aarch64(void) {
+    #if defined(__aarch64__)
+        return 1;
+    #else
+        return 0;
+    #endif
+    }
+    """
+    bint pandas_string_array_aarch64() noexcept nogil
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef object _deduplicate_unicode_array(ndarray arr):
+    cdef:
+        Py_ssize_t i, j, k, length
+        Py_ssize_t n = len(arr)
+        Py_ssize_t width = arr.dtype.itemsize // sizeof(uint32_t)
+        Py_ssize_t cache_size = 0
+        Py_ssize_t offsets[64]
+        Py_ssize_t lengths[64]
+        uint64_t hashes[64]
+        uint64_t value_hash
+        uint64_t packed_ascii
+        bint ascii_value
+        bint ascii_cache[64]
+        uint32_t *data = <uint32_t *>arr.data
+        uint32_t *value
+        uint32_t *cached
+        ndarray[object] result = np.empty(n, dtype=object)
+        object py_value
+
+    for i in range(n):
+        value = data + i * width
+        length = 0
+        value_hash = <uint64_t>1469598103934665603
+        packed_ascii = 0
+        ascii_value = width <= 8
+        while length < width and value[length] != 0:
+            value_hash = (
+                value_hash ^ <uint64_t>value[length]
+            ) * <uint64_t>1099511628211
+            if value[length] <= 127:
+                packed_ascii = (packed_ascii << 7) | value[length]
+            else:
+                ascii_value = False
+            length += 1
+        if ascii_value:
+            value_hash = packed_ascii
+
+        for j in range(cache_size):
+            if (
+                hashes[j] != value_hash
+                or lengths[j] != length
+                or ascii_cache[j] != ascii_value
+            ):
+                continue
+            cached = data + offsets[j] * width
+            if ascii_value or memcmp(
+                value, cached, length * sizeof(uint32_t)
+            ) == 0:
+                result[i] = result[offsets[j]]
+                break
+        else:
+            if cache_size == 64:
+                return None
+            py_value = PyUnicode_FromKindAndData(
+                PyUnicode_4BYTE_KIND, value, length
+            )
+            result[i] = py_value
+            offsets[cache_size] = i
+            lengths[cache_size] = length
+            hashes[cache_size] = value_hash
+            ascii_cache[cache_size] = ascii_value
+            cache_size += 1
+
+    return result
+
+
 # TODO: get rid of this in StringArray and modify
 #  and go through ensure_string_array instead
 
@@ -795,6 +886,19 @@ cpdef ndarray[object] ensure_string_array(
         input_arr = arr
         arr = np.empty(len(arr), dtype="object")
         arr[:] = input_arr
+
+    if (
+        pandas_string_array_aarch64()
+        and isinstance(arr, np.ndarray)
+        and arr.ndim == 1
+        and arr.dtype.kind == "U"
+        and arr.dtype.isnative
+        and arr.flags.c_contiguous
+        and n >= 100_000
+    ):
+        result = _deduplicate_unicode_array(arr)
+        if result is not None:
+            return result
 
     result = np.asarray(arr, dtype="object")
 
@@ -3203,6 +3307,56 @@ def map_contains(
         PyArray_ITER_NEXT(arr_it)
         PyArray_ITER_NEXT(result_it)
 
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def fast_string_upper(ndarray[object] arr):
+    cdef:
+        Py_ssize_t i
+        object val
+        ndarray[object] result = np.empty(len(arr), dtype=object)
+
+    for i in range(len(arr)):
+        val = arr[i]
+        if not PyUnicode_CheckExact(val):
+            return None
+        result[i] = val.upper()
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def fast_string_contains(ndarray[object] arr, object pat):
+    cdef:
+        Py_ssize_t i
+        object val
+        ndarray[cnp.npy_bool] result = np.empty(len(arr), dtype=np.bool_)
+
+    if not PyUnicode_CheckExact(pat):
+        return None
+    for i in range(len(arr)):
+        val = arr[i]
+        if not PyUnicode_CheckExact(val):
+            return None
+        result[i] = PyUnicode_Contains(val, pat)
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def fast_string_len(ndarray[object] arr):
+    cdef:
+        Py_ssize_t i
+        object val
+        ndarray[int64_t] result = np.empty(len(arr), dtype=np.int64)
+
+    for i in range(len(arr)):
+        val = arr[i]
+        if not PyUnicode_CheckExact(val):
+            return None
+        result[i] = PyUnicode_GET_LENGTH(val)
     return result
 
 
