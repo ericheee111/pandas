@@ -3,6 +3,8 @@ This module tests the functionality of StringArray and ArrowStringArray.
 Tests for the str accessors are in pandas/tests/strings/test_string_array.py
 """
 
+import operator
+
 import numpy as np
 import pytest
 
@@ -199,6 +201,28 @@ def test_constructor_nan_like(na):
         np.array(["a", na], dtype="object"), dtype=pd.StringDtype()
     )
     tm.assert_extension_array_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "op, expected",
+    [
+        (operator.eq, [False, False, True, False]),
+        (operator.ne, [True, True, False, True]),
+        (operator.lt, [True, False, False, False]),
+        (operator.le, [True, False, True, False]),
+        (operator.gt, [False, False, False, True]),
+        (operator.ge, [False, False, True, True]),
+    ],
+)
+def test_compare_string_scalar_nan_semantics_noncontiguous(op, expected):
+    dtype = pd.StringDtype("python", na_value=np.nan)
+    base = pd.array(["a", "x", None, "x", "b", "x", "c"], dtype=dtype)
+    arr = base[::2]
+
+    result = op(arr, "b")
+
+    expected = np.array(expected)
+    tm.assert_numpy_array_equal(result, expected)
 
 
 @pytest.mark.parametrize("copy", [True, False])
