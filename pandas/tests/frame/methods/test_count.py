@@ -46,19 +46,24 @@ class TestDataFrameCount:
 
 @pytest.mark.parametrize("axis", [0, 1])
 def test_count_float_block_uses_nancount(monkeypatch, axis):
-    df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
+    df = DataFrame([[1.0, np.nan, 3.0], [np.nan, 2.0, 4.0]])
     original = algos.nancount_2d
     called = False
 
     def wrapped(values, op_axis):
         nonlocal called
         called = True
+        assert op_axis == axis
         return original(values, op_axis)
 
     monkeypatch.setattr(algos, "nancount_2d", wrapped)
     result = df.count(axis=axis)
     assert called
-    expected = Series([1, 1], index=df._get_agg_axis(axis), dtype="int64")
+    expected = (
+        Series([1, 1, 2], index=df.columns, dtype="int64")
+        if axis == 0
+        else Series([2, 2], index=df.index, dtype="int64")
+    )
     tm.assert_series_equal(result, expected)
 
 

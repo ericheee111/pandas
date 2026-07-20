@@ -67,6 +67,8 @@ ctypedef fused nancount_float_t:
     float64_t
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
 def nancount_2d(const nancount_float_t[:, :] values, int axis):
     cdef:
         Py_ssize_t i, j
