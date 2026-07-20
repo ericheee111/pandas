@@ -626,11 +626,11 @@ class StringMethods(NoNewAttributesMixin):
             data = ensure_object(data)  # type: ignore[assignment]
             na_mask = isna(data)
             if na_rep is None and na_mask.any():
-                return sep.join(data[~na_mask])
+                return lib.cat_join(data[~na_mask], sep)
             elif na_rep is not None and na_mask.any():
-                return sep.join(np.where(na_mask, na_rep, data))
+                return lib.cat_join(np.where(na_mask, na_rep, data), sep)
             else:
-                return sep.join(data)
+                return lib.cat_join(data, sep)
 
         try:
             # turn anything in "others" into lists of Series
