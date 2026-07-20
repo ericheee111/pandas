@@ -308,6 +308,25 @@ def test_dropna_float_block_axis_1_uses_nancount(monkeypatch, how):
     tm.assert_frame_equal(result, expected)
 
 
+@pytest.mark.parametrize("axis", [0, 1])
+def test_dropna_float_block_thresh_uses_nancount(monkeypatch, axis):
+    df = DataFrame([[1.0, np.nan, 3.0], [np.nan, 2.0, 4.0]])
+    original = algos.nancount_2d
+    called = False
+
+    def wrapped(values, op_axis):
+        nonlocal called
+        called = True
+        assert op_axis == 1 - axis
+        return original(values, op_axis)
+
+    monkeypatch.setattr(algos, "nancount_2d", wrapped)
+    result = df.dropna(axis=axis, thresh=2)
+    assert called
+    expected = df if axis == 0 else df.iloc[:, [2]]
+    tm.assert_frame_equal(result, expected)
+
+
 @pytest.mark.parametrize("how", ["any", "all"])
 def test_dropna_float_block_axis_0_does_not_use_nancount(monkeypatch, how):
     df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
