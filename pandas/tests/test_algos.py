@@ -52,6 +52,34 @@ import pandas.core.common as com
 
 
 class TestFactorize:
+    def test_unique_large_array_uses_legacy_hashtable(self, monkeypatch):
+        class FailSwissTable:
+            def __init__(self, *args, **kwargs):
+                pytest.fail("large low-cardinality unique regresses with SwissTable")
+
+        monkeypatch.setitem(algos._swisstables, "float64", FailSwissTable)
+        values = np.zeros(1_000_001, dtype=np.float64)
+
+        with pd.option_context("compute.use_swisstable", True):
+            result = algos.unique(values)
+
+        tm.assert_numpy_array_equal(result, np.array([0.0]))
+
+    def test_factorize_array_mask_uses_legacy_hashtable(self, monkeypatch):
+        class FailSwissTable:
+            def __init__(self, *args, **kwargs):
+                pytest.fail("masked arrays regress on the SwissTable path")
+
+        monkeypatch.setitem(algos._swisstables, "int64", FailSwissTable)
+        values = np.array([1, 2, 1], dtype=np.int64)
+        mask = np.array([False, False, False])
+
+        with pd.option_context("compute.use_swisstable", True):
+            codes, uniques = algos.factorize_array(values, mask=mask)
+
+        tm.assert_numpy_array_equal(codes, np.array([0, 1, 0], dtype=np.intp))
+        tm.assert_numpy_array_equal(uniques, np.array([1, 2], dtype=np.int64))
+
     def test_factorize_complex(self):
         # GH#17927
         array = np.array([1, 2, 2 + 1j], dtype=complex)
