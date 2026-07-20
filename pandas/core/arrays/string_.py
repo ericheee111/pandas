@@ -20,6 +20,7 @@ from pandas._config import (
 )
 
 from pandas._libs import (
+    hashtable as libhashtable,
     lib,
     missing as libmissing,
     ops as libops,
@@ -829,6 +830,23 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
         arr = self._ndarray
 
         return arr, self.dtype.na_value
+
+    def factorize(
+        self,
+        use_na_sentinel: bool = True,
+    ) -> tuple[np.ndarray, ExtensionArray]:
+        if not use_na_sentinel:
+            return super().factorize(use_na_sentinel=use_na_sentinel)
+
+        table = libhashtable.StringHashTable(len(self))
+        uniques, codes = table.factorize(
+            self._ndarray,
+            na_sentinel=-1,
+            na_value=self.dtype.na_value,
+            ignore_na=True,
+            string_array=True,
+        )
+        return codes, self._from_factorized(uniques, self)
 
     def _maybe_convert_setitem_value(self, value):
         """Maybe convert value to be pyarrow compatible."""
