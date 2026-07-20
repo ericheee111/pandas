@@ -508,6 +508,24 @@ def test_apply_axis1_single_row_homogeneous_mutation_visible(setter):
     tm.assert_series_equal(result, expected)
 
 
+@pytest.mark.parametrize("share_kind", ["shallow_copy", "to_frame"])
+def test_apply_axis1_cow_mutation_visible_after_sharing(share_kind):
+    df = DataFrame({"A": [1.0, 2.0], "B": [10.0, 20.0]})
+
+    def share_mutate_then_read(row):
+        if share_kind == "shallow_copy":
+            _shared = row.copy(deep=False)
+        else:
+            _shared = row.to_frame()
+        row["A"] = row["A"] * 2
+        return row["A"]
+
+    result = df.apply(share_mutate_then_read, axis=1)
+
+    expected = Series([2.0, 4.0])
+    tm.assert_series_equal(result, expected)
+
+
 def test_apply_axis1_missing_label_raises_key_error():
     df = DataFrame({"A": [1, 2], "B": [10, 20]})
 
