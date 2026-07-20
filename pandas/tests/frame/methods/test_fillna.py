@@ -42,7 +42,7 @@ class TestFillNA:
         monkeypatch.setattr(BlockManager, "fillna", wrapped)
         result = df.fillna({"a": 10.0, "b": 20.0}, inplace=inplace)
 
-        assert calls == int(not inplace)
+        assert calls == 1
         expected = DataFrame(
             [[10.0, 2.0], [3.0, 20.0], [10.0, 20.0]],
             columns=["a", "b"],
@@ -73,6 +73,25 @@ class TestFillNA:
         assert result is df
         tm.assert_frame_equal(df, expected)
 
+    def test_fillna_complete_dict_inplace_uses_2d_manager_value(
+        self, monkeypatch
+    ):
+        df = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+        original = BlockManager.fillna
+        value_shapes = []
+
+        def wrapped(self, value, limit, inplace):
+            value_shapes.append(value.shape)
+            return original(self, value=value, limit=limit, inplace=inplace)
+
+        monkeypatch.setattr(BlockManager, "fillna", wrapped)
+        result = df.fillna({"a": 10.0, "b": 20.0}, inplace=True)
+
+        expected = DataFrame({"a": [10.0, 10.0], "b": [1.0, 2.0]})
+        assert value_shapes == [(1, 2)]
+        assert result is df
+        tm.assert_frame_equal(df, expected)
+
     def test_fillna_complete_dict_inplace_with_limit(self):
         df = DataFrame(
             {"a": [1.0, np.nan, 1.0], "b": [np.nan, 1.0, 1.0]}
@@ -85,6 +104,61 @@ class TestFillNA:
         )
         assert result is df
         tm.assert_frame_equal(df, expected)
+
+    def test_fillna_complete_dict_inplace_copy_on_write(self):
+        df = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+        view = df.copy(deep=False)
+
+        result = df.fillna({"a": 10.0, "b": 20.0}, inplace=True)
+
+        expected = DataFrame({"a": [10.0, 10.0], "b": [1.0, 2.0]})
+        assert result is df
+        tm.assert_frame_equal(df, expected)
+        expected_view = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+        tm.assert_frame_equal(view, expected_view)
+
+    @pytest.mark.parametrize(
+        "data, value, expected",
+        [
+            (
+                {
+                    "a": [Timestamp("2020-01-01"), NaT],
+                    "b": [NaT, Timestamp("2020-01-04")],
+                },
+                {
+                    "a": Timestamp("2021-01-01"),
+                    "b": Timestamp("2022-01-01"),
+                },
+                {
+                    "a": [Timestamp("2020-01-01"), Timestamp("2021-01-01")],
+                    "b": [Timestamp("2022-01-01"), Timestamp("2020-01-04")],
+                },
+            ),
+            (
+                {
+                    "a": [TimedeltaIndex(["1D"])[0], NaT],
+                    "b": [NaT, TimedeltaIndex(["4D"])[0]],
+                },
+                {
+                    "a": TimedeltaIndex(["10D"])[0],
+                    "b": TimedeltaIndex(["20D"])[0],
+                },
+                {
+                    "a": TimedeltaIndex(["1D", "10D"]),
+                    "b": TimedeltaIndex(["20D", "4D"]),
+                },
+            ),
+        ],
+    )
+    def test_fillna_complete_dict_inplace_datetimelike(
+        self, data, value, expected
+    ):
+        df = DataFrame(data)
+
+        result = df.fillna(value, inplace=True)
+
+        assert result is df
+        tm.assert_frame_equal(df, DataFrame(expected))
 
     def test_fillna_complete_dict_unconsolidated_blocks(self):
         df = DataFrame({"a": [np.nan, 1.0]})

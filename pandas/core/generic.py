@@ -7088,8 +7088,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
         elif isinstance(value, (dict, ABCSeries)):
             blocks = self._mgr.blocks
             if (
-                not inplace
-                and axis == 0
+                axis == 0
                 and self.columns.is_unique
                 and len(blocks) == 1
                 and isinstance(blocks[0].values, np.ndarray)
@@ -7104,7 +7103,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
                 ):
                     fill_values = np.asarray(
                         dict_values, dtype=blocks[0].values.dtype
-                    )
+                    ).reshape(1, -1)
                     new_data = self._mgr.fillna(
                         value=fill_values, limit=limit, inplace=inplace
                     )
