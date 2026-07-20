@@ -69,6 +69,8 @@ def group_sum(
     is_datetimelike: bool = ...,
     initial: object = ...,
     skipna: bool = ...,
+    _group_boundaries: np.ndarray | None = ...,
+    _group_boundaries_are_trusted: bool = ...,
 ) -> None: ...
 def group_prod(
     out: np.ndarray,  # int64float_t[:, ::1]

@@ -2,6 +2,7 @@
 
 from libc.math cimport (
     fabs,
+    isfinite,
     signbit,
     sqrt,
 )
@@ -71,6 +72,20 @@ cdef bint is_monotonic_increasing_start_end_bounds(
     ndarray[int64_t, ndim=1] start, ndarray[int64_t, ndim=1] end
 ):
     return is_monotonic(start, False)[0] and is_monotonic(end, False)[0]
+
+
+def roll_all_finite(const float64_t[:] values) -> bool:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        bint result = True
+
+    with nogil:
+        for i in range(N):
+            if not isfinite(values[i]):
+                result = False
+                break
+    return result
+
 
 # ----------------------------------------------------------------------
 # Rolling sum
@@ -457,7 +472,9 @@ def roll_var_fixed_no_nan(const float64_t[:] values,
                 var_val = sum_sq / <float64_t>nobs - mean_val * mean_val
                 if var_val < 0:
                     var_val = 0
-                output[i] = var_val * <float64_t>nobs / (<float64_t>nobs - <float64_t>ddof)
+                output[i] = var_val * <float64_t>nobs / (
+                    <float64_t>nobs - <float64_t>ddof
+                )
             else:
                 output[i] = NaN
 
@@ -528,7 +545,11 @@ def roll_std_fixed_no_nan(const float64_t[:] values,
                 var_val = sum_sq / <float64_t>nobs - mean_val * mean_val
                 if var_val < 0:
                     var_val = 0
-                output[i] = sqrt(var_val * <float64_t>nobs / (<float64_t>nobs - <float64_t>ddof))
+                output[i] = sqrt(
+                    var_val
+                    * <float64_t>nobs
+                    / (<float64_t>nobs - <float64_t>ddof)
+                )
             else:
                 output[i] = NaN
 
@@ -616,7 +637,11 @@ def roll_std_fixed_no_nan_int64(const int64_t[:] values,
                 var_val = sum_sq / <float64_t>nobs - mean_val * mean_val
                 if var_val < 0:
                     var_val = 0
-                output[i] = sqrt(var_val * <float64_t>nobs / (<float64_t>nobs - <float64_t>ddof))
+                output[i] = sqrt(
+                    var_val
+                    * <float64_t>nobs
+                    / (<float64_t>nobs - <float64_t>ddof)
+                )
             else:
                 output[i] = NaN
 

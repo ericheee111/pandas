@@ -11,6 +11,7 @@ from pandas._typing import (
     npt,
 )
 
+def roll_all_finite(values: np.ndarray) -> bool: ...
 def roll_sum(
     values: np.ndarray,  # const float64_t[:]
     start: np.ndarray,  # np.ndarray[np.int64]
