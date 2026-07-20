@@ -511,6 +511,32 @@ class TestFactorize:
         tm.assert_numpy_array_equal(codes, expected_codes)
         tm.assert_numpy_array_equal(uniques, expected_uniques)
 
+    @pytest.mark.parametrize("na_value", [np.nan, pd.NA, NaT])
+    def test_string_factorize_null_na_value(self, na_value):
+        data = np.array(["a", na_value, "b", None, "a"], dtype=object)
+
+        codes, uniques = algos.factorize_array(data, na_value=na_value)
+
+        expected_codes = np.array([0, -1, 1, -1, 0], dtype=np.intp)
+        expected_uniques = np.array(["a", "b"], dtype=object)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
+    def test_string_factorize_custom_na_value(self):
+        class EqualToA:
+            def __eq__(self, other):
+                return other == "a"
+
+        na_value = EqualToA()
+        data = np.array(["a", "b", "a", "c"], dtype=object)
+
+        codes, uniques = algos.factorize_array(data, na_value=na_value)
+
+        expected_codes = np.array([-1, 0, -1, 1], dtype=np.intp)
+        expected_uniques = np.array(["b", "c"], dtype=object)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
     @pytest.mark.parametrize(
         "data, uniques",
         [

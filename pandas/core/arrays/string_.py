@@ -22,6 +22,7 @@ from pandas._config import (
 from pandas._libs import (
     lib,
     missing as libmissing,
+    ops as libops,
 )
 from pandas.compat._arch import IS_ARM
 from pandas._libs.arrays import NDArrayBacked
@@ -1233,6 +1234,22 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
 
         if isinstance(other, StringArray):
             other = other._ndarray
+
+        if (
+            type(other) is str
+            and self.dtype.na_value is np.nan
+            and op
+            in (
+                operator.eq,
+                operator.ne,
+                operator.lt,
+                operator.le,
+                operator.gt,
+                operator.ge,
+            )
+        ):
+            # Avoid allocating masks and filtered arrays for scalar comparisons.
+            return libops.scalar_compare(self._ndarray, other, op)
 
         mask = isna(self) | isna(other)
         valid = ~mask

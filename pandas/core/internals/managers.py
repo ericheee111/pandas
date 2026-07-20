@@ -2250,12 +2250,13 @@ class SingleBlockManager(BaseBlockManager):
 
         Use at your own risk! This does not check if the passed values are
         valid for the current Block/SingleBlockManager (length, dtype, etc),
-        and this does not properly keep track of references.
+        does not update the block placement, and does not properly keep track
+        of references. The caller must ensure the length of the values matches
+        the manager index.
         """
         # NOTE(CoW) Currently this is only used for FrameColumnApply.series_generator
         # which handles CoW by setting the refs manually if necessary
         self.blocks[0].values = values
-        self.blocks[0]._mgr_locs = BlockPlacement(slice(len(values)))
 
     def _equal_values(self, other: Self) -> bool:
         """
