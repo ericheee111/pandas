@@ -1178,7 +1178,7 @@ cdef class StringHashTable(HashTable):
     def _unique(self, ndarray[object] values, ObjectVector uniques,
                 Py_ssize_t count_prior=0, Py_ssize_t na_sentinel=-1,
                 object na_value=None, bint ignore_na=False,
-                bint return_inverse=False):
+                bint return_inverse=False, bint string_array=False):
         """
         Calculate unique values and labels (no sorting!)
 
@@ -1237,7 +1237,16 @@ cdef class StringHashTable(HashTable):
         for i in range(n):
             val = values[i]
 
-            if (ignore_na
+            if string_array:
+                # StringArray guarantees that every non-missing value is an
+                # exact Python str and normalizes missing values to na_value.
+                # Avoid repeated Python type and generic missing-value checks.
+                if ignore_na and val is na_value:
+                    labels[i] = na_sentinel
+                else:
+                    v = PyUnicode_AsUTF8(<str>val)
+                    vecs[i] = v
+            elif (ignore_na
                 and (not isinstance(val, str)
                      or (use_na_value and non_null_na_value
                          and val == na_value))
@@ -1313,7 +1322,8 @@ cdef class StringHashTable(HashTable):
                             return_inverse=return_inverse)
 
     def factorize(self, ndarray[object] values, Py_ssize_t na_sentinel=-1,
-                  object na_value=None, object mask=None, ignore_na=True):
+                  object na_value=None, object mask=None, ignore_na=True,
+                  bint string_array=False):
         """
         Calculate unique values and labels (no sorting!)
 
@@ -1344,7 +1354,7 @@ cdef class StringHashTable(HashTable):
         uniques_vector = ObjectVector()
         return self._unique(values, uniques_vector, na_sentinel=na_sentinel,
                             na_value=na_value, ignore_na=ignore_na,
-                            return_inverse=True)
+                            return_inverse=True, string_array=string_array)
 
     # Add unused mask parameter for compat with other signatures
     def get_labels(self, ndarray[object] values, ObjectVector uniques,
