@@ -488,6 +488,52 @@ def test_apply_axis1_homogeneous_mutation_exception_preserved():
         df.apply(mutate_then_read, axis=1)
 
 
+def test_apply_axis1_single_row_homogeneous_mutation_visible():
+    df = DataFrame({"A": [1.0], "B": [10.0]})
+
+    def mutate_then_read(row):
+        row["A"] = row["A"] + 100
+        return row["A"]
+
+    result = df.apply(mutate_then_read, axis=1)
+
+    expected = Series([101.0])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_missing_label_raises_key_error():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    with pytest.raises(KeyError, match="C"):
+        df.apply(lambda row: row["C"], axis=1)
+
+
+def test_apply_axis1_listlike_key_uses_series_lookup_semantics():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    result = df.apply(lambda row: row[["A"]], axis=1)
+
+    expected = df[["A"]]
+    tm.assert_frame_equal(result, expected)
+
+
+def test_apply_axis1_integer_key_does_not_fall_back_to_position():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    with pytest.raises(KeyError, match="0"):
+        df.apply(lambda row: row[0], axis=1)
+
+
+def test_apply_axis1_tuple_label_uses_series_lookup_semantics():
+    columns = pd.Index([("A",), ("B",)], tupleize_cols=False)
+    df = DataFrame([[1, 10], [2, 20]], columns=columns)
+
+    result = df.apply(lambda row: row[("A",)], axis=1)
+
+    expected = Series([1, 2])
+    tm.assert_series_equal(result, expected)
+
+
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
 @pytest.mark.parametrize("ax", ["index", "columns"])
 @pytest.mark.parametrize(
