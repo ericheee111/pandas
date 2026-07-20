@@ -23,7 +23,7 @@ from pandas.tests.frame.common import _check_mixed_float
 class TestFillNA:
     @pytest.mark.parametrize("dtype", ["float64", "float32", "object"])
     @pytest.mark.parametrize("inplace", [False, True])
-    def test_fillna_complete_dict_homogeneous_uses_manager_once(
+    def test_fillna_complete_dict_homogeneous_manager_batch(
         self, monkeypatch, dtype, inplace
     ):
         df = DataFrame(
@@ -42,7 +42,7 @@ class TestFillNA:
         monkeypatch.setattr(BlockManager, "fillna", wrapped)
         result = df.fillna({"a": 10.0, "b": 20.0}, inplace=inplace)
 
-        assert calls == 1
+        assert calls == int(not inplace)
         expected = DataFrame(
             [[10.0, 2.0], [3.0, 20.0], [10.0, 20.0]],
             columns=["a", "b"],
@@ -62,6 +62,50 @@ class TestFillNA:
         monkeypatch.setattr(BlockManager, "fillna", fail_if_called)
         result = df.fillna({"a": 10.0})
         expected = DataFrame({"a": [10.0, 1.0], "b": [np.nan, 2.0]})
+        tm.assert_frame_equal(result, expected)
+
+    def test_fillna_complete_dict_inplace_asymmetric_nulls(self):
+        df = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
+
+        result = df.fillna({"a": 10.0, "b": 20.0}, inplace=True)
+
+        expected = DataFrame({"a": [10.0, 10.0], "b": [1.0, 2.0]})
+        assert result is df
+        tm.assert_frame_equal(df, expected)
+
+    def test_fillna_complete_dict_inplace_with_limit(self):
+        df = DataFrame(
+            {"a": [1.0, np.nan, 1.0], "b": [np.nan, 1.0, 1.0]}
+        )
+
+        result = df.fillna({"a": 10.0, "b": 20.0}, limit=1, inplace=True)
+
+        expected = DataFrame(
+            {"a": [1.0, 10.0, 1.0], "b": [20.0, 1.0, 1.0]}
+        )
+        assert result is df
+        tm.assert_frame_equal(df, expected)
+
+    def test_fillna_complete_dict_unconsolidated_blocks(self):
+        df = DataFrame({"a": [np.nan, 1.0]})
+        df["b"] = [np.nan, 2.0]
+        assert len(df._mgr.blocks) == 2
+
+        result = df.fillna({"a": 10.0, "b": 20.0})
+
+        expected = DataFrame({"a": [10.0, 1.0], "b": [20.0, 2.0]})
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("inplace", [False, True])
+    def test_fillna_complete_dict_cannot_hold_element(self, inplace):
+        df = DataFrame({"a": [np.nan, 1.0], "b": [2.0, np.nan]})
+
+        result = df.fillna({"a": "x", "b": "y"}, inplace=inplace)
+
+        expected = DataFrame({"a": ["x", 1.0], "b": [2.0, "y"]})
+        if inplace:
+            assert result is df
+            result = df
         tm.assert_frame_equal(result, expected)
 
     def test_fillna_dict_inplace_nonunique_columns(self):

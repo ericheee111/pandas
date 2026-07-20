@@ -7088,7 +7088,8 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
         elif isinstance(value, (dict, ABCSeries)):
             blocks = self._mgr.blocks
             if (
-                axis == 0
+                not inplace
+                and axis == 0
                 and self.columns.is_unique
                 and len(blocks) == 1
                 and isinstance(blocks[0].values, np.ndarray)
