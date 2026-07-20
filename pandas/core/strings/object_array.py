@@ -165,6 +165,18 @@ class ObjectStringArrayMixin:
 
             if _IS_ARM and isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
                 return self._str_contains_fast_path(lib.map_contains, pat, na)
+            if _IS_ARM and (
+                self.dtype == np.dtype(object)
+                or (
+                    getattr(self.dtype, "storage", None) == "python"
+                    and self.dtype.na_value is np.nan
+                )
+            ):
+                result = lib.fast_string_contains(
+                    np.asarray(self, dtype=object), pat
+                )
+                if result is not None:
+                    return result
             f = lambda x: pat in x
         else:
             upper_pat = pat.upper()
@@ -357,6 +369,16 @@ class ObjectStringArrayMixin:
         return self._str_map(lambda x: x.rpartition(sep), dtype="object")
 
     def _str_len(self):
+        if _IS_ARM and (
+            self.dtype == np.dtype(object)
+            or (
+                getattr(self.dtype, "storage", None) == "python"
+                and self.dtype.na_value is np.nan
+            )
+        ):
+            result = lib.fast_string_len(np.asarray(self, dtype=object))
+            if result is not None:
+                return result
         return self._str_map(len, dtype="int64")
 
     def _str_slice(self, start=None, stop=None, step=None):
@@ -465,6 +487,13 @@ class ObjectStringArrayMixin:
 
     def _str_upper(self):
         if _IS_ARM:
+            if self.dtype == np.dtype(object) or (
+                getattr(self.dtype, "storage", None) == "python"
+                and self.dtype.na_value is np.nan
+            ):
+                result = lib.fast_string_upper(np.asarray(self, dtype=object))
+                if result is not None:
+                    return result
             return self._str_map(str.upper)
         return self._str_map(lambda x: x.upper())
 
