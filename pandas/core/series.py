@@ -951,6 +951,9 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
         values = self._row_apply_values
         if values is None:
             values = self._values
+        elif values is not self._values:
+            # A CoW write may have replaced the block holding the cached row.
+            return lib.no_default
         return values[loc]
 
     def _slice(self, slobj: slice, axis: AxisInt = 0) -> Series:
