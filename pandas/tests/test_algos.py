@@ -60,7 +60,8 @@ class TestFactorize:
         monkeypatch.setitem(algos._swisstables, "float64", FailSwissTable)
         values = np.zeros(1_000_001, dtype=np.float64)
 
-        result = algos.unique(values)
+        with pd.option_context("compute.use_swisstable", True):
+            result = algos.unique(values)
 
         tm.assert_numpy_array_equal(result, np.array([0.0]))
 
@@ -73,7 +74,8 @@ class TestFactorize:
         values = np.array([1, 2, 1], dtype=np.int64)
         mask = np.array([False, False, False])
 
-        codes, uniques = algos.factorize_array(values, mask=mask)
+        with pd.option_context("compute.use_swisstable", True):
+            codes, uniques = algos.factorize_array(values, mask=mask)
 
         tm.assert_numpy_array_equal(codes, np.array([0, 1, 0], dtype=np.intp))
         tm.assert_numpy_array_equal(uniques, np.array([1, 2], dtype=np.int64))
