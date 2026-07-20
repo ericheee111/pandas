@@ -711,6 +711,57 @@ ctypedef fused sum_t:
     object
 
 
+ctypedef fused sum_float_t:
+    float64_t
+    float32_t
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef void _group_sum_4_runs(
+    int64_t[::1] counts,
+    const sum_float_t[:, :] values,
+    int64_t[:, ::1] nobs,
+    sum_float_t[:, ::1] sumx,
+    sum_float_t[:, ::1] compensation,
+    Py_ssize_t* starts,
+    Py_ssize_t* labs,
+    Py_ssize_t run_length,
+) noexcept nogil:
+    cdef:
+        Py_ssize_t i, j
+        Py_ssize_t lane_counts[4]
+        Py_ssize_t lane_nobs[4]
+        sum_float_t lane_sums[4]
+        sum_float_t lane_compensations[4]
+        sum_float_t val, t, y
+
+    for j in range(4):
+        lane_counts[j] = counts[labs[j]]
+        lane_nobs[j] = nobs[labs[j], 0]
+        lane_sums[j] = sumx[labs[j], 0]
+        lane_compensations[j] = compensation[labs[j], 0]
+
+    for i in range(run_length):
+        for j in range(4):
+            lane_counts[j] += 1
+            val = values[starts[j] + i, 0]
+            if val == val:
+                lane_nobs[j] += 1
+                y = val - lane_compensations[j]
+                t = lane_sums[j] + y
+                lane_compensations[j] = t - lane_sums[j] - y
+                if not isfinite(lane_compensations[j]):
+                    lane_compensations[j] = 0
+                lane_sums[j] = t
+
+    for j in range(4):
+        counts[labs[j]] = lane_counts[j]
+        nobs[labs[j], 0] = lane_nobs[j]
+        sumx[labs[j], 0] = lane_sums[j]
+        compensation[labs[j], 0] = lane_compensations[j]
+
+
 @cython.wraparound(False)
 @cython.boundscheck(False)
 def group_sum(
@@ -724,17 +775,28 @@ def group_sum(
     bint is_datetimelike=False,
     object initial=0,
     bint skipna=True,
+    const int64_t[::1] _group_boundaries=None,
+    bint _group_boundaries_are_trusted=False,
 ) -> None:
     """
     Only aggregates on axis=0 using Kahan summation
     """
     cdef:
         Py_ssize_t i, j, N, K, lab, ncounts = len(counts)
+        Py_ssize_t start, end, boundary_index, lane, run_length
+        Py_ssize_t current_lab, current_count, current_nobs
+        Py_ssize_t starts[4]
+        Py_ssize_t labs[4]
         sum_t val, t, y, nan_val
+        sum_t current_sum, current_compensation
+        const float32_t[:, :] values_view_float32
+        const float64_t[:, :] values_view_float64
         sum_t[:, ::1] sumx, compensation
         int64_t[:, ::1] nobs
         Py_ssize_t len_values = len(values), len_labels = len(labels)
         bint uses_mask = mask is not None
+        bint use_boundaries = False
+        bint use_lanes
         bint isna_entry, isna_result
 
     if len_values != len_labels:
@@ -764,26 +826,188 @@ def group_sum(
 
     if sum_t is float32_t or sum_t is float64_t:
         if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
-            with nogil:
-                for i in range(N):
-                    lab = labels[i]
-                    if lab < 0:
-                        continue
+            if K == 1:
+                if sum_t is float32_t:
+                    values_view_float32 = values
+                else:
+                    values_view_float64 = values
+                # Trusted BinGrouper boundaries partition constant-label runs.
+                # Do not rescan labels here; that is the optimization's cost.
+                if (
+                    _group_boundaries_are_trusted
+                    and _group_boundaries is not None
+                    and len(_group_boundaries) > 0
+                    and _group_boundaries[len(_group_boundaries) - 1] == N
+                ):
+                    use_boundaries = True
+                    start = 0
+                    for boundary_index in range(len(_group_boundaries)):
+                        end = _group_boundaries[boundary_index]
+                        if end < start or end > N:
+                            use_boundaries = False
+                            break
+                        start = end
 
-                    counts[lab] += 1
+                if use_boundaries:
+                    with nogil:
+                        start = 0
+                        boundary_index = 0
+                        while boundary_index < len(_group_boundaries):
+                            end = _group_boundaries[boundary_index]
+                            run_length = end - start
+                            use_lanes = (
+                                boundary_index + 4 <= len(_group_boundaries)
+                                and run_length > 0
+                            )
+                            if use_lanes:
+                                for lane in range(4):
+                                    if lane == 0:
+                                        starts[lane] = start
+                                    else:
+                                        starts[lane] = _group_boundaries[
+                                            boundary_index + lane - 1
+                                        ]
+                                    end = _group_boundaries[boundary_index + lane]
+                                    if end - starts[lane] != run_length:
+                                        use_lanes = False
+                                        break
 
-                    for j in range(K):
-                        val = values[i, j]
-                        if val == val:
-                            nobs[lab, j] += 1
-                            y = val - compensation[lab, j]
-                            t = sumx[lab, j] + y
-                            compensation[lab, j] = t - sumx[lab, j] - y
+                                    labs[lane] = labels[starts[lane]]
+                                    if labs[lane] < 0:
+                                        use_lanes = False
+                                        break
+                                    for j in range(lane):
+                                        if labs[j] == labs[lane]:
+                                            use_lanes = False
+                                            break
+                                    if not use_lanes:
+                                        break
 
-                            if not isfinite(compensation[lab, j]):
-                                compensation[lab, j] = 0
+                            if use_lanes:
+                                # Keep explicit specializations so the hot loop
+                                # remains C-only for each float dtype.
+                                if sum_t is float32_t:
+                                    _group_sum_4_runs[float32_t](
+                                        counts,
+                                        values_view_float32,
+                                        nobs,
+                                        sumx,
+                                        compensation,
+                                        starts,
+                                        labs,
+                                        run_length,
+                                    )
+                                else:
+                                    _group_sum_4_runs[float64_t](
+                                        counts,
+                                        values_view_float64,
+                                        nobs,
+                                        sumx,
+                                        compensation,
+                                        starts,
+                                        labs,
+                                        run_length,
+                                    )
 
-                            sumx[lab, j] = t
+                                start = _group_boundaries[boundary_index + 3]
+                                boundary_index += 4
+                                continue
+
+                            end = _group_boundaries[boundary_index]
+                            if start < end:
+                                lab = labels[start]
+                                if lab >= 0:
+                                    current_count = counts[lab]
+                                    current_nobs = nobs[lab, 0]
+                                    current_sum = sumx[lab, 0]
+                                    current_compensation = compensation[lab, 0]
+
+                                    # Deliberately duplicate the scalar Kahan
+                                    # update to avoid dispatch in this hot
+                                    # fallback loop.
+                                    for i in range(start, end):
+                                        current_count += 1
+                                        val = values[i, 0]
+                                        if val == val:
+                                            current_nobs += 1
+                                            y = val - current_compensation
+                                            t = current_sum + y
+                                            current_compensation = (
+                                                t - current_sum - y
+                                            )
+                                            if not isfinite(current_compensation):
+                                                current_compensation = 0
+                                            current_sum = t
+
+                                    counts[lab] = current_count
+                                    nobs[lab, 0] = current_nobs
+                                    sumx[lab, 0] = current_sum
+                                    compensation[lab, 0] = current_compensation
+                            start = end
+                            boundary_index += 1
+                else:
+                    with nogil:
+                        current_lab = -1
+                        current_count = 0
+                        current_nobs = 0
+                        current_sum = 0
+                        current_compensation = 0
+
+                        for i in range(N):
+                            lab = labels[i]
+                            if lab < 0:
+                                continue
+
+                            if lab != current_lab:
+                                if current_lab >= 0:
+                                    counts[current_lab] = current_count
+                                    nobs[current_lab, 0] = current_nobs
+                                    sumx[current_lab, 0] = current_sum
+                                    compensation[current_lab, 0] = current_compensation
+
+                                current_lab = lab
+                                current_count = counts[lab]
+                                current_nobs = nobs[lab, 0]
+                                current_sum = sumx[lab, 0]
+                                current_compensation = compensation[lab, 0]
+
+                            current_count += 1
+                            val = values[i, 0]
+                            if val == val:
+                                current_nobs += 1
+                                y = val - current_compensation
+                                t = current_sum + y
+                                current_compensation = t - current_sum - y
+                                if not isfinite(current_compensation):
+                                    current_compensation = 0
+                                current_sum = t
+
+                        if current_lab >= 0:
+                            counts[current_lab] = current_count
+                            nobs[current_lab, 0] = current_nobs
+                            sumx[current_lab, 0] = current_sum
+                            compensation[current_lab, 0] = current_compensation
+            else:
+                with nogil:
+                    for i in range(N):
+                        lab = labels[i]
+                        if lab < 0:
+                            continue
+
+                        counts[lab] += 1
+
+                        for j in range(K):
+                            val = values[i, j]
+                            if val == val:
+                                nobs[lab, j] += 1
+                                y = val - compensation[lab, j]
+                                t = sumx[lab, j] + y
+                                compensation[lab, j] = t - sumx[lab, j] - y
+
+                                if not isfinite(compensation[lab, j]):
+                                    compensation[lab, j] = 0
+
+                                sumx[lab, j] = t
 
             _check_below_mincount(
                 out, uses_mask, result_mask, ncounts, K, nobs, min_count, sumx
