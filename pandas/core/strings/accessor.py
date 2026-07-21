@@ -4759,10 +4759,10 @@ def cat_safe(list_of_columns: list[npt.NDArray[np.object_]], sep: str):
         The concatenation of list_of_columns with sep.
     """
     try:
-        result = cat_core(list_of_columns, sep)
+        result = lib.cat_join_multi(list_of_columns, sep)
     except TypeError:
         # if there are any non-string values (wrong dtype or hidden behind
-        # object dtype), np.sum will fail; catch and return with better message
+        # object dtype), cat_join_multi will fail; catch and return with better message
         for column in list_of_columns:
             dtype = lib.infer_dtype(column, skipna=True)
             if dtype not in ["string", "empty"]:
