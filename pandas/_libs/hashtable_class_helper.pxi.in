@@ -554,45 +554,70 @@ cdef class {{name}}HashTable(HashTable):
     @cython.wraparound(False)
     @cython.boundscheck(False)
     def hash_inner_join(self, const {{dtype}}_t[:] values, const uint8_t[:] mask = None) -> tuple[ndarray, ndarray]:
+        # NOTE: the caller (_factorize_keys) only dispatches here when the right
+        # keys are unique (rizer.get_count() == len(right_labels)), so each left
+        # row matches at most one right row and the output size is bounded by
+        # ``len(values)``. This lets us pre-allocate the worst-case output and
+        # avoid Int64Vector growth / GIL-on-resize inside the nogil loop.
+        # Returns (right_indexer, left_indexer), both indexing the originals.
+        #
+        # Single-pass: probe the hash table and write matches directly into the
+        # (over-allocated) output arrays, counting via a write index `j`. This
+        # avoids the separate matched[]/right_pos[] scratch arrays and the
+        # count-then-fill second pass; only lidx/ridx (worst-case-sized) are
+        # touched, and the result is returned as zero-copy slices [:j].
         cdef:
-            Py_ssize_t i, n = len(values)
+            Py_ssize_t i, n = len(values), j = 0
             {{c_type}} val
             khiter_t k
-            Int64Vector locs = Int64Vector()
-            Int64Vector self_locs = Int64Vector()
-            Int64VectorData *l
-            Int64VectorData *sl
             Py_ssize_t na_position = self.na_position
-
-        l = &locs.data
-        sl = &self_locs.data
+            bint uses_mask = self.uses_mask and mask is not None
+            bint has_na = False
+            ndarray lidx_arr = np.empty(n, dtype=np.intp)
+            ndarray ridx_arr = np.empty(n, dtype=np.intp)
+            intp_t[::1] lidx_v = lidx_arr
+            intp_t[::1] ridx_v = ridx_arr
 
         if self.uses_mask and mask is None:
             raise NotImplementedError  # pragma: no cover
 
+        # Cheap pre-scan: if this batch has no NA, run a branchless inner loop
+        # without per-element mask checks.
+        if uses_mask:
+            with nogil:
+                for i in range(n):
+                    if mask[i]:
+                        has_na = True
+                        break
+
         with nogil:
-            for i in range(n):
-                if self.uses_mask and mask[i]:
-                    if self.na_position == -1:
-                        continue
-                    if needs_resize(l.size, l.capacity):
-                        with gil:
-                            locs.resize(locs.data.capacity * 4)
-                            self_locs.resize(locs.data.capacity * 4)
-                    append_data_int64(l, i)
-                    append_data_int64(sl, na_position)
-                else:
+            if uses_mask and has_na:
+                for i in range(n):
+                    if mask[i]:
+                        if na_position == -1:
+                            # right has no NA -> left NA matches nothing
+                            continue
+                        lidx_v[j] = i
+                        ridx_v[j] = na_position
+                        j += 1
+                    else:
+                        val = {{to_c_type}}(values[i])
+                        k = kh_get_{{dtype}}(self.table, val)
+                        if k != self.table.n_buckets:
+                            lidx_v[j] = i
+                            ridx_v[j] = self.table.vals[k]
+                            j += 1
+            else:
+                for i in range(n):
                     val = {{to_c_type}}(values[i])
                     k = kh_get_{{dtype}}(self.table, val)
                     if k != self.table.n_buckets:
-                        if needs_resize(l.size, l.capacity):
-                            with gil:
-                                locs.resize(locs.data.capacity * 4)
-                                self_locs.resize(locs.data.capacity * 4)
-                        append_data_int64(l, i)
-                        append_data_int64(sl, self.table.vals[k])
+                        lidx_v[j] = i
+                        ridx_v[j] = self.table.vals[k]
+                        j += 1
 
-        return self_locs.to_array(), locs.to_array()
+        # Zero-copy slices of the actual size (j matches written).
+        return ridx_arr[:j], lidx_arr[:j]
 
     @cython.boundscheck(False)
     def lookup(self, const {{dtype}}_t[:] values, const uint8_t[:] mask = None) -> ndarray:
