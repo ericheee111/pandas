@@ -94,6 +94,26 @@ class TestMisc:
         result = lib.fast_multiget(mapping2, oindex)
         tm.assert_numpy_array_equal(result, expected)
 
+    def test_fast_multiget_lookup_count(self):
+        class CountingKey:
+            calls = 0
+
+            def __hash__(self):
+                type(self).calls += 1
+                return 1
+
+            def __eq__(self, other):
+                return self is other
+
+        key = CountingKey()
+        mapping = {key: "value"}
+        CountingKey.calls = 0
+
+        result = lib.fast_multiget(mapping, np.array([key], dtype=object))
+
+        assert result[0] == "value"
+        assert CountingKey.calls == (1 if platform.machine() == "aarch64" else 2)
+
 
 class TestIndexing:
     def test_maybe_indices_to_slice_left_edge(self):

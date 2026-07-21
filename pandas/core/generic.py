@@ -83,6 +83,7 @@ from pandas._typing import (
     npt,
 )
 from pandas.compat import CHAINED_WARNING_DISABLED
+from pandas.compat._arch import IS_ARM
 from pandas.compat._constants import (
     REF_COUNT_METHOD,
 )
@@ -6534,45 +6535,53 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
             ):
                 return self.copy(deep=False)
             # GH 18099/22869: columnwise conversion to extension dtype
-            # Build directly from the converted arrays.  Going through Series
-            # objects and concat adds substantial per-column overhead and is
-            # unnecessary because the arrays already share our index.
-            from pandas.core.dtypes.astype import astype_array_safe, astype_is_view
-            from pandas.core.internals.managers import (
-                create_block_manager_from_column_arrays,
-            )
-
-            arrays = []
-            refs = []
-            for i in range(len(self.columns)):
-                block = self._mgr.blocks[self._mgr.blknos[i]]
-                values = block.iget(self._mgr.blklocs[i])
-                new_values = astype_array_safe(values, dtype, errors=errors)
-                arrays.append(new_values)
-                refs.append(
-                    block.refs
-                    if astype_is_view(values.dtype, new_values.dtype)
-                    else None
+            if IS_ARM:
+                # Build directly from the converted arrays.  Going through Series
+                # objects and concat adds substantial per-column overhead and is
+                # unnecessary because the arrays already share our index.
+                from pandas.core.dtypes.astype import (
+                    astype_array_safe,
+                    astype_is_view,
+                )
+                from pandas.core.internals.managers import (
+                    create_block_manager_from_column_arrays,
                 )
 
-            new_data = create_block_manager_from_column_arrays(
-                arrays,
-                [self.columns, self.index],
-                consolidate=False,
-                refs=refs,
-            )
-            result = self._constructor_from_mgr(new_data, axes=new_data.axes)
-            return result.__finalize__(self, method="astype")
+                arrays = []
+                refs = []
+                for i in range(len(self.columns)):
+                    block = self._mgr.blocks[self._mgr.blknos[i]]
+                    values = block.iget(self._mgr.blklocs[i])
+                    new_values = astype_array_safe(values, dtype, errors=errors)
+                    arrays.append(new_values)
+                    refs.append(
+                        block.refs
+                        if astype_is_view(values.dtype, new_values.dtype)
+                        else None
+                    )
+
+                new_data = create_block_manager_from_column_arrays(
+                    arrays,
+                    [self.columns, self.index],
+                    consolidate=False,
+                    refs=refs,
+                )
+                result = self._constructor_from_mgr(new_data, axes=new_data.axes)
+                return result.__finalize__(self, method="astype")
+
+            # GH 24704: self.items handles duplicate column names
+            results = [ser.astype(dtype, errors=errors) for _, ser in self.items()]
 
         else:
             # else, only a single dtype is given
-            if isinstance(dtype, type) and issubclass(dtype, ExtensionDtype):
-                raise TypeError(
-                    f"Expected an instance of {dtype.__name__}, "
-                    "but got the class instead. Try instantiating 'dtype'."
-                )
+            if IS_ARM:
+                if isinstance(dtype, type) and issubclass(dtype, ExtensionDtype):
+                    raise TypeError(
+                        f"Expected an instance of {dtype.__name__}, "
+                        "but got the class instead. Try instantiating 'dtype'."
+                    )
 
-            dtype = pandas_dtype(dtype)
+                dtype = pandas_dtype(dtype)
             new_data = self._mgr.astype(dtype=dtype, errors=errors)
             res = self._constructor_from_mgr(new_data, axes=new_data.axes)
             return res.__finalize__(self, method="astype")
@@ -7128,7 +7137,10 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
                 and len(blocks) == 1
                 and (
                     isinstance(blocks[0].values, np.ndarray)
-                    or not is_1d_only_ea_dtype(blocks[0].dtype)
+                    or (
+                        IS_ARM
+                        and not is_1d_only_ea_dtype(blocks[0].dtype)
+                    )
                 )
                 and blocks[0].values.ndim == 2
                 and all(column in value for column in self.columns)
@@ -7152,7 +7164,8 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
                     return result.__finalize__(self, method="fillna")
 
             if (
-                axis == 0
+                IS_ARM
+                and axis == 0
                 and self.columns.is_unique
                 and len(blocks) > 1
                 and all(len(block.mgr_locs) == 1 for block in blocks)

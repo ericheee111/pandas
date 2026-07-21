@@ -1,4 +1,5 @@
 import datetime
+import platform
 
 import dateutil
 import numpy as np
@@ -289,19 +290,32 @@ class TestDataFrameMissingData:
 
 @pytest.mark.parametrize("how", ["any", "all"])
 @pytest.mark.parametrize("axis", [0, 1])
-def test_dropna_float_block_uses_nanvalidity(monkeypatch, how, axis):
+def test_dropna_float_block_uses_arch_reduction(monkeypatch, how, axis):
     df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
-    original = algos.nanvalidity_2d
-    called = False
+    original_nanvalidity = algos.nanvalidity_2d
+    original_nancount = algos.nancount_2d
+    nanvalidity_called = False
+    nancount_called = False
 
-    def wrapped(values, op_axis, all_valid):
-        nonlocal called
-        called = True
-        return original(values, op_axis, all_valid)
+    def wrapped_nanvalidity(values, op_axis, all_valid):
+        nonlocal nanvalidity_called
+        nanvalidity_called = True
+        return original_nanvalidity(values, op_axis, all_valid)
 
-    monkeypatch.setattr(algos, "nanvalidity_2d", wrapped)
+    def wrapped_nancount(values, op_axis):
+        nonlocal nancount_called
+        nancount_called = True
+        return original_nancount(values, op_axis)
+
+    monkeypatch.setattr(algos, "nanvalidity_2d", wrapped_nanvalidity)
+    monkeypatch.setattr(algos, "nancount_2d", wrapped_nancount)
     result = df.dropna(axis=axis, how=how)
-    assert called
+    if platform.machine() == "aarch64":
+        assert nanvalidity_called
+        assert not nancount_called
+    else:
+        assert not nanvalidity_called
+        assert nancount_called == (axis == 1)
     if how == "any":
         expected = df.iloc[:0] if axis == 0 else df.iloc[:, :0]
     else:
