@@ -4008,7 +4008,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
     # Indexing Methods
 
     @final
-    def take(self, indices, axis: Axis = 0, **kwargs) -> Self:
+    def take(self, indices, axis: Axis = 0, verify: bool = True, **kwargs) -> Self:
         """
         Return the elements in the given *positional* indices along an axis.
 
@@ -4024,6 +4024,11 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
             The axis on which to select elements. ``0`` means that we are
             selecting rows, ``1`` means that we are selecting columns.
             For `Series` this parameter is unused and defaults to 0.
+        verify : bool, default True
+            Check that the indices are within bounds. If ``False``, skip
+            bounds checking for performance. Intended for internal use only;
+            external callers should leave this as ``True`` to avoid
+            out-of-bounds access.
         **kwargs
             For compatibility with :meth:`numpy.take`. Has no effect on the
             output.
@@ -4101,7 +4106,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
         new_data = self._mgr.take(
             indices,
             axis=self._get_block_manager_axis(axis),
-            verify=True,
+            verify=verify,
         )
         return self._constructor_from_mgr(new_data, axes=new_data.axes).__finalize__(
             self, method="take"
