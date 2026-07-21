@@ -31,6 +31,7 @@ from pandas._libs.internals import (
     BlockValuesRefs,
 )
 from pandas._libs.tslibs import Timestamp
+from pandas.compat._arch import IS_ARM
 from pandas.errors import (
     AbstractMethodError,
     PerformanceWarning,
@@ -750,7 +751,7 @@ class BaseBlockManager(PandasObject):
         # TODO: Should deep=True be respected for axes?
         new_axes = [ax.view() for ax in self.axes]
 
-        if not deep and self.ndim > 1:
+        if IS_ARM and not deep and self.ndim > 1:
             # The generic apply machinery is unnecessary for a shallow copy:
             # every block is retained in the same position and shape.
             blocks = tuple(blk.copy(deep=False) for blk in self.blocks)
@@ -2465,7 +2466,12 @@ def _stack_arrays(tuples, dtype: np.dtype):
     first = arrays[0]
     shape = (len(arrays), *first.shape)
 
-    stacked = np.array(arrays, dtype=dtype)
+    if IS_ARM:
+        stacked = np.array(arrays, dtype=dtype)
+    else:
+        stacked = np.empty(shape, dtype=dtype)
+        for i, arr in enumerate(arrays):
+            stacked[i] = arr
     return stacked, placement
 
 

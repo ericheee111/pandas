@@ -3527,13 +3527,21 @@ def fast_multiget(
         # kludge, for Series
         return np.empty(0, dtype="f8")
 
-    for i in range(n):
-        val = keys[i]
-        item = PyDict_GetItemWithError(mapping, val)
-        if item != NULL:
-            output[i] = <object>item
-        else:
-            output[i] = default
+    if pandas_is_aarch64():
+        for i in range(n):
+            val = keys[i]
+            item = PyDict_GetItemWithError(mapping, val)
+            if item != NULL:
+                output[i] = <object>item
+            else:
+                output[i] = default
+    else:
+        for i in range(n):
+            val = keys[i]
+            if val in mapping:
+                output[i] = mapping[val]
+            else:
+                output[i] = default
 
     return maybe_convert_objects(output)
 

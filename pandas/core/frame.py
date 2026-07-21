@@ -7894,36 +7894,55 @@ class DataFrame(NDFrame, OpsMixin):
                 raise KeyError(np.array(subset)[check].tolist())
             agg_obj = self.take(indices, axis=agg_axis)
 
-        float_values = (
-            agg_obj._float_block_values()
-            if subset is None
-            else None
-        )
-        nancount = None
+        if IS_ARM:
+            float_values = (
+                agg_obj._float_block_values()
+                if subset is None
+                else None
+            )
+            nancount = None
+        else:
+            float_values = None
+            nancount = (
+                agg_obj._nancount_float_block(agg_axis)
+                if subset is None and agg_axis == 0
+                else None
+            )
         if thresh is not lib.no_default:
-            nancount = agg_obj._nancount_float_block(agg_axis)
+            if IS_ARM:
+                nancount = agg_obj._nancount_float_block(agg_axis)
             count = (
                 agg_obj.count(axis=agg_axis) if nancount is None else nancount
             )
             mask = count >= thresh
         elif how == "any":
             # faster equivalent to 'agg_obj.count(agg_axis) == self.shape[agg_axis]'
-            mask = (
-                notna(agg_obj).all(axis=agg_axis, bool_only=False)
-                if float_values is None
-                else libalgos.nanvalidity_2d(
-                    float_values, agg_axis, True
+            if IS_ARM:
+                mask = (
+                    notna(agg_obj).all(axis=agg_axis, bool_only=False)
+                    if float_values is None
+                    else libalgos.nanvalidity_2d(float_values, agg_axis, True)
                 )
-            )
+            else:
+                mask = (
+                    notna(agg_obj).all(axis=agg_axis, bool_only=False)
+                    if nancount is None
+                    else nancount == agg_obj.shape[agg_axis]
+                )
         elif how == "all":
             # faster equivalent to 'agg_obj.count(agg_axis) > 0'
-            mask = (
-                notna(agg_obj).any(axis=agg_axis, bool_only=False)
-                if float_values is None
-                else libalgos.nanvalidity_2d(
-                    float_values, agg_axis, False
+            if IS_ARM:
+                mask = (
+                    notna(agg_obj).any(axis=agg_axis, bool_only=False)
+                    if float_values is None
+                    else libalgos.nanvalidity_2d(float_values, agg_axis, False)
                 )
-            )
+            else:
+                mask = (
+                    notna(agg_obj).any(axis=agg_axis, bool_only=False)
+                    if nancount is None
+                    else nancount > 0
+                )
         else:
             raise ValueError(f"invalid how option: {how}")
 
