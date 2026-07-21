@@ -1,5 +1,4 @@
 import pickle
-import platform
 
 import numpy as np
 import pytest
@@ -10,6 +9,7 @@ from pandas._libs import (
     writers as libwriters,
 )
 from pandas.compat import IS64
+from pandas.compat._arch import IS_ARM
 
 from pandas import Index
 import pandas._testing as tm
@@ -112,7 +112,7 @@ class TestMisc:
         result = lib.fast_multiget(mapping, np.array([key], dtype=object))
 
         assert result[0] == "value"
-        assert CountingKey.calls == (1 if platform.machine() == "aarch64" else 2)
+        assert CountingKey.calls == (1 if IS_ARM else 2)
 
 
 class TestIndexing:
@@ -357,7 +357,7 @@ def test_ensure_string_array_large_unicode():
 
     expected = values.astype(object)
     tm.assert_numpy_array_equal(result, expected)
-    if platform.machine() == "aarch64":
+    if IS_ARM:
         assert result[0] is result[3]
 
     non_native = values.astype(values.dtype.newbyteorder("S"))
