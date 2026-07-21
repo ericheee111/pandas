@@ -29,6 +29,7 @@ from pandas._libs.tslibs import (
     is_supported_dtype,
     is_unitless,
 )
+from pandas.compat._arch import IS_ARM
 
 from pandas.core.dtypes.cast import (
     construct_1d_object_array_from_listlike,
@@ -378,7 +379,8 @@ def arithmetic_op(left: ArrayLike, right: Any, op):
         _bool_arith_check(op, left, right)  # type: ignore[arg-type]
 
         if (
-            op is operator.truediv
+            IS_ARM
+            and op is operator.truediv
             and isinstance(left, np.ndarray)
             and isinstance(right, np.ndarray)
             and left.dtype == np.dtype(np.int64)
