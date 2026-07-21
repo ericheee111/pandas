@@ -110,6 +110,7 @@ def arrays_to_mgr(
     """
     if IS_ARM and not verify_integrity:
         # DataFrame._from_arrays documents these inputs as pre-validated.
+        index = ensure_index(index)
         refs = [None] * len(arrays)
         return create_block_manager_from_column_arrays(
             arrays, [columns, index], consolidate=consolidate, refs=refs

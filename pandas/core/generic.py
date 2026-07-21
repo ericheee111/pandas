@@ -118,7 +118,6 @@ from pandas.core.dtypes.common import (
     is_bool_dtype,
     is_dict_like,
     is_extension_array_dtype,
-    is_1d_only_ea_dtype,
     is_list_like,
     is_number,
     is_numeric_dtype,
@@ -7135,13 +7134,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
                 axis == 0
                 and self.columns.is_unique
                 and len(blocks) == 1
-                and (
-                    isinstance(blocks[0].values, np.ndarray)
-                    or (
-                        IS_ARM
-                        and not is_1d_only_ea_dtype(blocks[0].dtype)
-                    )
-                )
+                and isinstance(blocks[0].values, np.ndarray)
                 and blocks[0].values.ndim == 2
                 and all(column in value for column in self.columns)
             ):

@@ -5,6 +5,22 @@ WARNING: DO NOT edit .pxi FILE directly, .pxi is generated from .pxi.in
 """
 from cpython.unicode cimport PyUnicode_AsUTF8
 
+cdef extern from *:
+    """
+    static inline const char *
+    pandas_string_to_utf8(const PyObject *value, const char **vecs)
+    {
+        const char *result = PyUnicode_AsUTF8((PyObject *)value);
+        if (result == NULL) {
+            free(vecs);
+        }
+        return result;
+    }
+    """
+    const char *pandas_string_to_utf8(
+        object value, const char **vecs
+    ) except NULL
+
 {{py:
 
 # name
@@ -1230,38 +1246,43 @@ cdef class StringHashTable(HashTable):
         use_na_value = na_value is not None
         non_null_na_value = not checknull(na_value)
 
+        if string_array and not ignore_na:
+            raise ValueError("string_array=True requires ignore_na=True")
+
         # assign pointers and pre-filter out missing (if ignore_na)
         vecs = <const char **>malloc(n * sizeof(char *))
         if vecs is NULL:
             raise MemoryError()
-        for i in range(n):
-            val = values[i]
-
-            if string_array:
+        if string_array:
+            for i in range(n):
+                val = values[i]
                 # StringArray guarantees that every non-missing value is an
                 # exact Python str and normalizes missing values to na_value.
                 # Avoid repeated Python type and generic missing-value checks.
-                if ignore_na and val is na_value:
+                if val is na_value:
                     labels[i] = na_sentinel
                 else:
-                    v = PyUnicode_AsUTF8(<str>val)
+                    v = pandas_string_to_utf8(val, vecs)
                     vecs[i] = v
-            elif (ignore_na
-                and (not isinstance(val, str)
-                     or (use_na_value and non_null_na_value
-                         and val == na_value))
-                ):
-                # if missing values do not count as unique values (i.e. if
-                # ignore_na is True), we can skip the actual value, and
-                # replace the label with na_sentinel directly
-                labels[i] = na_sentinel
-            else:
-                # if ignore_na is False, we also stringify NaN/None/etc.
-                try:
-                    v = PyUnicode_AsUTF8(<str>val)
-                except UnicodeEncodeError:
-                    v = PyUnicode_AsUTF8(<str>repr(val))
-                vecs[i] = v
+        else:
+            for i in range(n):
+                val = values[i]
+                if (ignore_na
+                    and (not isinstance(val, str)
+                         or (use_na_value and non_null_na_value
+                             and val == na_value))
+                    ):
+                    # if missing values do not count as unique values (i.e. if
+                    # ignore_na is True), we can skip the actual value, and
+                    # replace the label with na_sentinel directly
+                    labels[i] = na_sentinel
+                else:
+                    # if ignore_na is False, we also stringify NaN/None/etc.
+                    try:
+                        v = PyUnicode_AsUTF8(<str>val)
+                    except UnicodeEncodeError:
+                        v = PyUnicode_AsUTF8(<str>repr(val))
+                    vecs[i] = v
 
         # compute
         with nogil:
