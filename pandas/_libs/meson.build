@@ -158,10 +158,15 @@ if cy.version().version_compare('>=3.1.0')
 endif
 
 foreach ext_name, ext_dict : libs_sources
+    ext_cython_args = cython_args
+    if get_option('pandas_cython_coverage') and ext_name == 'parsers'
+        # Cython tracing in the parser's nogil sections is unsafe on Python 3.14.
+        ext_cython_args += ['-Xlinetrace=False']
+    endif
     py.extension_module(
         ext_name,
         ext_dict.get('sources'),
-        cython_args: cython_args,
+        cython_args: ext_cython_args,
         include_directories: [inc_np, inc_pd],
         dependencies: ext_dict.get('deps', []),
         subdir: 'pandas/_libs',

@@ -18,6 +18,16 @@ versioneer = files('generate_version.py')
 
 add_project_arguments('-DNPY_NO_DEPRECATED_API=0', language: 'c')
 add_project_arguments('-DNPY_NO_DEPRECATED_API=0', language: 'cpp')
+if get_option('pandas_cython_coverage')
+    add_project_arguments('-Xlinetrace=True', language: 'cython')
+    add_project_arguments(
+        [
+            '-DCYTHON_TRACE=1',
+            '-DCYTHON_USE_SYS_MONITORING=0',
+        ],
+        language: ['c', 'cpp'],
+    )
+endif
 # Enables settings __module__ on cdef classes
 # https://github.com/cython/cython/issues/7231
 add_project_arguments('-DCYTHON_USE_TYPE_SPECS=1', language: 'c')
