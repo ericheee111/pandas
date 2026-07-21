@@ -23,3 +23,5 @@ def test_int64_true_divide(left, right):
         expected = np.true_divide(left, right)
 
     result = ops.int64_true_divide(left, right)
+
+    np.testing.assert_array_equal(result, expected)

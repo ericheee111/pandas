@@ -1,4 +1,5 @@
 import operator
+import re
 
 import numpy as np
 import pytest
@@ -44,6 +45,19 @@ def test_series_arithmetic_manager_non_arm_uses_constructor(monkeypatch):
     tm.assert_series_equal(result, expected)
 
 
+@pytest.mark.parametrize("op", [operator.eq, operator.ne])
+def test_series_scalar_extension_result_arm_uses_constructor(monkeypatch, op):
+    from pandas.tests.extension.json.array import JSONArray, make_data
+
+    obj = pd.Series(JSONArray(make_data(3)))
+    monkeypatch.setattr(series, "IS_ARM", False, raising=False)
+    expected = op(obj, 0)
+    monkeypatch.setattr(series, "IS_ARM", True, raising=False)
+    result = op(obj, 0)
+
+    tm.assert_series_equal(result, expected)
+
+
 def test_masked_where_non_arm_uses_base_implementation(monkeypatch):
     arr = pd.array([1.0, pd.NA, 3.0], dtype="Float64")
     called = False
@@ -77,6 +91,25 @@ def test_masked_putmask_non_arm_uses_base_implementation(monkeypatch):
 
     expected = pd.array([1.0, 2.0, 3.0], dtype="Float64")
     tm.assert_extension_array_equal(arr, expected)
+
+
+@pytest.mark.parametrize(
+    "dtype,value",
+    [
+        ("Int64", 1.0),
+        ("UInt64", np.int8(1)),
+        ("Int8", 1.0),
+    ],
+)
+def test_masked_where_arm_preserves_storage_dtype(monkeypatch, dtype, value):
+    mask = np.array([True, True, False])
+
+    monkeypatch.setattr(masked, "IS_ARM", False, raising=False)
+    expected = pd.array([1, None, 3], dtype=dtype)._where(mask, value)
+    monkeypatch.setattr(masked, "IS_ARM", True, raising=False)
+    result = pd.array([1, None, 3], dtype=dtype)._where(mask, value)
+
+    tm.assert_extension_array_equal(result, expected)
 
 
 def test_masked_boolean_factorize_non_arm_uses_generic_implementation(monkeypatch):
@@ -123,3 +156,67 @@ def test_arrow_scalar_selection_non_arm_uses_base_implementation(monkeypatch, me
 
     expected = pd.array([1, 0, 3], dtype="int64[pyarrow]")
     tm.assert_extension_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["_where", "_putmask"])
+@pytest.mark.parametrize(
+    "data,dtype,value",
+    [
+        ([1, 2, 3], "int64[pyarrow]", pd.NA),
+        ([1.0, 2.0, 3.0], "float64[pyarrow]", np.nan),
+        (
+            pd.date_range("2020-01-01", periods=3),
+            "timestamp[ns][pyarrow]",
+            pd.Timestamp("2020-02-03"),
+        ),
+        (
+            pd.timedelta_range("1 day", periods=3),
+            "duration[ns][pyarrow]",
+            pd.Timedelta("2 days"),
+        ),
+    ],
+)
+def test_arrow_scalar_selection_arm_matches_base(
+    monkeypatch, method, data, dtype, value
+):
+    pytest.importorskip("pyarrow")
+    from pandas.core.arrays.arrow import array as arrow_array
+
+    mask = np.array([True, False, True])
+
+    def apply(arr):
+        if method == "_where":
+            return arr._where(mask, value)
+        arr._putmask(mask, value)
+        return arr
+
+    monkeypatch.setattr(arrow_array, "IS_ARM", False, raising=False)
+    expected = apply(pd.array(data, dtype=dtype))
+    monkeypatch.setattr(arrow_array, "IS_ARM", True, raising=False)
+    result = apply(pd.array(data, dtype=dtype))
+
+    tm.assert_extension_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["_where", "_putmask"])
+def test_arrow_scalar_selection_arm_preserves_invalid_value_error(
+    monkeypatch, method
+):
+    pa = pytest.importorskip("pyarrow")
+    from pandas.core.arrays.arrow import array as arrow_array
+
+    mask = np.array([True, False, True])
+
+    def apply():
+        arr = pd.array([1, 2, 3], dtype="int64[pyarrow]")
+        if method == "_where":
+            arr._where(mask, "bad")
+        else:
+            arr._putmask(mask, "bad")
+
+    monkeypatch.setattr(arrow_array, "IS_ARM", False, raising=False)
+    with pytest.raises(pa.ArrowInvalid) as expected:
+        apply()
+    monkeypatch.setattr(arrow_array, "IS_ARM", True, raising=False)
+    with pytest.raises(type(expected.value), match=re.escape(str(expected.value))):
+        apply()

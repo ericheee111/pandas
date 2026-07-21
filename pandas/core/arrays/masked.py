@@ -407,7 +407,8 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
             and not is_valid_na_for_dtype(value, self.dtype)
         ):
             value = self._validate_setitem_value(value)
-            data = np.where(mask, self._data, value)
+            data = self._data.copy()
+            data[~mask] = value
             result_mask = self._mask & mask
             return self._simple_new(data, result_mask)
 

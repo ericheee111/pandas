@@ -714,19 +714,6 @@ ctypedef fused ndarr_object:
     ndarray[object, ndim=2]
 
 
-cdef extern from *:
-    """
-    static inline int pandas_string_array_aarch64(void) {
-    #if defined(__aarch64__)
-        return 1;
-    #else
-        return 0;
-    #endif
-    }
-    """
-    bint pandas_string_array_aarch64() noexcept nogil
-
-
 @cython.wraparound(False)
 @cython.boundscheck(False)
 cdef object _deduplicate_unicode_array(ndarray arr):
@@ -750,19 +737,20 @@ cdef object _deduplicate_unicode_array(ndarray arr):
 
     for i in range(n):
         value = data + i * width
-        length = 0
+        length = width
+        while length > 0 and value[length - 1] == 0:
+            length -= 1
         value_hash = <uint64_t>1469598103934665603
         packed_ascii = 0
         ascii_value = width <= 8
-        while length < width and value[length] != 0:
+        for k in range(length):
             value_hash = (
-                value_hash ^ <uint64_t>value[length]
+                value_hash ^ <uint64_t>value[k]
             ) * <uint64_t>1099511628211
-            if value[length] <= 127:
-                packed_ascii = (packed_ascii << 7) | value[length]
+            if value[k] <= 127:
+                packed_ascii = (packed_ascii << 7) | value[k]
             else:
                 ascii_value = False
-            length += 1
         if ascii_value:
             value_hash = packed_ascii
 
@@ -889,7 +877,7 @@ cpdef ndarray[object] ensure_string_array(
         arr[:] = input_arr
 
     if (
-        pandas_string_array_aarch64()
+        pandas_is_aarch64()
         and isinstance(arr, np.ndarray)
         and arr.ndim == 1
         and arr.dtype.kind == "U"
