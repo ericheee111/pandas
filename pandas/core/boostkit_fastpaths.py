@@ -5,7 +5,6 @@ import platform
 
 from pandas._libs import hashtable as htable
 
-
 _DISABLED_SETTINGS = {"0", "false", "no", "off"}
 
 
@@ -19,4 +18,4 @@ USE_BOOSTKIT_FASTPATHS = _get_use_boostkit_fastpaths()
 
 # Mirror the cached policy into the Cython hash loop so the decision is not
 # recomputed for every value.
-htable._set_use_boostkit_fastpaths(USE_BOOSTKIT_FASTPATHS)
+htable.set_use_boostkit_fastpaths(USE_BOOSTKIT_FASTPATHS)

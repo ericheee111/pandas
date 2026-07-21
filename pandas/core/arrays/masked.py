@@ -56,9 +56,9 @@ from pandas.core.dtypes.missing import (
 )
 
 from pandas.core import (
-    _boostkit_fastpaths,
     algorithms as algos,
     arraylike,
+    boostkit_fastpaths,
     missing,
     nanops,
     ops,
@@ -1376,7 +1376,7 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         -------
         uniques : BaseMaskedArray
         """
-        if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
             result = self._unique_if_monotonic()
             if result is not None:
                 return result
