@@ -150,7 +150,13 @@ def _should_bypass_numexpr_aarch64(left: np.ndarray, right, op) -> bool:
         }
 
     if left.dtype == np.int64:
-        if op in {operator.add, operator.sub, operator.truediv, operator.eq, operator.ne}:
+        if op in {
+            operator.add,
+            operator.sub,
+            operator.truediv,
+            operator.eq,
+            operator.ne,
+        }:
             return True
         # Numexpr is faster for integer scalar multiplication on AArch64.
         return op is operator.mul and isinstance(right, (float, np.floating))
@@ -390,12 +396,11 @@ def arithmetic_op(left: ArrayLike, right: Any, op):
             and left.flags.c_contiguous
             and right.flags.c_contiguous
         ):
-            res_values = libops.int64_true_divide(left, right)
-        else:
-            # error: Argument 1 to "_na_arithmetic_op" has incompatible type
-            # "Union[ExtensionArray, ndarray[Any, Any]]"; expected
-            # "ndarray[Any, Any]"
-            res_values = _na_arithmetic_op(left, right, op)  # type: ignore[arg-type]
+            return libops.int64_true_divide(left, right)
+
+        # error: Argument 1 to "_na_arithmetic_op" has incompatible type
+        # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
+        res_values = _na_arithmetic_op(left, right, op)  # type: ignore[arg-type]
 
     return res_values
 
@@ -424,9 +429,7 @@ def comparison_op(left: ArrayLike, right: Any, op) -> ArrayLike:
 
     rvalues = lib.item_from_zerodim(rvalues)
     if _USE_AARCH64_COMPARISON_FASTPATH:
-        rvalues = _maybe_cast_scalar_for_int64_comparison_aarch64(
-            lvalues, rvalues, op
-        )
+        rvalues = _maybe_cast_scalar_for_int64_comparison_aarch64(lvalues, rvalues, op)
     if _USE_AARCH64_FLOAT64_SCALAR_FASTPATH:
         rvalues = _maybe_cast_int_scalar_for_float64_op_aarch64(lvalues, rvalues, op)
 

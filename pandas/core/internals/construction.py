@@ -113,7 +113,11 @@ def arrays_to_mgr(
         index = ensure_index(index)
         refs = [None] * len(arrays)
         return create_block_manager_from_column_arrays(
-            arrays, [columns, index], consolidate=consolidate, refs=refs
+            arrays,
+            [columns, index],
+            consolidate=consolidate,
+            refs=refs,
+            unwrap_numpy_ea=True,
         )
 
     if verify_integrity:

@@ -7,6 +7,7 @@ from pandas import (
     Period,
     Series,
     Timestamp,
+    array,
 )
 import pandas._testing as tm
 from pandas.core import (
@@ -26,9 +27,7 @@ def test_astype_extension_non_arm_avoids_direct_manager(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("non-ARM astype used direct manager construction")
 
-    monkeypatch.setattr(
-        managers, "create_block_manager_from_column_arrays", forbidden
-    )
+    monkeypatch.setattr(managers, "create_block_manager_from_column_arrays", forbidden)
 
     df = DataFrame({"a": [1, None], "b": [2, 3]}, dtype=object)
     result = df.astype("Int64")
@@ -121,6 +120,39 @@ def test_arrays_to_mgr_arm_normalizes_range_index(monkeypatch):
     tm.assert_frame_equal(result.copy(), DataFrame({"a": [1, 2]}))
 
 
+def test_arrays_to_mgr_arm_unwraps_numpy_extension_array(monkeypatch):
+    monkeypatch.setattr(construction, "IS_ARM", True, raising=False)
+    values = array([1, 2], dtype=np.dtype("int64"))
+
+    result = DataFrame._from_arrays(
+        [values],
+        columns=Index(["a"]),
+        index=range(2),
+        verify_integrity=False,
+    )
+
+    expected = DataFrame({"a": [1, 2]})
+    tm.assert_frame_equal(result, expected)
+
+
+def test_arrays_to_mgr_arm_unwraps_unconsolidated_numpy_extension_array(
+    monkeypatch,
+):
+    monkeypatch.setattr(construction, "IS_ARM", True, raising=False)
+    monkeypatch.setattr(managers, "IS_ARM", True, raising=False)
+    values = array([1, 2], dtype=np.dtype("int64"))
+
+    result = construction.arrays_to_mgr(
+        [values],
+        Index(["a"]),
+        Index(range(2)),
+        verify_integrity=False,
+        consolidate=False,
+    )
+
+    assert isinstance(result.iget_values(0), np.ndarray)
+
+
 def test_stack_arrays_non_arm_avoids_array_constructor(monkeypatch):
     monkeypatch.setattr(managers, "IS_ARM", False, raising=False)
 
@@ -201,12 +233,8 @@ def test_fillna_non_1d_ea_block_non_arm_avoids_batch_fastpath(monkeypatch):
     )
     expected = DataFrame(
         {
-            "a": Series(
-                ["2020-01-01", "2020-01-03"], dtype="datetime64[ns]"
-            ),
-            "b": Series(
-                ["2020-01-04", "2020-01-02"], dtype="datetime64[ns]"
-            ),
+            "a": Series(["2020-01-01", "2020-01-03"], dtype="datetime64[ns]"),
+            "b": Series(["2020-01-04", "2020-01-02"], dtype="datetime64[ns]"),
         }
     )
     tm.assert_frame_equal(result, expected)
@@ -216,9 +244,7 @@ def test_fillna_non_1d_ea_block_non_arm_avoids_batch_fastpath(monkeypatch):
     "values,fill_value",
     [
         (
-            Series(
-                [None, "2020-01-01"], dtype="datetime64[ns, UTC]"
-            ),
+            Series([None, "2020-01-01"], dtype="datetime64[ns, UTC]"),
             Timestamp("2021-01-01", tz="UTC"),
         ),
         (
@@ -227,9 +253,7 @@ def test_fillna_non_1d_ea_block_non_arm_avoids_batch_fastpath(monkeypatch):
         ),
     ],
 )
-def test_fillna_single_ea_block_arm_matches_base(
-    monkeypatch, values, fill_value
-):
+def test_fillna_single_ea_block_arm_matches_base(monkeypatch, values, fill_value):
     df = DataFrame({"a": values})
 
     monkeypatch.setattr(generic, "IS_ARM", False, raising=False)
