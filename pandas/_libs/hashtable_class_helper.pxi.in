@@ -632,8 +632,11 @@ cdef class {{name}}HashTable(HashTable):
                         ridx_v[j] = self.table.vals[k]
                         j += 1
 
-        # Zero-copy slices of the actual size (j matches written).
-        return ridx_arr[:j], lidx_arr[:j]
+        # Compact copies to release the over-allocated tail (n - j elements).
+        # Without .copy() the slice's .base holds the full n-element array
+        # alive until the slice is GC'd, inflating peak memory for sparse
+        # matches where j << n.
+        return ridx_arr[:j].copy(), lidx_arr[:j].copy()
 
     @cython.boundscheck(False)
     def lookup(self, const {{dtype}}_t[:] values, const uint8_t[:] mask = None) -> ndarray:

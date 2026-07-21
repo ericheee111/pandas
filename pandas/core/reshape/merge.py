@@ -3342,6 +3342,12 @@ def _masked_hash_inner_join_fastpath(
     unique-right probe (at most one NA and no duplicate non-NA key, i.e.
     each left row matches at most one right row), else ``None`` so the
     caller falls back to the general dispatch.
+
+    Note: ``len(HashTable)`` (see ``HashTable.__len__``) returns
+    ``table.size + (1 if na_position != -1 else 0)``, so it counts the
+    single NA slot (if any) in addition to the non-NA buckets.  The
+    guard ``len(rizer.table) != n_right`` therefore correctly accepts
+    right keys with zero or one NA and no non-NA duplicates.
     """
     klass = _factorizers.get(lk.dtype.type)
     if klass is None:
@@ -3357,8 +3363,11 @@ def _masked_hash_inner_join_fastpath(
     # materialising the labels/uniques arrays that factorize() allocates.
     rizer.table.map_locations(rk._data, mask=rk._mask)
     n_right = len(rk._data)
-    # len(table) == n_right  <=>  right has at most one NA and no non-NA dup
-    # (NAs go to na_position, not the table; dups overwrite the same bucket).
+    # len(table) == n_right  <=>  right has at most one NA and no non-NA dup.
+    # HashTable.__len__ returns table.size + (1 if na_position != -1 else 0),
+    # so the single NA slot (if any) IS counted.  Non-NA dups overwrite the
+    # same bucket, shrinking table.size below the unique non-NA count; multiple
+    # NAs are collapsed into one na_position, so len < n_right in both cases.
     # In that case each left row matches <= 1 right row, which is the only
     # situation hash_inner_join is correct for.
     if len(rizer.table) != n_right:
