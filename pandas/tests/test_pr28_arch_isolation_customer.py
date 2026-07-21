@@ -35,6 +35,7 @@ def test_string_factorize_non_arm_delegates(monkeypatch):
 
     monkeypatch.setattr(ExtensionArray, "factorize", wrapped)
 
-    pd.array(["a", "b", "a"], dtype="str").factorize()
+    dtype = pd.StringDtype(storage="python")
+    pd.array(["a", "b", "a"], dtype=dtype).factorize()
 
     assert calls == 1
