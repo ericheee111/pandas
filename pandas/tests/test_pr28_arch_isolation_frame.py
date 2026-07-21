@@ -4,7 +4,9 @@ import pytest
 from pandas import (
     DataFrame,
     Index,
+    Period,
     Series,
+    Timestamp,
 )
 import pandas._testing as tm
 from pandas.core import (
@@ -105,6 +107,20 @@ def test_arrays_to_mgr_non_arm_runs_validation_path(monkeypatch):
     assert any(obj is columns for obj in seen)
 
 
+def test_arrays_to_mgr_arm_normalizes_range_index(monkeypatch):
+    monkeypatch.setattr(construction, "IS_ARM", True, raising=False)
+
+    result = DataFrame._from_arrays(
+        [np.array([1, 2])],
+        columns=Index(["a"]),
+        index=range(2),
+        verify_integrity=False,
+    )
+
+    assert isinstance(result.index, Index)
+    tm.assert_frame_equal(result.copy(), DataFrame({"a": [1, 2]}))
+
+
 def test_stack_arrays_non_arm_avoids_array_constructor(monkeypatch):
     monkeypatch.setattr(managers, "IS_ARM", False, raising=False)
 
@@ -193,4 +209,32 @@ def test_fillna_non_1d_ea_block_non_arm_avoids_batch_fastpath(monkeypatch):
             ),
         }
     )
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "values,fill_value",
+    [
+        (
+            Series(
+                [None, "2020-01-01"], dtype="datetime64[ns, UTC]"
+            ),
+            Timestamp("2021-01-01", tz="UTC"),
+        ),
+        (
+            Series([None, "2020-01"], dtype="period[M]"),
+            Period("2021-01", freq="M"),
+        ),
+    ],
+)
+def test_fillna_single_ea_block_arm_matches_base(
+    monkeypatch, values, fill_value
+):
+    df = DataFrame({"a": values})
+
+    monkeypatch.setattr(generic, "IS_ARM", False, raising=False)
+    expected = df.fillna({"a": fill_value})
+    monkeypatch.setattr(generic, "IS_ARM", True, raising=False)
+    result = df.fillna({"a": fill_value})
+
     tm.assert_frame_equal(result, expected)
