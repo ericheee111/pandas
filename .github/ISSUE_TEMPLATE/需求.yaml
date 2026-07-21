@@ -1,0 +1,55 @@
+name: "需求"
+description: "请选用适合的模板"
+title: ""
+labels: [ "requirement_base" ]
+type: "需求"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        label: ""
+        description: "请根据issue相关的版本在里程碑中选择对应的节点，若是与版本无关或不确认，请选择“不关联里程碑”"
+
+  - type: textarea
+    attributes:
+      label: "【特性描述】"
+      description: "从使用者视角简要说明特性的功能（尽量使用正向表达方式）"
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: "【特性竞争力】"
+      description: "简要说明特性的竞争力"
+    validations:
+      required: false
+
+  - type: input
+    attributes:
+      label: "【硬件架构】"
+      description: "ARM/X86/龙芯/SW/RISC-V等，架构不相关请填写NoArch"
+      placeholder: "NoArch"
+    validations:
+      required: false
+
+  - type: input
+    attributes:
+      label: "【特性约束】"
+      description: "简单说明已知的约束或者影响，没有可以填写NA"
+      placeholder: "NA"
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: "【涉及仓库】"
+      description: "全路径，包括增量修改和新增仓库"
+    validations:
+      required: false
+
+  - type: textarea
+    attributes:
+      label: "【交付个人/团队】"
+      description: "请明确交付责任人，如果有团队支撑，请一并填写团队信息"
+    validations:
+      required: false
