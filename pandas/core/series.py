@@ -6873,7 +6873,7 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
 
         # TODO: result should always be ArrayLike, but this fails for some
         #  JSONArray tests
-        if IS_ARM:
+        if IS_ARM and isinstance(result, (np.ndarray, ExtensionArray)):
             mgr = SingleBlockManager.from_array(result, self.index)
             out = self._constructor_from_mgr(mgr, axes=mgr.axes)
         else:

@@ -2510,6 +2510,7 @@ class ArrowExtensionArray(
 
     def _where(self, mask: npt.NDArray[np.bool_], value) -> Self:
         if IS_ARM and is_scalar(value):
+            value = self._maybe_convert_setitem_value(value)
             result = self._if_else(mask, self._pa_array, value)
             return self._from_pyarrow_array(result)
 
@@ -2519,6 +2520,7 @@ class ArrowExtensionArray(
         if IS_ARM and is_scalar(value):
             if self._readonly:
                 raise ValueError("Cannot modify read-only array")
+            value = self._maybe_convert_setitem_value(value)
             result = self._if_else(mask, value, self._pa_array)
             self._pa_array = self._from_pyarrow_array(result)._pa_array
             return

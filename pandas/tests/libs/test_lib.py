@@ -366,6 +366,19 @@ def test_ensure_string_array_large_unicode():
     tm.assert_numpy_array_equal(result, expected)
 
 
+def test_ensure_string_array_large_unicode_embedded_null():
+    values = np.resize(
+        np.array(["a\0b", "a\0c", "\0ab"], dtype="U3"), 100_000
+    )
+
+    result = lib.ensure_string_array(values)
+
+    expected = values.astype(object)
+    tm.assert_numpy_array_equal(result, expected)
+    if IS_ARM:
+        assert result[0] is result[3]
+
+
 def test_item_from_zerodim_for_subclasses():
     # GH#62981 Ensure item_from_zerodim preserves subclasses of ndarray
     # Define a custom ndarray subclass
