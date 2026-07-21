@@ -1860,6 +1860,7 @@ def roll_apply(object obj,
         ndarray[float64_t] output, counts
         ndarray[float64_t, cast=True] arr
         Py_ssize_t i, s, e, N = len(start), n = len(obj)
+        bint use_direct_call = raw and len(args) == 0 and len(kwargs) == 0
 
     if n == 0:
         return np.array([], dtype=np.float64)
@@ -1881,7 +1882,10 @@ def roll_apply(object obj,
 
         if counts[i] >= minp:
             if raw:
-                output[i] = function(arr[s:e], *args, **kwargs)
+                if use_direct_call:
+                    output[i] = function(arr[s:e])
+                else:
+                    output[i] = function(arr[s:e], *args, **kwargs)
             else:
                 # GH 45912: ``obj`` is a Series built once per column in
                 # ``_generate_cython_apply_func``.  ``start``/``end`` are
