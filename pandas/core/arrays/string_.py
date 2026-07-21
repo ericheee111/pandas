@@ -835,7 +835,7 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
         self,
         use_na_sentinel: bool = True,
     ) -> tuple[np.ndarray, ExtensionArray]:
-        if not use_na_sentinel:
+        if not IS_ARM or not use_na_sentinel:
             return super().factorize(use_na_sentinel=use_na_sentinel)
 
         table = libhashtable.StringHashTable(len(self))

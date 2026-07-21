@@ -24,6 +24,7 @@ from pandas._libs import (
     lib,
 )
 from pandas._libs.arrays import NDArrayBacked
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import Pandas4Warning
 from pandas.util._decorators import set_module
@@ -1891,13 +1892,25 @@ class Categorical(NDArrayBackedExtensionArray, PandasObject, ObjectStringArrayMi
         )
 
         code, cat = self._codes, self.categories
-        ncat = len(cat)
-        ix = np.arange(ncat)
-        count = libalgos.count_categorical_codes(code, ncat, dropna)
-        if not dropna and (code >= 0).all():
-            count = count[:-1]
-        elif not dropna:
-            ix = np.append(ix, -1)
+
+        if IS_ARM:
+            ncat = len(cat)
+            ix = np.arange(ncat)
+            count = libalgos.count_categorical_codes(code, ncat, dropna)
+            if not dropna and (code >= 0).all():
+                count = count[:-1]
+            elif not dropna:
+                ix = np.append(ix, -1)
+        else:
+            ncat, mask = (len(cat), code >= 0)
+            ix, clean = np.arange(ncat), mask.all()
+
+            if dropna or clean:
+                obs = code if clean else code[mask]
+                count = np.bincount(obs, minlength=ncat or 0)
+            else:
+                count = np.bincount(np.where(mask, code, ncat))
+                ix = np.append(ix, -1)
 
         ix = coerce_indexer_dtype(ix, self.dtype.categories)
         ix_categorical = self._from_backing_data(ix)
