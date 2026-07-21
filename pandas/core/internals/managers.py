@@ -2406,7 +2406,7 @@ def _grouping_func_unwrap_numpy_ea(
     tup: tuple[int, ArrayLike],
 ) -> tuple[int, DtypeObj]:
     dtype = tup[1].dtype
-    if type(dtype) is NumpyEADtype:
+    if isinstance(dtype, NumpyEADtype):
         dtype = dtype.numpy_dtype
     return 0, dtype
 
@@ -2473,7 +2473,7 @@ def _tuples_to_blocks_no_consolidate(
         tuples = (
             (
                 i,
-                arr.to_numpy() if type(arr.dtype) is NumpyEADtype else arr,
+                arr.to_numpy() if isinstance(arr.dtype, NumpyEADtype) else arr,
             )
             for i, arr in tuples
         )

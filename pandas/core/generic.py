@@ -6538,10 +6538,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
                 # Build directly from the converted arrays.  Going through Series
                 # objects and concat adds substantial per-column overhead and is
                 # unnecessary because the arrays already share our index.
-                from pandas.core.dtypes.astype import (
-                    astype_array_safe,
-                    astype_is_view,
-                )
+                from pandas.core.dtypes.astype import astype_array_safe
                 from pandas.core.internals.managers import (
                     create_block_manager_from_column_arrays,
                 )

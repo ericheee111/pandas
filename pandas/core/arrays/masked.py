@@ -318,8 +318,6 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
                 mask = mask.copy()
                 mask[modify] = False
 
-        from pandas.compat._arch import IS_ARM
-
         if not IS_ARM:
             value = missing.check_value_size(value, mask, len(self))
             if mask.any():
@@ -401,11 +399,7 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         raise TypeError(f"Invalid value '{value!s}' for dtype '{self.dtype}'")
 
     def _where(self, mask: npt.NDArray[np.bool_], value) -> Self:
-        if (
-            IS_ARM
-            and is_scalar(value)
-            and not is_valid_na_for_dtype(value, self.dtype)
-        ):
+        if IS_ARM and is_scalar(value) and not is_valid_na_for_dtype(value, self.dtype):
             value = self._validate_setitem_value(value)
             data = self._data.copy()
             data[~mask] = value
@@ -424,9 +418,7 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
             if self._readonly:
                 raise ValueError("Cannot modify read-only array")
             value = self._validate_setitem_value(value)
-            libalgos.putmask_masked_float64(
-                self._data, self._mask, mask, value
-            )
+            libalgos.putmask_masked_float64(self._data, self._mask, mask, value)
             return
 
         super()._putmask(mask, value)
@@ -1279,9 +1271,7 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
             return None
 
         values = data[:-1]
-        if len(values) > 1 and not libalgos.is_monotonic(
-            values, timelike=False
-        )[2]:
+        if len(values) > 1 and not libalgos.is_monotonic(values, timelike=False)[2]:
             return None
 
         return self._simple_new(data.copy(), mask.copy())
