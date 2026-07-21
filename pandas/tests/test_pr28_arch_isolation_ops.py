@@ -87,6 +87,14 @@ def test_masked_boolean_factorize_non_arm_uses_generic_implementation(monkeypatc
         "factorize_bool_masked",
         lambda *args: pytest.fail("ARM factorize helper called on non-ARM"),
     )
+    original_factorize_array = masked.factorize_array
+
+    def factorize_array(values, *args, **kwargs):
+        assert values is arr._data
+        assert kwargs["mask"] is arr._mask
+        return original_factorize_array(values, *args, **kwargs)
+
+    monkeypatch.setattr(masked, "factorize_array", factorize_array)
 
     codes, uniques = arr.factorize()
 
