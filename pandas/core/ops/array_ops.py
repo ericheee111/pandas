@@ -12,6 +12,7 @@ import platform
 from typing import (
     TYPE_CHECKING,
     Any,
+    cast,
 )
 
 import numpy as np
@@ -380,27 +381,24 @@ def arithmetic_op(left: ArrayLike, right: Any, op):
     else:
         # TODO we should handle EAs consistently and move this check before the if/else
         # (https://github.com/pandas-dev/pandas/issues/41165)
-        # error: Argument 2 to "_bool_arith_check" has incompatible type
-        # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
-        _bool_arith_check(op, left, right)  # type: ignore[arg-type]
+        left_arr = cast(np.ndarray, left)
+        _bool_arith_check(op, left_arr, right)
 
         if (
             IS_ARM
             and op is operator.truediv
-            and isinstance(left, np.ndarray)
+            and isinstance(left_arr, np.ndarray)
             and isinstance(right, np.ndarray)
-            and left.dtype == np.dtype(np.int64)
+            and left_arr.dtype == np.dtype(np.int64)
             and right.dtype == np.dtype(np.int64)
-            and left.ndim == right.ndim == 1
-            and left.shape == right.shape
-            and left.flags.c_contiguous
+            and left_arr.ndim == right.ndim == 1
+            and left_arr.shape == right.shape
+            and left_arr.flags.c_contiguous
             and right.flags.c_contiguous
         ):
-            return libops.int64_true_divide(left, right)
+            return libops.int64_true_divide(left_arr, right)
 
-        # error: Argument 1 to "_na_arithmetic_op" has incompatible type
-        # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
-        res_values = _na_arithmetic_op(left, right, op)  # type: ignore[arg-type]
+        res_values = _na_arithmetic_op(left_arr, right, op)
 
     return res_values
 
