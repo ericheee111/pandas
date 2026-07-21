@@ -1,11 +1,11 @@
 import datetime
-import platform
 
 import dateutil
 import numpy as np
 import pytest
 
 from pandas._libs import algos
+from pandas.compat._arch import IS_ARM
 
 import pandas as pd
 from pandas import (
@@ -310,7 +310,7 @@ def test_dropna_float_block_uses_arch_reduction(monkeypatch, how, axis):
     monkeypatch.setattr(algos, "nanvalidity_2d", wrapped_nanvalidity)
     monkeypatch.setattr(algos, "nancount_2d", wrapped_nancount)
     result = df.dropna(axis=axis, how=how)
-    if platform.machine() == "aarch64":
+    if IS_ARM:
         assert nanvalidity_called
         assert not nancount_called
     else:

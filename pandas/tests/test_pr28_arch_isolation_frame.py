@@ -157,3 +157,40 @@ def test_fillna_extension_blocks_non_arm_avoids_batch_helper(monkeypatch):
         }
     )
     tm.assert_frame_equal(result, expected)
+
+
+def test_fillna_non_1d_ea_block_non_arm_avoids_batch_fastpath(monkeypatch):
+    monkeypatch.setattr(generic, "IS_ARM", False, raising=False)
+    original = managers.BlockManager.fillna
+
+    def reject_2d_fill_values(self, value, limit, inplace):
+        if isinstance(value, np.ndarray) and value.ndim == 2:
+            pytest.fail("non-ARM EA fillna used the single-block batch fast path")
+        return original(self, value=value, limit=limit, inplace=inplace)
+
+    monkeypatch.setattr(managers.BlockManager, "fillna", reject_2d_fill_values)
+    df = DataFrame(
+        {
+            "a": Series(["2020-01-01", None], dtype="datetime64[ns]"),
+            "b": Series([None, "2020-01-02"], dtype="datetime64[ns]"),
+        }
+    )
+    assert len(df._mgr.blocks) == 1
+    block = df._mgr.blocks[0]
+    assert not isinstance(block.values, np.ndarray)
+    assert block.values.ndim == 2
+
+    result = df.fillna(
+        {"a": np.datetime64("2020-01-03"), "b": np.datetime64("2020-01-04")}
+    )
+    expected = DataFrame(
+        {
+            "a": Series(
+                ["2020-01-01", "2020-01-03"], dtype="datetime64[ns]"
+            ),
+            "b": Series(
+                ["2020-01-04", "2020-01-02"], dtype="datetime64[ns]"
+            ),
+        }
+    )
+    tm.assert_frame_equal(result, expected)
