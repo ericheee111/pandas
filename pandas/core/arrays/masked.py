@@ -28,6 +28,7 @@ from pandas.compat import (
     IS64,
     is_platform_windows,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.errors import AbstractMethodError
 
 from pandas.core.dtypes.astype import astype_is_view
@@ -400,7 +401,11 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         raise TypeError(f"Invalid value '{value!s}' for dtype '{self.dtype}'")
 
     def _where(self, mask: npt.NDArray[np.bool_], value) -> Self:
-        if is_scalar(value) and not is_valid_na_for_dtype(value, self.dtype):
+        if (
+            IS_ARM
+            and is_scalar(value)
+            and not is_valid_na_for_dtype(value, self.dtype)
+        ):
             value = self._validate_setitem_value(value)
             data = np.where(mask, self._data, value)
             result_mask = self._mask & mask
@@ -410,7 +415,8 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
 
     def _putmask(self, mask: npt.NDArray[np.bool_], value) -> None:
         if (
-            self._data.dtype == np.dtype("float64")
+            IS_ARM
+            and self._data.dtype == np.dtype("float64")
             and is_scalar(value)
             and not is_valid_na_for_dtype(value, self.dtype)
         ):
@@ -1502,7 +1508,7 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         arr = self._data
         mask = self._mask
 
-        if self.dtype.kind == "b" and len(arr) > 100_000:
+        if IS_ARM and self.dtype.kind == "b" and len(arr) > 100_000:
             codes, uniques, uniques_mask = libalgos.factorize_bool_masked(
                 arr, mask, use_na_sentinel
             )
@@ -1510,10 +1516,10 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
             return codes, uniques_ea
 
         has_na = mask.any()
+        if IS_ARM and not has_na:
+            mask = None
         # Use a sentinel for na; recode and add NA to uniques if necessary below
-        codes, uniques = factorize_array(
-            arr, use_na_sentinel=True, mask=mask if has_na else None
-        )
+        codes, uniques = factorize_array(arr, use_na_sentinel=True, mask=mask)
 
         # check that factorize_array correctly preserves dtype.
         assert uniques.dtype == self.dtype.numpy_dtype, (uniques.dtype, self.dtype)
