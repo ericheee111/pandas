@@ -18,6 +18,7 @@ from pandas.core.dtypes.dtypes import CategoricalDtype
 
 import pandas as pd
 from pandas import (
+    NA,
     Categorical,
     CategoricalIndex,
     DataFrame,
@@ -3227,3 +3228,143 @@ def test_merge_right_on_and_right_index():
 
     with pytest.raises(pd.errors.MergeError):
         df1.merge(df2, left_on="col", right_on="col", right_index=True)
+
+
+class TestMergeMaskedEAFastPath:
+    """Coverage for _masked_hash_inner_join_fastpath and masked EA gather."""
+
+    @pytest.mark.parametrize("dtype", ["Int8", "Int16", "Int32", "Int64",
+                                        "UInt8", "UInt16", "UInt32", "UInt64",
+                                        "Float32", "Float64"])
+    def test_inner_join_masked_ea_no_na(self, dtype):
+        left = DataFrame({"key": [1, 2, 3], "a": [10, 20, 30]}, dtype=dtype)
+        right = DataFrame({"key": [2, 3, 4], "b": [40, 50, 60]}, dtype=dtype)
+        result = left.merge(right, on="key", how="inner")
+        expected = DataFrame(
+            {"key": Series([2, 3], dtype=dtype),
+             "a": Series([20, 30], dtype=dtype),
+             "b": Series([40, 50], dtype=dtype)}
+        )
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", ["Int64", "UInt32", "Float64"])
+    def test_inner_join_masked_ea_with_na_in_left(self, dtype):
+        left = DataFrame({"key": Series([1, NA, 3], dtype=dtype), "a": [10, 20, 30]})
+        right = DataFrame({"key": Series([1, 3], dtype=dtype), "b": [100, 300]})
+        result = left.merge(right, on="key", how="inner")
+        expected = DataFrame(
+            {"key": Series([1, 3], dtype=dtype),
+             "a": [10, 30],
+             "b": [100, 300]}
+        )
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", ["Int64", "UInt32", "Float64"])
+    def test_inner_join_masked_ea_with_na_in_right(self, dtype):
+        left = DataFrame({"key": Series([1, 2, 3], dtype=dtype), "a": [10, 20, 30]})
+        right = DataFrame({"key": Series([1, NA, 3], dtype=dtype), "b": [100, 200, 300]})
+        result = left.merge(right, on="key", how="inner")
+        expected = DataFrame(
+            {"key": Series([1, 3], dtype=dtype),
+             "a": [10, 30],
+             "b": [100, 300]}
+        )
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", ["Int64", "Float64"])
+    def test_inner_join_masked_ea_with_na_both(self, dtype):
+        left = DataFrame({"key": Series([1, NA, 3], dtype=dtype), "a": [10, 20, 30]})
+        right = DataFrame(
+            {"key": Series([1, NA, 3], dtype=dtype), "b": [100, 200, 300]}
+        )
+        result = left.merge(right, on="key", how="inner")
+        expected = DataFrame(
+            {"key": Series([1, NA, 3], dtype=dtype),
+             "a": [10, 20, 30],
+             "b": [100, 200, 300]}
+        )
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", ["Int64", "Float64"])
+    def test_inner_join_masked_ea_single_na_right(self, dtype):
+        left = DataFrame({"key": Series([1, NA, 3], dtype=dtype), "a": [10, 20, 30]})
+        right = DataFrame({"key": Series([2, NA], dtype=dtype), "b": [200, 999]})
+        result = left.merge(right, on="key", how="inner")
+        expected = DataFrame(
+            {"key": Series([NA], dtype=dtype),
+             "a": [20],
+             "b": [999]}
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_inner_join_masked_ea_empty(self):
+        left = DataFrame({"key": Series([], dtype="Int64"), "a": Series([], dtype="Int64")})
+        right = DataFrame({"key": Series([1, 2], dtype="Int64"), "b": [10, 20]})
+        result = left.merge(right, on="key", how="inner")
+        expected = DataFrame(
+            {"key": Series([], dtype="Int64"), "a": Series([], dtype="Int64"),
+             "b": Series([], dtype="int64")}
+        )
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", ["Int64", "Float64"])
+    def test_inner_join_masked_ea_dup_right_falls_back(self, dtype):
+        left = DataFrame({"key": Series([1, 2], dtype=dtype), "a": [10, 20]})
+        right = DataFrame({"key": Series([1, 1, 2], dtype=dtype), "b": [100, 101, 200]})
+        result = left.merge(right, on="key", how="inner")
+        expected = DataFrame(
+            {"key": Series([1, 1, 2], dtype=dtype),
+             "a": [10, 10, 20],
+             "b": [100, 101, 200]}
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_inner_join_masked_ea_equiv_general_path(self):
+        left = DataFrame({"key": Series([3, 1, 2, NA], dtype="Int64"), "a": range(4)})
+        right = DataFrame({"key": Series([2, NA, 1], dtype="Int64"), "b": range(3)})
+        result_inner = left.merge(right, on="key", how="inner")
+        result_left = left.merge(right, on="key", how="left")
+        assert len(result_inner) == 3
+        assert result_inner["key"].notna().sum() == 2
+        assert result_inner["key"].isna().sum() == 1
+        assert len(result_left) == 4
+
+
+class TestMergeCommonColsFastPath:
+    """Coverage for the common_cols isin fast path and ordering consistency."""
+
+    def test_common_cols_non_alpha_order_sort_true(self):
+        left = DataFrame({"z": [1, 2], "a": [3, 4], "m": [5, 6]})
+        right = DataFrame({"z": [1, 2], "a": [3, 4], "x": [7, 8]})
+        result = left.merge(right, sort=True)
+        expected = DataFrame({"z": [1, 2], "a": [3, 4], "m": [5, 6], "x": [7, 8]})
+        tm.assert_frame_equal(result, expected)
+
+    def test_common_cols_non_alpha_order_sort_false(self):
+        left = DataFrame({"z": [1, 2], "a": [3, 4], "m": [5, 6]})
+        right = DataFrame({"z": [1, 2], "a": [3, 4], "x": [7, 8]})
+        result = left.merge(right, sort=False)
+        expected = DataFrame({"z": [1, 2], "a": [3, 4], "m": [5, 6], "x": [7, 8]})
+        tm.assert_frame_equal(result, expected)
+
+    def test_common_cols_multi_key_sort_order(self):
+        left = DataFrame({"z": [1, 1, 2], "a": [2, 1, 1], "v1": [10, 20, 30]})
+        right = DataFrame({"z": [1, 1, 2], "a": [1, 2, 1], "v2": [100, 200, 300]})
+        result = left.merge(right, on=["z", "a"], sort=True)
+        expected = DataFrame(
+            {"z": [1, 1, 2], "a": [1, 2, 1], "v1": [20, 10, 30], "v2": [100, 200, 300]}
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_common_cols_single_col(self):
+        left = DataFrame({"key": [1, 2, 3], "a": [10, 20, 30]})
+        right = DataFrame({"key": [2, 3, 4], "b": [200, 300, 400]})
+        result = left.merge(right, on="key")
+        expected = DataFrame({"key": [2, 3], "a": [20, 30], "b": [200, 300]})
+        tm.assert_frame_equal(result, expected)
+
+    def test_common_cols_no_common_raises(self):
+        left = DataFrame({"a": [1, 2]})
+        right = DataFrame({"b": [3, 4]})
+        with pytest.raises(MergeError, match="No common columns"):
+            left.merge(right)

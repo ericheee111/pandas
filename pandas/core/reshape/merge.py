@@ -1581,6 +1581,16 @@ class _MergeOperation:
                         is_inner or (left_indexer >= 0).all()
                     ):
                         lvals = take_left.take(left_indexer)
+                    elif IS_ARM and isinstance(take_left, BaseMaskedArray) and is_inner:
+                        # Inner join -> left_indexer has no -1, so we can gather
+                        # the masked EA key as two plain ndarray takes on the
+                        # backing _data/_mask (much faster than the generic
+                        # ExtensionBlock.take_nd path).
+                        lvals = type(take_left)(
+                            take_left._data.take(left_indexer),
+                            take_left._mask.take(left_indexer),
+                            copy=False,
+                        )
                     else:
                         lfill = na_value_for_dtype(take_left.dtype)
                         lvals = algos.take_nd(take_left, left_indexer, fill_value=lfill)
@@ -1588,6 +1598,12 @@ class _MergeOperation:
                 if take_right is None:
                     rvals = result[name]._values
                 elif right_indexer is None:
+                    rvals = take_right
+                elif is_inner:
+                    # Inner join: the right key is never used to build the
+                    # result key column (only lvals is, see the key_col
+                    # construction below). Skip the expensive gather of rvals;
+                    # only its dtype is needed for result_dtype.
                     rvals = take_right
                 else:
                     # TODO: can we pin down take_right's type earlier?
@@ -2152,20 +2168,37 @@ class _MergeOperation:
                 # use the common columns
                 left_cols = self.left.columns
                 right_cols = self.right.columns
-                common_cols = left_cols.intersection(right_cols)
-                if len(common_cols) == 0:
-                    raise MergeError(
-                        "No common columns to perform merge on. "
-                        f"Merge options: left_on={left_on}, "
-                        f"right_on={right_on}, "
-                        f"left_index={self.left_index}, "
-                        f"right_index={self.right_index}"
-                    )
-                if (
-                    not left_cols.join(common_cols, how="inner").is_unique
-                    or not right_cols.join(common_cols, how="inner").is_unique
-                ):
-                    raise MergeError(f"Data columns not unique: {common_cols!r}")
+                if left_cols.is_unique and right_cols.is_unique:
+                    # Fast path: both frames have unique column names -> the
+                    # common columns are a simple isin mask gather on left_cols.
+                    # This avoids the expensive Index.intersection + Index.join
+                    # (which build hash tables for what is a small set op here
+                    # and dominate __init__ time for narrow frames).
+                    common_mask = left_cols.isin(right_cols)
+                    if not common_mask.any():
+                        raise MergeError(
+                            "No common columns to perform merge on. "
+                            f"Merge options: left_on={left_on}, "
+                            f"right_on={right_on}, "
+                            f"left_index={self.left_index}, "
+                            f"right_index={self.right_index}"
+                        )
+                    common_cols = left_cols[common_mask]
+                else:
+                    common_cols = left_cols.intersection(right_cols)
+                    if len(common_cols) == 0:
+                        raise MergeError(
+                            "No common columns to perform merge on. "
+                            f"Merge options: left_on={left_on}, "
+                            f"right_on={right_on}, "
+                            f"left_index={self.left_index}, "
+                            f"right_index={self.right_index}"
+                        )
+                    if (
+                        not left_cols.join(common_cols, how="inner").is_unique
+                        or not right_cols.join(common_cols, how="inner").is_unique
+                    ):
+                        raise MergeError(f"Data columns not unique: {common_cols!r}")
                 left_on = right_on = common_cols
         elif self.on is not None:
             if left_on is not None or right_on is not None:
@@ -2573,6 +2606,13 @@ def get_join_indexers(
         lkey = left_keys[0]
         rkey = right_keys[0]
 
+    # IS_ARM fast path: single-column inner join on numeric keys goes straight
+    # to the hash-join (which is now pre-allocated & nogil-compressed in
+    # hash_inner_join). We intentionally do NOT check is_monotonic_increasing
+    # first: the optimized hash-join is faster than Index.join's two-pointer
+    # for these sizes, and the monotonic scan would tax every non-monotonic
+    # merge. Monotonic+unique inputs that would benefit from the two-pointer
+    # are rare and fall through to the general else-branch below on non-ARM.
     if IS_ARM and (
         how == "inner"
         and not sort
@@ -3287,6 +3327,55 @@ def _left_join_on_index(
     return left_ax, None, right_indexer
 
 
+def _masked_hash_inner_join_fastpath(
+    lk: BaseMaskedArray,
+    rk: BaseMaskedArray,
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], int] | None:
+    """
+    Hash inner-join fast path for masked ExtensionArray numeric keys.
+
+    Skips the full dtype dispatch in ``_factorize_keys`` and avoids the
+    wasteful labels/uniques allocation that ``factorize()`` would do: only
+    the hash table (key -> position) is needed for the probe.
+
+    Returns ``(lidx, ridx, -1)`` if the right keys are safe for the
+    unique-right probe (at most one NA and no duplicate non-NA key, i.e.
+    each left row matches at most one right row), else ``None`` so the
+    caller falls back to the general dispatch.
+
+    Note: ``len(HashTable)`` (see ``HashTable.__len__``) returns
+    ``table.size + (1 if na_position != -1 else 0)``, so it counts the
+    single NA slot (if any) in addition to the non-NA buckets.  The
+    guard ``len(rizer.table) != n_right`` therefore correctly accepts
+    right keys with zero or one NA and no non-NA duplicates.
+    """
+    klass = _factorizers.get(lk.dtype.type)
+    if klass is None:
+        return None
+    # Size the hash table for the right key when it hashes well (int kinds):
+    # a smaller table fits L2 and probes faster. Float kinds cluster more under
+    # khash's hashing, so keep the oversized table (max(l,r)) to avoid collisions.
+    if lk.dtype.kind in "iu":
+        rizer = klass(len(rk), uses_mask=True)
+    else:
+        rizer = klass(max(len(lk), len(rk)), uses_mask=True)
+    # Build the table on the right key (key -> last position) WITHOUT
+    # materialising the labels/uniques arrays that factorize() allocates.
+    rizer.table.map_locations(rk._data, mask=rk._mask)
+    n_right = len(rk._data)
+    # len(table) == n_right  <=>  right has at most one NA and no non-NA dup.
+    # HashTable.__len__ returns table.size + (1 if na_position != -1 else 0),
+    # so the single NA slot (if any) IS counted.  Non-NA dups overwrite the
+    # same bucket, shrinking table.size below the unique non-NA count; multiple
+    # NAs are collapsed into one na_position, so len < n_right in both cases.
+    # In that case each left row matches <= 1 right row, which is the only
+    # situation hash_inner_join is correct for.
+    if len(rizer.table) != n_right:
+        return None
+    ridx, lidx = rizer.hash_inner_join(lk._data, mask=lk._mask)
+    return lidx, ridx, -1
+
+
 def _factorize_keys(
     lk: ArrayLike,
     rk: ArrayLike,
@@ -3346,6 +3435,21 @@ def _factorize_keys(
     (array([0, 1, 2]), array([0, 1]), 3)
     """
     # TODO: if either is a RangeIndex, we can likely factorize more efficiently?
+
+    # Fast path: masked EA numeric keys, inner join, no sort. Skips the full
+    # dtype dispatch below and the labels/uniques allocation that factorize()
+    # would do (only the hash table is needed for the probe).
+    if (
+        how == "inner"
+        and not sort
+        and isinstance(lk, BaseMaskedArray)
+        and isinstance(rk, BaseMaskedArray)
+        and lk.dtype == rk.dtype
+        and lk.dtype.kind in "iuf"
+    ):
+        result = _masked_hash_inner_join_fastpath(lk, rk)
+        if result is not None:
+            return result
 
     if (
         isinstance(lk.dtype, DatetimeTZDtype) and isinstance(rk.dtype, DatetimeTZDtype)
