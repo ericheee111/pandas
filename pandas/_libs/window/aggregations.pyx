@@ -1851,6 +1851,21 @@ def roll_nunique(const float64_t[:] values, ndarray[int64_t] start,
     return np.asarray(output)
 
 
+cdef inline ndarray _create_raw_window_view(
+    ndarray arr, Py_ssize_t start, Py_ssize_t end
+):
+    cdef:
+        cnp.npy_intp length = end - start
+        ndarray window = cnp.PyArray_SimpleNewFromData(
+            1, &length, cnp.NPY_FLOAT64, cnp.PyArray_GETPTR1(arr, start)
+        )
+
+    cnp.set_array_base(window, arr)
+    if not cnp.PyArray_ISWRITEABLE(arr):
+        cnp.PyArray_CLEARFLAGS(window, cnp.NPY_ARRAY_WRITEABLE)
+    return window
+
+
 def roll_apply(object obj,
                ndarray[int64_t] start, ndarray[int64_t] end,
                int64_t minp,
@@ -1859,8 +1874,10 @@ def roll_apply(object obj,
     cdef:
         ndarray[float64_t] output, counts
         ndarray[float64_t, cast=True] arr
+        ndarray window
         Py_ssize_t i, s, e, N = len(start), n = len(obj)
         bint use_direct_call = raw and len(args) == 0 and len(kwargs) == 0
+        bint use_direct_view
 
     if n == 0:
         return np.array([], dtype=np.float64)
@@ -1870,6 +1887,12 @@ def roll_apply(object obj,
     # ndarray input
     if raw and not arr.flags.c_contiguous:
         arr = arr.copy("C")
+
+    use_direct_view = (
+        use_direct_call
+        and cnp.PyArray_TYPE(arr) == cnp.NPY_FLOAT64
+        and cnp.PyArray_ISNOTSWAPPED(arr)
+    )
 
     counts = roll_sum(np.isfinite(arr).astype(float), start, end, minp)
 
@@ -1882,7 +1905,10 @@ def roll_apply(object obj,
 
         if counts[i] >= minp:
             if raw:
-                if use_direct_call:
+                if use_direct_view:
+                    window = _create_raw_window_view(arr, s, e)
+                    output[i] = function(window)
+                elif use_direct_call:
                     output[i] = function(arr[s:e])
                 else:
                     output[i] = function(arr[s:e], *args, **kwargs)
