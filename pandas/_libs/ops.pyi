@@ -16,6 +16,10 @@ from pandas._typing import npt
 _BinOp: TypeAlias = Callable[[Any, Any], Any]
 _BoolOp: TypeAlias = Callable[[Any, Any], bool]
 
+def int64_true_divide(
+    left: npt.NDArray[np.int64], right: npt.NDArray[np.int64]
+) -> npt.NDArray[np.float64]: ...
+
 def scalar_compare(
     values: np.ndarray,  # object[:]
     val: object,

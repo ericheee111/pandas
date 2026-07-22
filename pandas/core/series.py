@@ -35,6 +35,7 @@ from pandas._libs import (
 )
 from pandas._libs.lib import is_range_indexer
 from pandas.compat import CHAINED_WARNING_DISABLED
+from pandas.compat._arch import IS_ARM
 from pandas.compat._constants import (
     REF_COUNT,
     REF_COUNT_METHOD,
@@ -6872,8 +6873,12 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
 
         # TODO: result should always be ArrayLike, but this fails for some
         #  JSONArray tests
-        dtype = getattr(result, "dtype", None)
-        out = self._constructor(result, index=self.index, dtype=dtype, copy=False)
+        if IS_ARM and isinstance(result, (np.ndarray, ExtensionArray)):
+            mgr = SingleBlockManager.from_array(result, self.index)
+            out = self._constructor_from_mgr(mgr, axes=mgr.axes)
+        else:
+            dtype = getattr(result, "dtype", None)
+            out = self._constructor(result, index=self.index, dtype=dtype, copy=False)
         out = out.__finalize__(self)
         out = out.__finalize__(other)
 

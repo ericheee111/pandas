@@ -36,6 +36,7 @@ from pandas.compat import (
     PYARROW_MIN_VERSION,
     pa_version_under21p0,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.errors import Pandas4Warning
 from pandas.util._decorators import (
     doc,
@@ -2506,6 +2507,25 @@ class ArrowExtensionArray(
             **kwargs,
         )
         return self._from_pyarrow_array(self._box_pa_array(pa.array(data, mask=mask)))
+
+    def _where(self, mask: npt.NDArray[np.bool_], value) -> Self:
+        if IS_ARM and is_scalar(value):
+            value = self._maybe_convert_setitem_value(value)
+            result = self._if_else(mask, self._pa_array, value)
+            return self._from_pyarrow_array(result)
+
+        return super()._where(mask, value)
+
+    def _putmask(self, mask: npt.NDArray[np.bool_], value) -> None:
+        if IS_ARM and is_scalar(value):
+            if self._readonly:
+                raise ValueError("Cannot modify read-only array")
+            value = self._maybe_convert_setitem_value(value)
+            result = self._if_else(mask, value, self._pa_array)
+            self._pa_array = self._from_pyarrow_array(result)._pa_array
+            return
+
+        super()._putmask(mask, value)
 
     @classmethod
     def _if_else(

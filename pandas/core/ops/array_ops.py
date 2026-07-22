@@ -12,6 +12,7 @@ import platform
 from typing import (
     TYPE_CHECKING,
     Any,
+    cast,
 )
 
 import numpy as np
@@ -29,6 +30,7 @@ from pandas._libs.tslibs import (
     is_supported_dtype,
     is_unitless,
 )
+from pandas.compat._arch import IS_ARM
 
 from pandas.core.dtypes.cast import (
     construct_1d_object_array_from_listlike,
@@ -149,7 +151,13 @@ def _should_bypass_numexpr_aarch64(left: np.ndarray, right, op) -> bool:
         }
 
     if left.dtype == np.int64:
-        if op in {operator.add, operator.sub, operator.truediv, operator.eq, operator.ne}:
+        if op in {
+            operator.add,
+            operator.sub,
+            operator.truediv,
+            operator.eq,
+            operator.ne,
+        }:
             return True
         # Numexpr is faster for integer scalar multiplication on AArch64.
         return op is operator.mul and isinstance(right, (float, np.floating))
@@ -373,13 +381,24 @@ def arithmetic_op(left: ArrayLike, right: Any, op):
     else:
         # TODO we should handle EAs consistently and move this check before the if/else
         # (https://github.com/pandas-dev/pandas/issues/41165)
-        # error: Argument 2 to "_bool_arith_check" has incompatible type
-        # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
-        _bool_arith_check(op, left, right)  # type: ignore[arg-type]
+        left_arr = cast(np.ndarray, left)
+        _bool_arith_check(op, left_arr, right)
 
-        # error: Argument 1 to "_na_arithmetic_op" has incompatible type
-        # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
-        res_values = _na_arithmetic_op(left, right, op)  # type: ignore[arg-type]
+        if (
+            IS_ARM
+            and op is operator.truediv
+            and isinstance(left_arr, np.ndarray)
+            and isinstance(right, np.ndarray)
+            and left_arr.dtype == np.dtype(np.int64)
+            and right.dtype == np.dtype(np.int64)
+            and left_arr.ndim == right.ndim == 1
+            and left_arr.shape == right.shape
+            and left_arr.flags.c_contiguous
+            and right.flags.c_contiguous
+        ):
+            return libops.int64_true_divide(left_arr, right)
+
+        res_values = _na_arithmetic_op(left_arr, right, op)
 
     return res_values
 
@@ -408,9 +427,7 @@ def comparison_op(left: ArrayLike, right: Any, op) -> ArrayLike:
 
     rvalues = lib.item_from_zerodim(rvalues)
     if _USE_AARCH64_COMPARISON_FASTPATH:
-        rvalues = _maybe_cast_scalar_for_int64_comparison_aarch64(
-            lvalues, rvalues, op
-        )
+        rvalues = _maybe_cast_scalar_for_int64_comparison_aarch64(lvalues, rvalues, op)
     if _USE_AARCH64_FLOAT64_SCALAR_FASTPATH:
         rvalues = _maybe_cast_int_scalar_for_float64_op_aarch64(lvalues, rvalues, op)
 

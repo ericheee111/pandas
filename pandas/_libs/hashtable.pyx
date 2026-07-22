@@ -56,9 +56,10 @@ cdef Py_ssize_t _INIT_VEC_CAP = 128
 cdef bint _use_boostkit_fastpaths = False
 
 
-def _set_use_boostkit_fastpaths(bint value):
+def set_use_boostkit_fastpaths(bint value):
     global _use_boostkit_fastpaths
     _use_boostkit_fastpaths = value
+
 
 include "hashtable_class_helper.pxi"
 include "hashtable_func_helper.pxi"
