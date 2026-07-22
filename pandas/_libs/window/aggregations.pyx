@@ -1,7 +1,9 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True
 
+from libc.float cimport DBL_MAX
 from libc.math cimport (
     fabs,
+    isfinite,
     signbit,
     sqrt,
 )
@@ -1849,6 +1851,77 @@ def roll_nunique(const float64_t[:] values, ndarray[int64_t] start,
                 output[i] = NaN
 
     return np.asarray(output)
+
+
+def roll_apply_builtin_sum(
+    object obj,
+    ndarray[int64_t] start,
+    ndarray[int64_t] end,
+    int64_t minp,
+):
+    """Ordered raw rolling sum for finite, overflow-safe float64 values."""
+    cdef:
+        ndarray arr = np.asarray(obj)
+        ndarray[float64_t] values
+        ndarray[float64_t] output
+        Py_ssize_t i, j, s, e
+        Py_ssize_t N = len(start), n
+        Py_ssize_t window_len, max_window_len = 0
+        float64_t value, max_abs = 0.0, total
+
+    if (
+        len(end) != N
+        or cnp.PyArray_NDIM(arr) != 1
+        or cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64
+        or not cnp.PyArray_ISNOTSWAPPED(arr)
+    ):
+        return None
+
+    n = len(arr)
+
+    # Match the existing raw=True contiguous handling in roll_apply.
+    if not arr.flags.c_contiguous:
+        arr = arr.copy("C")
+    values = arr
+
+    if n == 0:
+        return np.array([], dtype=np.float64)
+
+    for i in range(n):
+        value = values[i]
+        if not isfinite(value):
+            return None
+        value = fabs(value)
+        if value > max_abs:
+            max_abs = value
+
+    for i in range(N):
+        s = start[i]
+        e = end[i]
+        if s < 0 or e < s or e > n:
+            return None
+        window_len = e - s
+        if window_len > max_window_len:
+            max_window_len = window_len
+
+    # The triangle inequality guarantees that every ordered partial sum is
+    # finite when max_abs * max_window_len cannot exceed DBL_MAX.
+    if max_window_len != 0 and max_abs > DBL_MAX / max_window_len:
+        return None
+
+    output = np.empty(N, dtype=np.float64)
+    for i in range(N):
+        s = start[i]
+        e = end[i]
+        if e - s >= minp:
+            total = 0.0
+            for j in range(s, e):
+                total += values[j]
+            output[i] = total
+        else:
+            output[i] = NaN
+
+    return output
 
 
 cdef inline ndarray _create_raw_window_view(
