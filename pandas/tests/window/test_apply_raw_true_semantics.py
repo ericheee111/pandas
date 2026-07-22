@@ -71,6 +71,53 @@ def test_raw_true_empty_args_kwargs_preserve_windows_and_order():
         tm.assert_numpy_array_equal(window, np.array(expected_window))
 
 
+def test_raw_true_saved_overlapping_windows_share_values():
+    windows = []
+
+    def function(window):
+        windows.append(window)
+        return np.sum(window)
+
+    Series(np.arange(4.0)).rolling(2, min_periods=1).apply(function, raw=True)
+
+    windows[0][0] = 10.0
+    assert windows[1][0] == 10.0
+    assert windows[2][0] == 1.0
+
+
+def test_raw_true_readonly_input_produces_readonly_windows():
+    values = np.arange(4.0)
+    values.flags.writeable = False
+    windows = []
+
+    def function(window):
+        windows.append(window)
+        return np.sum(window)
+
+    Series(values, copy=False).rolling(2, min_periods=1).apply(function, raw=True)
+
+    assert all(not window.flags.writeable for window in windows)
+    with pytest.raises(ValueError, match="read-only"):
+        windows[-1][0] = 10.0
+
+
+def test_raw_true_empty_window_calls_callback():
+    windows = []
+
+    def function(window):
+        windows.append(window)
+        return len(window)
+
+    result = Series([1.0, 2.0]).rolling(
+        2, min_periods=0, closed="left"
+    ).apply(function, raw=True)
+
+    tm.assert_series_equal(result, Series([0.0, 1.0]))
+    assert len(windows) == 2
+    assert windows[0].shape == (0,)
+    assert windows[0].dtype == np.dtype(np.float64)
+
+
 def test_raw_true_nonempty_args_kwargs_fallback():
     seen = []
 
