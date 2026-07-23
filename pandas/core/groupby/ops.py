@@ -419,8 +419,15 @@ class WrappedCythonOp:
             and ngroups > 0
             and len(comp_ids) > 0
         ):
-            diff = np.diff(comp_ids)
-            if (diff >= 0).all() and np.count_nonzero(diff) + 1 == ngroups:
+            if comp_ids[0] == 0 and comp_ids[-1] == ngroups - 1:
+                diff = np.diff(comp_ids)
+            else:
+                diff = None
+            if (
+                diff is not None
+                and (diff >= 0).all()
+                and np.count_nonzero(diff) + 1 == ngroups
+            ):
                 group_starts = np.searchsorted(comp_ids, np.arange(ngroups))
                 reduce_func = np.fmax if self.how == "max" else np.fmin
                 if values.ndim == 2:
@@ -451,8 +458,15 @@ class WrappedCythonOp:
             and ngroups > 0
             and len(comp_ids) > 0
         ):
-            diff = np.diff(comp_ids)
-            if (diff >= 0).all() and np.count_nonzero(diff) + 1 == ngroups:
+            if comp_ids[0] == 0 and comp_ids[-1] == ngroups - 1:
+                diff = np.diff(comp_ids)
+            else:
+                diff = None
+            if (
+                diff is not None
+                and (diff >= 0).all()
+                and np.count_nonzero(diff) + 1 == ngroups
+            ):
                 group_starts = np.searchsorted(comp_ids, np.arange(ngroups))
                 group_sizes = np.diff(np.append(group_starts, len(comp_ids)))
                 if group_sizes.max() <= 100:
