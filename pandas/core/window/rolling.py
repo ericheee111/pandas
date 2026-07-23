@@ -661,7 +661,7 @@ class BaseWindow(SelectionMixin):
                 name,
                 numeric_only,
                 convert_inf=not use_fast_path,
-                use_manager_constructor=use_fast_path,
+                use_manager_constructor=use_fast_path
             )
         else:
             return self._apply_tablewise(homogeneous_func, name, numeric_only)

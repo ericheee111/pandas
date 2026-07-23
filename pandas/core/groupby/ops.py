@@ -1063,7 +1063,8 @@ class BaseGrouper:
             and isinstance(values, np.ndarray)
         ):
             # BinGrouper bins partition the ordered comp_ids passed below.
-            kwargs["_group_boundaries"] = self.bins
+            # Ensure C-contiguous for the typed memoryview in group_sum.
+            kwargs["_group_boundaries"] = np.ascontiguousarray(self.bins)
             kwargs["_group_boundaries_are_trusted"] = True
 
         return cy_op.cython_operation(
