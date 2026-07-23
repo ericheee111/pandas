@@ -4770,33 +4770,31 @@ def cat_safe(list_of_columns: list[npt.NDArray[np.object_]], sep: str):
     nd.array
         The concatenation of list_of_columns with sep.
     """
+    # Validate all columns contain only strings (or empty) before
+    # concatenation; both cat_join_multi and cat_core reject non-string
+    # elements, but cat_core (np.sum) may silently return numeric results
+    # for same-type non-string columns with sep=''. Pre-check ensures
+    # cross-platform consistency: both platforms raise TypeError for
+    # non-string content.
+    for column in list_of_columns:
+        dtype = lib.infer_dtype(column, skipna=True)
+        if dtype not in ["string", "empty"]:
+            raise TypeError(
+                "Concatenation requires list-likes containing only "
+                "strings (or missing values). Offending values found in "
+                f"column {dtype}"
+            ) from None
+
     try:
         if _IS_ARM:
             result = lib.cat_join_multi(list_of_columns, sep)
         else:
             result = cat_core(list_of_columns, sep)
     except TypeError:
-        # On ARM, cat_join_multi raises TypeError for non-string elements
-        # where cat_core (np.sum) may silently proceed (e.g. same-type
-        # non-string columns with sep=''); fall back to cat_core to preserve
-        # cross-platform behavior consistency.
-        if _IS_ARM:
-            try:
-                result = cat_core(list_of_columns, sep)
-                return result
-            except TypeError:
-                pass
-        # if there are any non-string values (wrong dtype or hidden behind
-        # object dtype), the concatenation will fail; catch and return
-        # with better message
-        for column in list_of_columns:
-            dtype = lib.infer_dtype(column, skipna=True)
-            if dtype not in ["string", "empty"]:
-                raise TypeError(
-                    "Concatenation requires list-likes containing only "
-                    "strings (or missing values). Offending values found in "
-                    f"column {dtype}"
-                ) from None
+        raise TypeError(
+            "Concatenation requires list-likes containing only "
+            "strings (or missing values)"
+        ) from None
     return result
 
 
