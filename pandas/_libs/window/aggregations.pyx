@@ -35,7 +35,6 @@ cdef extern from "pandas/skiplist.h":
         double value
         int is_nil
         int levels
-        int ref_count
 
     ctypedef struct skiplist_t:
         node_t *head
@@ -43,6 +42,7 @@ cdef extern from "pandas/skiplist.h":
         int *tmp_steps
         int size
         int maxlevels
+        unsigned int prng_state
 
     skiplist_t* skiplist_init(int) nogil
     void skiplist_destroy(skiplist_t*) nogil
