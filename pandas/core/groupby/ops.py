@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import collections
 import functools
-from pandas.compat import is_platform_arm
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -19,6 +18,8 @@ from typing import (
 )
 
 import numpy as np
+
+from pandas.compat import is_platform_arm
 
 _IS_ARM = is_platform_arm()
 
@@ -470,9 +471,12 @@ class WrappedCythonOp:
                         clean = np.where(nan_mask, 0.0, arr)
                         group_sum = np.add.reduceat(clean, group_starts, axis=rows_axis)
                         non_nan = (~nan_mask).astype(np.float64)
-                        group_count = np.add.reduceat(non_nan, group_starts, axis=rows_axis)
+                        group_count = np.add.reduceat(
+                            non_nan, group_starts, axis=rows_axis
+                        )
                         result = np.divide(
-                            group_sum, group_count,
+                            group_sum,
+                            group_count,
                             out=np.full_like(group_sum, np.nan),
                             where=group_count > 0,
                         )
@@ -481,7 +485,9 @@ class WrappedCythonOp:
                         if rows_axis == 1:
                             result = group_sum / group_sizes
                         else:
-                            result = group_sum / group_sizes[:, np.newaxis].astype(np.float64)
+                            result = group_sum / group_sizes[:, np.newaxis].astype(
+                                np.float64
+                            )
                     if values.ndim == 2:
                         return result if rows_axis == 1 else result.T
                     else:
@@ -1049,6 +1055,17 @@ class BaseGrouper:
         assert kind in ["transform", "aggregate"]
 
         cy_op = WrappedCythonOp(kind=kind, how=how, has_dropped_na=self.has_dropped_na)
+        if (
+            _IS_ARM
+            and kind == "aggregate"
+            and how == "sum"
+            and isinstance(self, BinGrouper)
+            and isinstance(values, np.ndarray)
+        ):
+            # BinGrouper bins partition the ordered comp_ids passed below.
+            # Ensure C-contiguous for the typed memoryview in group_sum.
+            kwargs["_group_boundaries"] = np.ascontiguousarray(self.bins)
+            kwargs["_group_boundaries_are_trusted"] = True
 
         return cy_op.cython_operation(
             values=values,
