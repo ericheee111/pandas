@@ -16,9 +16,12 @@ Python recipe (https://rhettinger.wordpress.com/2010/02/06/lost-knowledge/)
 #pragma once
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "pandas/portable.h"
 
 static inline float __skiplist_nanf(void) {
   const union {
@@ -39,7 +42,6 @@ struct node_t {
   double value;
   int is_nil;
   int levels;
-  int ref_count;
 };
 
 typedef struct {
@@ -48,54 +50,39 @@ typedef struct {
   int *tmp_steps;
   int size;
   int maxlevels;
+  uint32_t prng_state;
 } skiplist_t;
 
-static inline double urand(void) {
-  return ((double)rand() + 1) / ((double)RAND_MAX + 2);
+static inline uint32_t xorshift32(uint32_t *state) {
+  uint32_t x = *state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  *state = x;
+  return x;
 }
 
 static inline int int_min(int a, int b) { return a < b ? a : b; }
 
 static inline node_t *node_init(double value, int levels) {
-  node_t *result;
-  result = (node_t *)malloc(sizeof(node_t));
+  size_t next_size = (size_t)levels * sizeof(node_t *);
+  size_t width_size = (size_t)levels * sizeof(int);
+  node_t *result = (node_t *)malloc(sizeof(node_t) + next_size + width_size);
   if (result) {
     result->value = value;
     result->levels = levels;
     result->is_nil = 0;
-    result->ref_count = 0;
-    result->next = (node_t **)malloc(levels * sizeof(node_t *));
-    result->width = (int *)malloc(levels * sizeof(int));
-    if (!(result->next && result->width) && (levels != 0)) {
-      free(result->next);
-      free(result->width);
-      free(result);
-      return NULL;
-    }
+    result->next = (node_t **)((char *)result + sizeof(node_t));
+    result->width = (int *)((char *)result + sizeof(node_t) + next_size);
   }
   return result;
 }
 
-// do this ourselves
-static inline void node_incref(node_t *node) { ++(node->ref_count); }
-
-static inline void node_decref(node_t *node) { --(node->ref_count); }
-
 static void node_destroy(node_t *node) {
-  int i;
-  if (node) {
-    if (node->ref_count <= 1) {
-      for (i = 0; i < node->levels; ++i) {
-        node_destroy(node->next[i]);
-      }
-      free(node->next);
-      free(node->width);
-      // printf("Reference count was 1, freeing\n");
-      free(node);
-    } else {
-      node_decref(node);
-    }
-    // pretty sure that freeing the struct above will be enough
+  while (node) {
+    node_t *next = node->is_nil ? NULL : node->next[0];
+    free(node);
+    node = next;
   }
 }
 
@@ -122,24 +109,28 @@ static inline skiplist_t *skiplist_init(int expected_size) {
   result->tmp_steps = (int *)malloc(maxlevels * sizeof(int));
   result->maxlevels = maxlevels;
   result->size = 0;
+  result->prng_state = ((uint32_t)(uintptr_t)result) ^ 0x9E3779B9u;
+  if (result->prng_state == 0) {
+    result->prng_state = 1;
+  }
 
   head = result->head = node_init(PANDAS_NAN, maxlevels);
   NIL = node_init(0.0, 0);
 
   if (!(result->tmp_chain && result->tmp_steps && result->head && NIL)) {
-    skiplist_destroy(result);
-    node_destroy(NIL);
+    free(result->head);
+    free(NIL);
+    free(result->tmp_chain);
+    free(result->tmp_steps);
+    free(result);
     return NULL;
   }
-
-  node_incref(head);
 
   NIL->is_nil = 1;
 
   for (i = 0; i < maxlevels; ++i) {
     head->next[i] = NIL;
     head->width[i] = 1;
-    node_incref(NIL);
   }
 
   return result;
@@ -147,13 +138,9 @@ static inline skiplist_t *skiplist_init(int expected_size) {
 
 // 1 if left < right, 0 if left == right, -1 if left > right
 static inline int _node_cmp(node_t *node, double value) {
-  if (node->is_nil || node->value > value) {
-    return -1;
-  } else if (node->value < value) {
-    return 1;
-  } else {
-    return 0;
-  }
+  int gt = node->is_nil | (node->value > value);
+  int lt = (!node->is_nil) & (node->value < value);
+  return -gt | lt;
 }
 
 static inline double skiplist_get(skiplist_t *skp, int i, int *ret) {
@@ -222,7 +209,7 @@ static inline int skiplist_insert(skiplist_t *skp, double value) {
     chain[level] = node;
   }
 
-  size = int_min(skp->maxlevels, 1 - ((int)Log2(urand())));
+  size = int_min(skp->maxlevels, pandas_ctz(xorshift32(&skp->prng_state)) + 1);
 
   newnode = node_init(value, size);
   if (!newnode) {
@@ -235,7 +222,6 @@ static inline int skiplist_insert(skiplist_t *skp, double value) {
     newnode->next[level] = prevnode->next[level];
 
     prevnode->next[level] = newnode;
-    node_incref(newnode); // increment the reference count
 
     newnode->width[level] = prevnode->width[level] - steps;
     prevnode->width[level] = steps + 1;
@@ -254,7 +240,7 @@ static inline int skiplist_insert(skiplist_t *skp, double value) {
 
 static inline int skiplist_remove(skiplist_t *skp, double value) {
   int level, size;
-  node_t *node, *prevnode, *tmpnode, *next_at_level;
+  node_t *node, *tmpnode, *next_at_level;
   node_t **chain;
 
   chain = skp->tmp_chain;
@@ -269,23 +255,20 @@ static inline int skiplist_remove(skiplist_t *skp, double value) {
     chain[level] = node;
   }
 
-  if (value != chain[0]->next[0]->value) {
+  tmpnode = chain[0]->next[0];
+
+  if (tmpnode->is_nil || value != tmpnode->value) {
     return 0;
   }
 
-  size = chain[0]->next[0]->levels;
+  size = tmpnode->levels;
 
   for (level = 0; level < size; ++level) {
-    prevnode = chain[level];
-
-    tmpnode = prevnode->next[level];
-
-    prevnode->width[level] += tmpnode->width[level] - 1;
-    prevnode->next[level] = tmpnode->next[level];
-
-    tmpnode->next[level] = NULL;
-    node_destroy(tmpnode); // decrement refcount or free
+    chain[level]->width[level] += tmpnode->width[level] - 1;
+    chain[level]->next[level] = tmpnode->next[level];
   }
+
+  free(tmpnode);
 
   for (level = size; level < skp->maxlevels; ++level) {
     --(chain[level]->width[level]);
