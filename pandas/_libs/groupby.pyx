@@ -402,6 +402,58 @@ def group_cumsum(
 
     na_val = _get_na_val(<int64float_t>0, is_datetimelike)
 
+    if pandas_is_aarch64() and skipna and not is_datetimelike:
+        if not uses_mask:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    for j in range(K):
+                        val = values[i, j]
+
+                        if int64float_t == float32_t or int64float_t == float64_t:
+                            if val == val:
+                                y = val - compensation[lab, j]
+                                t = accum[lab, j] + y
+                                compensation[lab, j] = t - accum[lab, j] - y
+                                accum[lab, j] = t
+                                out[i, j] = t
+                            else:
+                                out[i, j] = na_val
+                        else:
+                            t = val + accum[lab, j]
+                            accum[lab, j] = t
+                            out[i, j] = t
+            return
+
+        if K == 1:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        result_mask[i, 0] = True
+                        out[i, 0] = 0
+                        continue
+
+                    if mask[i, 0]:
+                        result_mask[i, 0] = True
+                        out[i, 0] = 0
+                        continue
+
+                    val = values[i, 0]
+                    if int64float_t == float32_t or int64float_t == float64_t:
+                        y = val - compensation[lab, 0]
+                        t = accum[lab, 0] + y
+                        compensation[lab, 0] = t - accum[lab, 0] - y
+                    else:
+                        t = val + accum[lab, 0]
+
+                    accum[lab, 0] = t
+                    out[i, 0] = t
+            return
+
     with nogil:
         for i in range(N):
             lab = labels[i]
@@ -2235,6 +2287,61 @@ cdef group_cummin_max(
         seen_na = np.zeros((<object>accum).shape, dtype=np.uint8)
 
     N, K = (<object>values).shape
+    if pandas_is_aarch64() and skipna and not is_datetimelike:
+        if not uses_mask:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    for j in range(K):
+                        val = values[i, j]
+                        if numeric_t is float64_t or numeric_t is float32_t:
+                            if val == val:
+                                mval = accum[lab, j]
+                                if compute_max:
+                                    if val > mval:
+                                        accum[lab, j] = mval = val
+                                else:
+                                    if val < mval:
+                                        accum[lab, j] = mval = val
+                                out[i, j] = mval
+                            else:
+                                out[i, j] = na_val
+                        else:
+                            mval = accum[lab, j]
+                            if compute_max:
+                                if val > mval:
+                                    accum[lab, j] = mval = val
+                            else:
+                                if val < mval:
+                                    accum[lab, j] = mval = val
+                            out[i, j] = mval
+            return
+
+        if K == 1:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    val = values[i, 0]
+                    if mask[i, 0]:
+                        out[i, 0] = val
+                        continue
+
+                    mval = accum[lab, 0]
+                    if compute_max:
+                        if val > mval:
+                            accum[lab, 0] = mval = val
+                    else:
+                        if val < mval:
+                            accum[lab, 0] = mval = val
+                    out[i, 0] = mval
+            return
+
     with nogil:
         for i in range(N):
             lab = labels[i]
