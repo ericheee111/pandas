@@ -4776,8 +4776,19 @@ def cat_safe(list_of_columns: list[npt.NDArray[np.object_]], sep: str):
         else:
             result = cat_core(list_of_columns, sep)
     except TypeError:
+        # On ARM, cat_join_multi raises TypeError for non-string elements
+        # where cat_core (np.sum) may silently proceed (e.g. same-type
+        # non-string columns with sep=''); fall back to cat_core to preserve
+        # cross-platform behavior consistency.
+        if _IS_ARM:
+            try:
+                result = cat_core(list_of_columns, sep)
+                return result
+            except TypeError:
+                pass
         # if there are any non-string values (wrong dtype or hidden behind
-        # object dtype), cat_join_multi will fail; catch and return with better message
+        # object dtype), the concatenation will fail; catch and return
+        # with better message
         for column in list_of_columns:
             dtype = lib.infer_dtype(column, skipna=True)
             if dtype not in ["string", "empty"]:
