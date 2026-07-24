@@ -31,6 +31,20 @@ from numpy cimport (
 
 cnp.import_array()
 
+
+cdef extern from *:
+    """
+    static inline int pandas_is_aarch64(void) {
+    #if defined(__aarch64__)
+        return 1;
+    #else
+        return 0;
+    #endif
+    }
+    """
+    bint pandas_is_aarch64() noexcept nogil
+
+
 from pandas._libs cimport util
 from pandas._libs.algos cimport (
     get_rank_nan_fill_val,
