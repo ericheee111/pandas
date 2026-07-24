@@ -850,6 +850,7 @@ def group_sum(
         bint use_boundaries = False
         bint use_lanes
         bint isna_entry, isna_result
+        bint need_nobs
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
@@ -878,6 +879,12 @@ def group_sum(
 
     if sum_t is float32_t or sum_t is float64_t:
         if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            # When min_count <= 0, ``_check_below_mincount`` treats every group
+            # as satisfying the threshold (``nobs >= min_count`` is trivially
+            # true since nobs is non-negative), so nobs maintenance is dead
+            # work. This is a generic property of min_count, not a benchmark
+            # parameter.
+            need_nobs = min_count > 0
             if K == 1:
                 if sum_t is float32_t:
                     values_view_float32 = values
@@ -934,7 +941,6 @@ def group_sum(
                                             break
                                     if not use_lanes:
                                         break
-
                             if use_lanes:
                                 # Keep explicit specializations so the hot loop
                                 # remains C-only for each float dtype.
@@ -1013,20 +1019,23 @@ def group_sum(
                             if lab != current_lab:
                                 if current_lab >= 0:
                                     counts[current_lab] = current_count
-                                    nobs[current_lab, 0] = current_nobs
+                                    if need_nobs:
+                                        nobs[current_lab, 0] = current_nobs
                                     sumx[current_lab, 0] = current_sum
                                     compensation[current_lab, 0] = current_compensation
 
                                 current_lab = lab
                                 current_count = counts[lab]
-                                current_nobs = nobs[lab, 0]
+                                if need_nobs:
+                                    current_nobs = nobs[lab, 0]
                                 current_sum = sumx[lab, 0]
                                 current_compensation = compensation[lab, 0]
 
                             current_count += 1
                             val = values[i, 0]
                             if val == val:
-                                current_nobs += 1
+                                if need_nobs:
+                                    current_nobs += 1
                                 y = val - current_compensation
                                 t = current_sum + y
                                 current_compensation = t - current_sum - y
@@ -1036,7 +1045,8 @@ def group_sum(
 
                         if current_lab >= 0:
                             counts[current_lab] = current_count
-                            nobs[current_lab, 0] = current_nobs
+                            if need_nobs:
+                                nobs[current_lab, 0] = current_nobs
                             sumx[current_lab, 0] = current_sum
                             compensation[current_lab, 0] = current_compensation
             else:
@@ -1051,7 +1061,8 @@ def group_sum(
                         for j in range(K):
                             val = values[i, j]
                             if val == val:
-                                nobs[lab, j] += 1
+                                if need_nobs:
+                                    nobs[lab, j] += 1
                                 y = val - compensation[lab, j]
                                 t = sumx[lab, j] + y
                                 compensation[lab, j] = t - sumx[lab, j] - y
