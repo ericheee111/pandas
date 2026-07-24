@@ -957,7 +957,6 @@ def group_prod(
         int64_t[:, ::1] nobs
         Py_ssize_t len_values = len(values), len_labels = len(labels)
         bint isna_entry, isna_result, uses_mask = mask is not None
-        bint need_nobs
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
@@ -967,12 +966,6 @@ def group_prod(
 
     N, K = (<object>values).shape
     nan_val = _get_na_val(<int64float_t>0, False)
-
-    # When min_count <= 0, nobs is never read meaningfully by
-    # ``_check_below_mincount`` (nobs >= min_count is trivially true), so the
-    # per-element increment is dead work.  Guard it with a loop-invariant
-    # flag; nobs stays zero-filled and the post-loop check is unchanged.
-    need_nobs = min_count > 0
 
     with nogil:
         for i in range(N):
@@ -1000,8 +993,7 @@ def group_prod(
                         continue
 
                 if not isna_entry:
-                    if need_nobs:
-                        nobs[lab, j] += 1
+                    nobs[lab, j] += 1
                     prodx[lab, j] *= val
                 elif not skipna:
                     if uses_mask:
