@@ -2135,7 +2135,7 @@ class TestMinMax:
             r.max()
 
 
-@pytest.mark.parametrize("method", ["mean", "std"])
+@pytest.mark.parametrize("method", ["mean", "std", "sum", "max", "min", "count"])
 def test_fixed_window_series_subclass_result(method):
     ser = tm.SubclassedSeries(
         [1.0, 2.0, 3.0, 4.0],
@@ -2152,12 +2152,77 @@ def test_fixed_window_series_subclass_result(method):
     tm.assert_numpy_array_equal(result.to_numpy(), expected.to_numpy())
 
 
-@pytest.mark.parametrize("method", ["mean", "std"])
+@pytest.mark.parametrize("method", ["mean", "std", "sum", "max", "min", "count"])
 @pytest.mark.parametrize("nonfinite", [np.nan, np.inf, -np.inf])
 def test_fixed_window_nonfinite_matches_standard_path(method, nonfinite):
     ser = Series([1.0, nonfinite, 3.0, 4.0], name="values")
 
     result = getattr(ser.rolling(2, min_periods=1), method)()
     expected = getattr(ser.rolling(2, min_periods=1, closed="right"), method)()
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["sum", "max", "min", "mean", "std", "count"])
+@pytest.mark.parametrize("dtype", ["int", "float"])
+@pytest.mark.parametrize("window", [1, 3, 10])
+def test_rolling_fast_path_matches_standard(method, dtype, window):
+    rng = np.random.RandomState(42)
+    arr = (100 * rng.random(50)).astype(dtype)
+    ser = Series(arr)
+
+    result = getattr(ser.rolling(window, min_periods=1), method)()
+    expected = getattr(ser.rolling(window, min_periods=1, closed="right"), method)()
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["sum", "max", "min", "count"])
+@pytest.mark.parametrize("dtype", ["int", "float"])
+def test_rolling_fast_path_with_nan(method, dtype):
+    rng = np.random.RandomState(42)
+    arr = (100 * rng.random(20)).astype(dtype)
+    if dtype == "int":
+        ser = Series(arr)
+    else:
+        arr = arr.astype(float)
+        arr[5] = np.nan
+        ser = Series(arr)
+
+    result = getattr(ser.rolling(3, min_periods=1), method)()
+    expected = getattr(ser.rolling(3, min_periods=1, closed="right"), method)()
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["sum", "max", "min", "mean", "std", "count"])
+@pytest.mark.parametrize("dtype", ["int", "float"])
+def test_expanding_fast_path_correctness(method, dtype):
+    rng = np.random.RandomState(42)
+    arr = (100 * rng.random(20)).astype(dtype)
+    ser = Series(arr)
+
+    result = getattr(ser.expanding(min_periods=1), method)()
+
+    n = len(ser)
+    if method == "sum":
+        expected = ser.cumsum().astype(float)
+    elif method == "max":
+        expected = ser.cummax().astype(float)
+    elif method == "min":
+        expected = ser.cummin().astype(float)
+    elif method == "count":
+        expected = Series(np.arange(1, n + 1), dtype=float, index=ser.index)
+    elif method == "mean":
+        expected = ser.cumsum().astype(float) / np.arange(1, n + 1)
+    elif method == "std":
+        values = ser.astype(float).to_numpy()
+        expected_vals = np.empty(n)
+        for i in range(n):
+            if i < 0:
+                expected_vals[i] = np.nan
+            else:
+                expected_vals[i] = np.std(values[: i + 1], ddof=1)
+        expected = Series(expected_vals, index=ser.index)
 
     tm.assert_series_equal(result, expected)
