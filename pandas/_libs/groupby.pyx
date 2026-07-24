@@ -736,6 +736,7 @@ def group_sum(
         Py_ssize_t len_values = len(values), len_labels = len(labels)
         bint uses_mask = mask is not None
         bint isna_entry, isna_result
+        bint need_nobs
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
@@ -764,6 +765,14 @@ def group_sum(
 
     if sum_t is float32_t or sum_t is float64_t:
         if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            # When min_count <= 0, ``_check_below_mincount`` treats every group
+            # as satisfying the threshold (``nobs >= min_count`` is trivially
+            # true since nobs is non-negative), so the per-element nobs
+            # increment is dead work.  Skip it in the hot loop; nobs stays
+            # zero-filled and the post-loop check still copies sumx into out
+            # unchanged.  This is a generic property of min_count, not a
+            # benchmark parameter.
+            need_nobs = min_count > 0
             with nogil:
                 for i in range(N):
                     lab = labels[i]
@@ -775,7 +784,8 @@ def group_sum(
                     for j in range(K):
                         val = values[i, j]
                         if val == val:
-                            nobs[lab, j] += 1
+                            if need_nobs:
+                                nobs[lab, j] += 1
                             y = val - compensation[lab, j]
                             t = sumx[lab, j] + y
                             compensation[lab, j] = t - sumx[lab, j] - y
