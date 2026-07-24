@@ -1833,6 +1833,84 @@ cdef inline void _check_below_mincount(
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
+cdef bint _group_last_float_reverse_scan(
+    floating[:, ::1] out,
+    int64_t[::1] counts,
+    const floating[:, :] values,
+    const intp_t[::1] labels,
+    uint8_t[:, ::1] result_mask,
+    Py_ssize_t ncounts,
+    Py_ssize_t min_count,
+) noexcept:
+    """
+    AArch64 K==1 reverse-scan specialization for skipna ``last`` on a single
+    native float column without a mask.
+
+    The generic loop writes the running value for every non-NaN row of every
+    group (O(N) writes).  Scanning labels in reverse and marking each group
+    "seen" on its first valid value writes each group's result exactly once
+    (O(ngroups) writes) while preserving the libgroupby ``counts`` contract
+    (``counts[lab]`` is the full group size, including NaN rows).
+
+    Returns True if the specialization handled the call; False otherwise (the
+    caller falls back to the generic implementation).  Eligibility uses only
+    dtype, column count, mask/skipna/min_count semantics, and contiguity --
+    never benchmark parameters.
+    """
+    cdef:
+        Py_ssize_t i, N, K, lab
+        floating val
+        uint8_t[::1] seen
+        floating[:, ::1] last_resx
+        int64_t[:, ::1] last_nobs
+
+    if not pandas_is_aarch64():
+        return False
+
+    N, K = (<object>values).shape
+    if K != 1:
+        return False
+
+    seen = np.zeros(ncounts, dtype=np.uint8)
+    last_resx = np.empty_like(out)
+    last_nobs = np.zeros((<object>out).shape, dtype=np.int64)
+
+    with nogil:
+        for i in range(N - 1, -1, -1):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            # Update counts for every non-negative label so the existing
+            # libgroupby counts contract is preserved.
+            counts[lab] += 1
+
+            if seen[lab]:
+                continue
+
+            val = values[i, 0]
+            if val == val:
+                # First valid value encountered in reverse order is the last
+                # valid value in forward order.
+                last_resx[lab, 0] = val
+                last_nobs[lab, 0] = 1
+                seen[lab] = 1
+
+    _check_below_mincount(
+        out,
+        False,  # uses_mask
+        result_mask,
+        ncounts,
+        K,
+        last_nobs,
+        min_count,
+        last_resx,
+    )
+    return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
 def group_last(
     numeric_object_t[:, ::1] out,
     int64_t[::1] counts,
@@ -1859,6 +1937,18 @@ def group_last(
         raise AssertionError("len(index) != len(labels)")
 
     min_count = max(min_count, 1)
+
+    if (
+        numeric_object_t is float32_t or numeric_object_t is float64_t
+    ) and not uses_mask and skipna and not is_datetimelike and min_count <= 1:
+        # AArch64 K==1 reverse-scan specialization for skipna last on a single
+        # native float column without a mask.  Delegated to a separate cdef
+        # function so the generic loop's compiled layout is undisturbed.
+        if _group_last_float_reverse_scan(
+            out, counts, values, labels, result_mask, ncounts, min_count
+        ):
+            return
+
     nobs = np.zeros((<object>out).shape, dtype=np.int64)
     if numeric_object_t is object:
         resx = np.empty((<object>out).shape, dtype=object)
