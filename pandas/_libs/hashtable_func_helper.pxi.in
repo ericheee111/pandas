@@ -465,15 +465,17 @@ cpdef factorize_int64_dense_range(const int64_t[::1] values):
         return None
 
     # --- Allocation (GIL held) ------------------------------------------
+    # ``code_map`` is allocated lazily only when the span contains gaps; a
+    # complete span (every offset present) needs no remap because the
+    # tentative offset codes are already final.  This is a generic property
+    # of the value distribution, not a benchmark parameter.
     span_sz = <Py_ssize_t>span + 1
     bitmap = np.zeros((span_sz + 7) // 8, dtype=np.uint8)
     codes = np.empty(n, dtype=np.intp)
     uniques = np.empty(span_sz, dtype=np.int64)
-    code_map = np.empty(span_sz, dtype=np.intp)
     bm = bitmap
     cd = codes
     un = uniques
-    cm = code_map
 
     # --- Pass 2: mark bitmap + write tentative codes (nogil) ------------
     with nogil:
@@ -483,17 +485,39 @@ cpdef factorize_int64_dense_range(const int64_t[::1] values):
             cd[i] = <intp_t>uoff             # tentative code == offset
             bm[uoff >> 3] |= <uint8_t>(1 << (uoff & 7))
 
-    # --- Pass 3: bitmap scan → code_map + sorted uniques (nogil) --------
+    # --- Pass 3: bitmap scan → sorted uniques + gap detection (nogil) ---
+    # Builds the sorted uniques array and detects whether any offset in the
+    # span is absent.  When the span is complete (``count == span_sz``), the
+    # tentative offset codes are already final, so we skip ``code_map``
+    # allocation and the remap pass entirely.
+    cdef bint has_gap = False
+    with nogil:
+        for offset in range(span_sz):
+            if bm[offset >> 3] & (<uint8_t>1 << (offset & 7)):
+                un[count] = <int64_t>(umin + <uint64_t>offset)
+                count += 1
+            else:
+                has_gap = True
+
+    if not has_gap:
+        # Complete span: codes are already final (offset == final code),
+        # and ``uniques`` holds the full sorted span.  No remap needed.
+        return codes, uniques[:count].copy()
+
+    # --- Gap path: build code_map + remap tentative codes ---------------
+    # Sparse span: allocate the offset→code map, rescan the bitmap to fill
+    # it, then remap the tentative offset codes to compact codes.
+    code_map = np.empty(span_sz, dtype=np.intp)
+    cm = code_map
+    count = 0
     with nogil:
         for offset in range(span_sz):
             if bm[offset >> 3] & (<uint8_t>1 << (offset & 7)):
                 cm[offset] = count
-                un[count] = <int64_t>(umin + <uint64_t>offset)
                 count += 1
             else:
                 cm[offset] = -1              # gap: value absent
 
-    # --- Pass 4: remap tentative codes (nogil) --------------------------
     with nogil:
         for i in range(n):
             cd[i] = cm[cd[i]]
