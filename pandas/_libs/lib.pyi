@@ -214,6 +214,11 @@ def count_level_2d_no_na(
     max_bin: int,
     n: int,
 ) -> np.ndarray | None: ...  # np.ndarray[np.int64, ndim=2]
+def count_level_2d_float64_skipna(
+    values: np.ndarray,  # const float64_t[:]
+    labels: np.ndarray,  # const intp_t[:]
+    max_bin: int,
+) -> np.ndarray | None: ...  # np.ndarray[np.int64, ndim=2]
 def get_level_sorter(
     codes: np.ndarray,  # const int64_t[:]
     starts: np.ndarray,  # const intp_t[:]

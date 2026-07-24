@@ -2178,6 +2178,25 @@ class GroupBy(BaseGroupBy[NDFrameT]):
                         return counted[0]
                     return counted
 
+            # Fused single-column float64 count: skip NaN directly while
+            # accumulating per-group counts, avoiding the input-sized
+            # temporary ``mask & ~isna(bvalues)`` boolean array.  Only
+            # applies to a 1-D contiguous native float64 ndarray; other
+            # layouts fall through to the generic path below.
+            if (
+                _USE_NO_NA_COUNT_FASTPATH
+                and isinstance(bvalues, np.ndarray)
+                and bvalues.ndim == 1
+                and bvalues.dtype == np.dtype(np.float64)
+                and bvalues.dtype.isnative
+                and bvalues.flags.c_contiguous
+            ):
+                counted = lib.count_level_2d_float64_skipna(
+                    bvalues, labels=ids, max_bin=ngroups
+                )
+                if counted is not None:
+                    return counted[0]
+
             # TODO(EA2D): reshape would not be necessary with 2D EAs
             if bvalues.ndim == 1:
                 # EA
