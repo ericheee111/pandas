@@ -128,3 +128,99 @@ def test_roll_all_finite(values, expected):
     result = window_aggregations.roll_all_finite(np.array(values, dtype=np.float64))
 
     assert result is expected
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.int64])
+@pytest.mark.parametrize("minp", [0, 1, 3])
+@pytest.mark.parametrize("window", [1, 3, 10])
+@pytest.mark.parametrize("method,kernel", [
+    ("sum", "roll_sum_fixed_no_nan"),
+    ("sum", "roll_sum_fixed_no_nan_int64"),
+    ("max", "roll_max_fixed_no_nan"),
+    ("max", "roll_max_fixed_no_nan_int64"),
+    ("min", "roll_min_fixed_no_nan"),
+    ("min", "roll_min_fixed_no_nan_int64"),
+    ("mean", "roll_mean_fixed_no_nan"),
+    ("mean", "roll_mean_fixed_no_nan_int64"),
+])
+def test_fixed_no_nan_matches_general(dtype, minp, window, method, kernel):
+    if dtype == np.int64 and not kernel.endswith("_int64"):
+        pytest.skip("dtype/kernel mismatch")
+    if dtype == np.float64 and kernel.endswith("_int64"):
+        pytest.skip("dtype/kernel mismatch")
+
+    rng = np.random.RandomState(42)
+    values = rng.randint(0, 100, 50).astype(dtype)
+    N = len(values)
+    start = np.maximum(0, np.arange(N) + 1 - window).astype(np.int64)
+    end = (np.arange(N) + 1).astype(np.int64)
+
+    f64_values = values.astype(np.float64)
+    if method == "sum":
+        expected = window_aggregations.roll_sum(f64_values, start, end, minp)
+    elif method == "max":
+        expected = window_aggregations.roll_max(f64_values, start, end, minp)
+    elif method == "min":
+        expected = window_aggregations.roll_min(f64_values, start, end, minp)
+    elif method == "mean":
+        expected = window_aggregations.roll_mean(f64_values, start, end, minp)
+
+    fn = getattr(window_aggregations, kernel)
+    result = fn(values, window, minp)
+
+    if method in ("mean",):
+        np.testing.assert_allclose(result, expected, rtol=1e-10, equal_nan=True)
+    else:
+        tm.assert_numpy_array_equal(result, expected)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.int64])
+@pytest.mark.parametrize("minp", [0, 1, 3])
+@pytest.mark.parametrize("method,kernel", [
+    ("sum", "roll_sum_expanding_no_nan"),
+    ("sum", "roll_sum_expanding_no_nan_int64"),
+    ("max", "roll_max_expanding_no_nan"),
+    ("max", "roll_max_expanding_no_nan_int64"),
+    ("min", "roll_min_expanding_no_nan"),
+    ("min", "roll_min_expanding_no_nan_int64"),
+    ("mean", "roll_mean_expanding_no_nan"),
+    ("mean", "roll_mean_expanding_no_nan_int64"),
+    ("std", "roll_std_expanding_no_nan"),
+    ("std", "roll_std_expanding_no_nan_int64"),
+])
+def test_expanding_no_nan_matches_general(dtype, minp, method, kernel):
+    if dtype == np.int64 and not kernel.endswith("_int64"):
+        pytest.skip("dtype/kernel mismatch")
+    if dtype == np.float64 and kernel.endswith("_int64"):
+        pytest.skip("dtype/kernel mismatch")
+
+    rng = np.random.RandomState(42)
+    values = rng.randint(0, 100, 50).astype(dtype)
+    N = len(values)
+    start = np.zeros(N, dtype=np.int64)
+    end = np.arange(1, N + 1, dtype=np.int64)
+
+    f64_values = values.astype(np.float64)
+    if method == "sum":
+        expected = window_aggregations.roll_sum(f64_values, start, end, minp)
+    elif method == "max":
+        expected = window_aggregations.roll_max(f64_values, start, end, minp)
+    elif method == "min":
+        expected = window_aggregations.roll_min(f64_values, start, end, minp)
+    elif method == "mean":
+        expected = window_aggregations.roll_mean(f64_values, start, end, minp)
+    elif method == "std":
+        expected = np.sqrt(
+            window_aggregations.roll_var(f64_values, start, end, minp, ddof=1)
+        )
+
+    fn = getattr(window_aggregations, kernel)
+    if method == "std":
+        result = fn(values, minp, 1)
+    else:
+        result = fn(values, minp)
+
+    if method in ("mean", "std"):
+        np.testing.assert_allclose(result, expected, rtol=1e-10, equal_nan=True)
+    else:
+        tm.assert_numpy_array_equal(result, expected)
