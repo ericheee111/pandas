@@ -1214,6 +1214,130 @@ def group_sum(
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
+cdef bint _group_prod_float64_1d_min_count_le0(
+    float64_t[:, ::1] out,
+    int64_t[::1] counts,
+    const float64_t[:, :] values,
+    const intp_t[::1] labels,
+    uint8_t[:, ::1] result_mask,
+    Py_ssize_t ncounts,
+    Py_ssize_t min_count,
+) noexcept:
+    """
+    AArch64 K==1 specialization for skipna ``prod`` on a single native float64
+    column without a mask when ``min_count <= 0``.
+
+    When ``min_count <= 0``, ``_check_below_mincount`` treats every group as
+    satisfying the threshold (``nobs >= min_count`` is trivially true since
+    nobs is non-negative), so the per-element nobs increment is dead work.
+    This helper uses a fully separate specialized loop that skips nobs entirely
+    (no ``need_nobs`` branch inside the N-row loop, unlike the rejected
+    group_prod experiment in f1f0b985df).  The accepted generic loop remains
+    unchanged.  NaN is skipped via ``val == val``; ``prodx`` is initialized to
+    the multiplicative identity.  Returns True if handled; the caller falls
+    back otherwise.  Eligibility uses only dtype, column count, mask/skipna/
+    min_count semantics, and contiguity -- never benchmark parameters.
+    """
+    cdef:
+        Py_ssize_t i, N, K, lab
+        float64_t val
+        float64_t[:, ::1] prodx
+        int64_t[:, ::1] nobs
+
+    if not pandas_is_aarch64():
+        return False
+
+    N, K = (<object>values).shape
+    if K != 1:
+        return False
+
+    prodx = np.ones((<object>out).shape, dtype=np.float64)
+    # nobs stays zero-filled; min_count <= 0 means _check_below_mincount
+    # treats every group as satisfying the threshold, so nobs is never read
+    # for a gating decision.
+    nobs = np.zeros((<object>out).shape, dtype=np.int64)
+
+    with nogil:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            counts[lab] += 1
+
+            val = values[i, 0]
+            if val == val:
+                # Non-NaN: accumulate into the running product.
+                prodx[lab, 0] *= val
+
+    _check_below_mincount(
+        out,
+        False,  # uses_mask
+        result_mask,
+        ncounts,
+        K,
+        nobs,
+        min_count,
+        prodx,
+    )
+    return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef bint _group_prod_float32_1d_min_count_le0(
+    float32_t[:, ::1] out,
+    int64_t[::1] counts,
+    const float32_t[:, :] values,
+    const intp_t[::1] labels,
+    uint8_t[:, ::1] result_mask,
+    Py_ssize_t ncounts,
+    Py_ssize_t min_count,
+) noexcept:
+    """float32 variant of ``_group_prod_float64_1d_min_count_le0``."""
+    cdef:
+        Py_ssize_t i, N, K, lab
+        float32_t val
+        float32_t[:, ::1] prodx
+        int64_t[:, ::1] nobs
+
+    if not pandas_is_aarch64():
+        return False
+
+    N, K = (<object>values).shape
+    if K != 1:
+        return False
+
+    prodx = np.ones((<object>out).shape, dtype=np.float32)
+    nobs = np.zeros((<object>out).shape, dtype=np.int64)
+
+    with nogil:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            counts[lab] += 1
+
+            val = values[i, 0]
+            if val == val:
+                prodx[lab, 0] *= val
+
+    _check_below_mincount(
+        out,
+        False,  # uses_mask
+        result_mask,
+        ncounts,
+        K,
+        nobs,
+        min_count,
+        prodx,
+    )
+    return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
 def group_prod(
     int64float_t[:, ::1] out,
     int64_t[::1] counts,
@@ -1237,6 +1361,26 @@ def group_prod(
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
+
+    if (
+        not uses_mask and skipna and min_count <= 0
+    ) and (int64float_t is float64_t or int64float_t is float32_t):
+        # AArch64 K==1 branch-free specialization for skipna prod on a single
+        # native float column without a mask when min_count <= 0.  Delegated to
+        # dedicated cdef helpers (no need_nobs branch inside the N-row loop,
+        # unlike the rejected f1f0b985df experiment) so the generic loop's
+        # compiled layout is undisturbed.  All unsupported cases fall through
+        # to the existing implementation.
+        if int64float_t is float64_t:
+            if _group_prod_float64_1d_min_count_le0(
+                out, counts, values, labels, result_mask, ncounts, min_count
+            ):
+                return
+        elif int64float_t is float32_t:
+            if _group_prod_float32_1d_min_count_le0(
+                out, counts, values, labels, result_mask, ncounts, min_count
+            ):
+                return
 
     nobs = np.zeros((<object>out).shape, dtype=np.int64)
     prodx = np.ones((<object>out).shape, dtype=(<object>out).base.dtype)
