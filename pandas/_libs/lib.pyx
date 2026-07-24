@@ -9,6 +9,7 @@ from typing import (
 )
 
 cimport cython
+from libc.string cimport memcpy
 from cpython.datetime cimport (
     PyDate_Check,
     PyDateTime_Check,
@@ -93,6 +94,14 @@ PandasParser_IMPORT
 
 cdef extern from "pandas/portable.h":
     bint pandas_is_aarch64() noexcept nogil
+
+cdef extern from "Python.h":
+    void* PyUnicode_DATA(object o)
+    Py_ssize_t PyUnicode_GET_LENGTH(object o)
+    bint PyUnicode_IS_COMPACT_ASCII(object o)
+    bint PyUnicode_Check(object o)
+    object PyUnicode_New(Py_ssize_t size, unsigned int maxchar)
+    object PyUnicode_Concat(object left, object right)
 
 from pandas._libs cimport util
 from pandas._libs.util cimport (
@@ -3871,3 +3880,139 @@ def fast_bool_mask_indexer(ndarray data, ndarray mask):
         result = data[mask]
 
     return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def cat_join(object[:] arr, str sep=""):
+    """
+    Join string elements of an object array, skipping PySequence_Fast list
+    creation used by CPython str.join.
+
+    ASCII fast path: if all elements and sep are compact ASCII, uses direct
+    byte memcpy. Falls back to sep.join(list(arr)) for non-ASCII or
+    non-string elements.
+    """
+    cdef:
+        Py_ssize_t n = arr.shape[0]
+        Py_ssize_t sep_len = PyUnicode_GET_LENGTH(sep)
+        Py_ssize_t total_len = 0
+        Py_ssize_t i, offset = 0, item_len
+        object item
+        bint all_ascii = 1
+        object result
+        char* result_data
+        char* item_data
+        char* sep_data
+
+    if n == 0:
+        return ""
+
+    if not PyUnicode_IS_COMPACT_ASCII(sep):
+        all_ascii = 0
+
+    for i in range(n):
+        item = arr[i]
+        if not PyUnicode_Check(item):
+            return sep.join(list(arr))
+        if all_ascii and not PyUnicode_IS_COMPACT_ASCII(item):
+            all_ascii = 0
+        total_len += PyUnicode_GET_LENGTH(item)
+
+    if sep_len > 0 and n > 1:
+        total_len += sep_len * (n - 1)
+
+    if all_ascii:
+        result = PyUnicode_New(total_len, 127)
+        result_data = <char*>PyUnicode_DATA(result)
+        sep_data = <char*>PyUnicode_DATA(sep)
+
+        for i in range(n):
+            item = arr[i]
+            item_len = PyUnicode_GET_LENGTH(item)
+            item_data = <char*>PyUnicode_DATA(item)
+            memcpy(result_data + offset, item_data, item_len)
+            offset += item_len
+
+            if sep_len > 0 and i < n - 1:
+                memcpy(result_data + offset, sep_data, sep_len)
+                offset += sep_len
+
+        return result
+    else:
+        return sep.join(list(arr))
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def cat_join_multi(list list_of_columns, str sep):
+    """
+    Concatenate multiple columns row-wise.
+
+    Replaces cat_core's np.sum(arr, axis=0) for object dtype, which calls
+    Python str.__add__ per element (creating intermediate strings + Python frame
+    overhead). Uses C-level PyUnicode_Concat or ASCII memcpy fast path instead.
+    """
+    cdef:
+        Py_ssize_t ncols = len(list_of_columns)
+        Py_ssize_t n = len(list_of_columns[0])
+        Py_ssize_t sep_len = PyUnicode_GET_LENGTH(sep)
+        Py_ssize_t i, j, total_len, offset, item_len
+        object item, s
+        object[:] result
+        object[:, :] arr
+        bint all_ascii, sep_ascii
+        char* result_data
+        char* item_data
+        char* sep_data
+
+    if n == 0:
+        return np.empty(0, dtype=object)
+
+    result = np.empty(n, dtype=object)
+    arr = np.asarray(list_of_columns, dtype=object)
+
+    sep_ascii = PyUnicode_IS_COMPACT_ASCII(sep)
+    if sep_ascii:
+        sep_data = <char*>PyUnicode_DATA(sep)
+
+    for i in range(n):
+        all_ascii = sep_ascii
+        total_len = 0
+        for j in range(ncols):
+            item = arr[j, i]
+            if not PyUnicode_Check(item):
+                raise TypeError(
+                    f"sequence item {j}: expected str instance, "
+                    f"{type(item).__name__} found"
+                )
+            if all_ascii and not PyUnicode_IS_COMPACT_ASCII(item):
+                all_ascii = 0
+            total_len += PyUnicode_GET_LENGTH(item)
+
+        if sep_len > 0 and ncols > 1:
+            total_len += sep_len * (ncols - 1)
+
+        if all_ascii:
+            s = PyUnicode_New(total_len, 127)
+            result_data = <char*>PyUnicode_DATA(s)
+            offset = 0
+            for j in range(ncols):
+                item = arr[j, i]
+                item_len = PyUnicode_GET_LENGTH(item)
+                item_data = <char*>PyUnicode_DATA(item)
+                memcpy(result_data + offset, item_data, item_len)
+                offset += item_len
+                if sep_len > 0 and j < ncols - 1:
+                    memcpy(result_data + offset, sep_data, sep_len)
+                    offset += sep_len
+            result[i] = s
+        else:
+            s = arr[0, i]
+            for j in range(1, ncols):
+                if sep_len > 0:
+                    s = PyUnicode_Concat(s, sep)
+                s = PyUnicode_Concat(s, arr[j, i])
+            result[i] = s
+
+    return np.asarray(result)
