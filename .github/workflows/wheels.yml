@@ -180,7 +180,7 @@ jobs:
       - name: Set up Python for validation/upload (non-ARM64 Windows & other OS)
         # micromamba is not available for ARM64 Windows
         if: matrix.buildplat[1] != 'win_arm64'
-        uses: mamba-org/setup-micromamba@v2
+        uses: mamba-org/setup-micromamba@v3
         with:
           environment-name: wheel-env
           # Use a fixed Python, since we might have an unreleased Python not

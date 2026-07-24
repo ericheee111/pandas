@@ -63,7 +63,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: mamba-org/setup-micromamba@v2
+        uses: mamba-org/setup-micromamba@v3
         with:
           environment-name: recipe-test
           create-args: >-
