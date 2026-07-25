@@ -35,6 +35,25 @@ def _set_fastpaths(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
     ht._set_use_boostkit_fastpaths(enabled)
 
 
+@pytest.fixture(autouse=True)
+def _restore_fastpath_state(monkeypatch: pytest.MonkeyPatch):
+    """Restore the Cython-level BoostKit gate after each test.
+
+    ``monkeypatch`` auto-reverts the Python-level ``USE_BOOSTKIT_FASTPATHS``
+    attribute, but it cannot restore the Cython module global
+    ``_use_boostkit_fastpaths``.  Capture the value the test inherited and
+    restore it on teardown so a test that disables the gate does not leak that
+    state into subsequent tests (the previous ``finally`` block hardcoded
+    ``True``, which would silently re-enable the gate even if the surrounding
+    suite had intentionally disabled it).  Mirrors the fixture in
+    ``pandas/tests/test_boostkit_fastpaths.py``.
+    """
+    fastpaths = importlib.import_module("pandas.core._boostkit_fastpaths")
+    original = fastpaths.USE_BOOSTKIT_FASTPATHS
+    yield
+    ht._set_use_boostkit_fastpaths(original)
+
+
 def _make_dense_int64(n: int, ngroups: int, start: int = 0) -> np.ndarray:
     """A length-``n`` int64 array whose values form a dense range of
     ``ngroups`` distinct values starting at ``start``, shuffled."""
@@ -287,10 +306,7 @@ class TestFactorizeDenseInt64Public:
         keys = _make_dense_int64(n, ngroups=500, start=0)
         codes_enabled, uniques_enabled = pd.factorize(keys, sort=True)
         _set_fastpaths(monkeypatch, False)
-        try:
-            codes_disabled, uniques_disabled = pd.factorize(keys, sort=True)
-        finally:
-            _set_fastpaths(monkeypatch, True)
+        codes_disabled, uniques_disabled = pd.factorize(keys, sort=True)
         tm.assert_numpy_array_equal(codes_enabled, codes_disabled)
         tm.assert_numpy_array_equal(uniques_enabled, uniques_disabled)
 
@@ -313,6 +329,33 @@ class TestFactorizeDenseInt64Public:
         keys = np.ascontiguousarray(keys)
         codes, uniques = pd.factorize(keys, sort=True)
         ref_codes, ref_uniques = _reference_factorize(keys, sort=True)
+        tm.assert_numpy_array_equal(codes, ref_codes)
+        tm.assert_numpy_array_equal(uniques, ref_uniques)
+
+    def test_unaligned_dense_int64_falls_back(self, monkeypatch):
+        """A C-contiguous-but-misaligned int64 array must fall back to the
+        hashtable path.  The Cython dense kernel dereferences the buffer via
+        a typed memoryview under ``nogil``; requiring aligned memory keeps the
+        access safe on strict-alignment architectures.  The result must still
+        match the reference factorization.
+        """
+        n = 200_000
+        keys = _make_dense_int64(n, ngroups=500, start=0)
+        # Build a C-contiguous, native, 1-D int64 array that is NOT aligned:
+        # allocate a uint8 buffer one byte too long and view it as int64 at
+        # offset 1.  numpy permits this (the view is contiguous but unaligned).
+        raw = np.empty(n * 8 + 1, dtype=np.uint8)
+        unaligned = np.ndarray(
+            n, dtype=np.int64, buffer=raw, offset=1
+        )
+        unaligned[:] = keys
+        assert unaligned.flags.c_contiguous
+        assert unaligned.dtype.isnative
+        assert not unaligned.flags.aligned
+
+        _set_fastpaths(monkeypatch, True)
+        codes, uniques = pd.factorize(unaligned, sort=True)
+        ref_codes, ref_uniques = _reference_factorize(unaligned, sort=True)
         tm.assert_numpy_array_equal(codes, ref_codes)
         tm.assert_numpy_array_equal(uniques, ref_uniques)
 

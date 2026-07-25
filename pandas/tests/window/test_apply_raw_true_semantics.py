@@ -286,6 +286,103 @@ def test_raw_builtin_sum_callable_identity_fallback(
     Series([1.0, 2.0, 3.0]).rolling(2).apply(function, raw=True)
 
 
+def test_raw_builtin_sum_rebound_builtin_falls_back(
+    monkeypatch, enable_boostkit_fastpaths
+):
+    # ``builtins.sum`` is mutable at runtime.  If a user rebinds
+    # ``builtins.sum`` (e.g. via monkeypatch) and passes the rebound object to
+    # ``rolling.apply``, the fast path must NOT engage: the specialization
+    # skips the user callable and runs a Cython reduction, so engaging it on a
+    # rebound ``sum`` would silently ignore the user's replacement.  The gate
+    # compares against ``_ORIGINAL_BUILTIN_SUM`` captured at module load and
+    # also checks ``builtins.sum`` has not been replaced, so the rebound case
+    # falls through to the generic callback path and the user callable runs.
+    monkeypatch.setattr(
+        window_aggregations,
+        "roll_apply_builtin_sum",
+        _fail_if_builtin_sum_helper_called,
+    )
+
+    def fake_sum(values):
+        return 123.0
+
+    monkeypatch.setattr(builtins, "sum", fake_sum)
+
+    result = Series([1.0, 2.0, 3.0]).rolling(2).apply(fake_sum, raw=True)
+    expected = Series([np.nan, 123.0, 123.0])
+    tm.assert_series_equal(result, expected)
+
+
+def test_raw_builtin_sum_rebound_builtin_disables_fastpath_even_for_real_sum(
+    monkeypatch, enable_boostkit_fastpaths
+):
+    # When ``builtins.sum`` has been rebound, the fast path must stay off even
+    # if the user passes the *original* builtin ``sum`` (captured before the
+    # rebind).  This is the conservative side of the dual check: an instrumented
+    # environment that replaced ``builtins.sum`` should not silently engage the
+    # specialization.  The result is still correct because the generic path
+    # calls the real ``sum``.
+    monkeypatch.setattr(
+        window_aggregations,
+        "roll_apply_builtin_sum",
+        _fail_if_builtin_sum_helper_called,
+    )
+
+    real_sum = builtins.sum
+    monkeypatch.setattr(builtins, "sum", lambda values: 999.0)
+
+    Series([1.0, 2.0, 3.0]).rolling(2).apply(real_sum, raw=True)
+
+
+@pytest.mark.usefixtures("enable_boostkit_fastpaths")
+@pytest.mark.parametrize("constructor", [Series, DataFrame])
+def test_raw_true_builtin_sum_unaligned_falls_back(constructor):
+    # NumPy supports C-contiguous-but-not-aligned arrays (e.g. a float64 view
+    # at a 1-byte offset).  The direct-view and builtin-sum fast paths wrap the
+    # source pointer with ``PyArray_SimpleNewFromData`` and dereference it via
+    # typed pointers, so they must reject misaligned input and fall back to
+    # the generic ``arr[s:e]`` path whose flags NumPy computes from the real
+    # offset.  The result must still match the fallback bit-for-bit.
+    n = 33
+    raw = np.empty(n * 8 + 1, dtype=np.uint8)
+    arr = np.ndarray(n, dtype=np.float64, buffer=raw, offset=1)
+    arr[:] = np.arange(n, dtype=np.float64)
+    assert arr.flags.c_contiguous
+    assert not arr.flags.aligned
+
+    _apply_builtin_sum_and_oracle(constructor(arr, copy=False), 3, min_periods=1)
+
+
+@pytest.mark.usefixtures("enable_boostkit_fastpaths")
+@pytest.mark.parametrize("constructor", [Series, DataFrame])
+def test_raw_true_generic_callback_unaligned_falls_back(constructor):
+    # The direct-view path (used for any raw callback when dtype is native
+    # float64) also wraps the source pointer, so misaligned input must fall
+    # back to ``arr[s:e]``.  The callback observes a window whose
+    # ``flags.aligned`` is truthful (``False``), not the default ``True`` that
+    # ``PyArray_SimpleNewFromData`` would have produced.
+    n = 33
+    raw = np.empty(n * 8 + 1, dtype=np.uint8)
+    arr = np.ndarray(n, dtype=np.float64, buffer=raw, offset=1)
+    arr[:] = np.arange(n, dtype=np.float64)
+    assert not arr.flags.aligned
+
+    observed_alignment = []
+
+    def cb(window):
+        observed_alignment.append(bool(window.flags.aligned))
+        return float(np.sum(window))
+
+    obj = constructor(arr, copy=False)
+    result = obj.rolling(3, min_periods=1).apply(cb, raw=True)
+    expected = obj.rolling(3, min_periods=1).apply(
+        lambda w: float(np.sum(w)), raw=True
+    )
+    tm.assert_equal(result, expected)
+    # Every observed window must report truthful (non-aligned) flags.
+    assert observed_alignment and not any(observed_alignment)
+
+
 @pytest.mark.parametrize(
     "raw",
     [

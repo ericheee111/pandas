@@ -7,6 +7,17 @@ from __future__ import annotations
 
 import builtins
 import copy
+
+# Capture the original ``builtins.sum`` at module load.  The rolling builtin-sum
+# fast path identifies the user's callable by identity (``function is ...``) and
+# then dispatches to a specialized Cython reduction that never calls the
+# callable.  ``builtins.sum`` is mutable at runtime, so a live lookup
+# (``function is builtins.sum``) would silently match a rebound ``sum`` passed
+# in by the user under ``monkeypatch.setattr(builtins, "sum", fake_sum)`` and
+# then skip calling ``fake_sum``.  Comparing against this immutable reference
+# keeps the specialization tied to the real builtin and lets the rebound case
+# fall through to the generic callback path.
+_ORIGINAL_BUILTIN_SUM = builtins.sum
 from datetime import timedelta
 from functools import partial
 import inspect
@@ -1628,7 +1639,8 @@ class RollingAndExpandingMixin(BaseWindow):
         use_builtin_sum_fast_path = (
             _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
             and raw is True
-            and function is builtins.sum
+            and function is _ORIGINAL_BUILTIN_SUM
+            and builtins.sum is _ORIGINAL_BUILTIN_SUM
             and args == ()
             and not kwargs
             and np.geterr()

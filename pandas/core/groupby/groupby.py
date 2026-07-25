@@ -2190,6 +2190,17 @@ class GroupBy(BaseGroupBy[NDFrameT]):
                 and bvalues.dtype == np.dtype(np.float64)
                 and bvalues.dtype.isnative
                 and bvalues.flags.c_contiguous
+                # The Cython kernel dereferences the buffer via a typed
+                # memoryview under ``nogil``; require aligned memory so the
+                # access is safe on strict-alignment architectures.  Misaligned
+                # input falls back to ``count_level_2d`` below.
+                and bvalues.flags.aligned
+                # The kernel writes ``counts[0, lab]`` for every non-negative
+                # ``lab``; the grouper normally guarantees ``len(ids) ==
+                # len(bvalues)`` and ``ids in [-1, ngroups)``, but assert the
+                # length invariant here so a future caller cannot trigger an
+                # out-of-bounds read on ``values``.
+                and len(ids) == len(bvalues)
             ):
                 counted = lib.count_level_2d_float64_skipna(
                     bvalues, labels=ids, max_bin=ngroups
