@@ -2219,10 +2219,7 @@ def test_expanding_fast_path_correctness(method, dtype):
         values = ser.astype(float).to_numpy()
         expected_vals = np.empty(n)
         for i in range(n):
-            if i < 0:
-                expected_vals[i] = np.nan
-            else:
-                expected_vals[i] = np.std(values[: i + 1], ddof=1)
+            expected_vals[i] = np.std(values[: i + 1], ddof=1)
         expected = Series(expected_vals, index=ser.index)
 
     tm.assert_series_equal(result, expected)

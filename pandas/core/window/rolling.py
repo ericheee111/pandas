@@ -759,7 +759,8 @@ class BaseWindow(SelectionMixin):
                 numeric_only,
                 convert_inf=not use_fast_path,
                 use_manager_constructor=use_fast_path,
-                keep_int=use_fast_path and name in ("sum", "max", "min", "count", "std"),
+                keep_int=use_fast_path
+                and name in ("sum", "max", "min", "count", "mean", "std"),
             )
         else:
             return self._apply_tablewise(homogeneous_func, name, numeric_only)
