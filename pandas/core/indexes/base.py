@@ -3731,7 +3731,11 @@ class Index(IndexOpsMixin, PandasObject):
         if len(target) == 0:
             return np.array([], dtype=np.intp)
 
-        if not self._should_compare(target) and not self._should_partial_index(target):
+        if (
+            not (IS_ARM and self.dtype == target.dtype)
+            and not self._should_compare(target)
+            and not self._should_partial_index(target)
+        ):
             # IntervalIndex get special treatment bc numeric scalars can be
             #  matched to Interval scalars
             return self._get_indexer_non_comparable(target, method=method, unique=True)
@@ -3741,7 +3745,38 @@ class Index(IndexOpsMixin, PandasObject):
             #  (could improve perf by doing _should_compare check earlier?)
             assert self.dtype == target.dtype
 
-            indexer = self._engine.get_indexer(target.codes)
+            target_codes = target.codes
+            if IS_ARM and self.is_monotonic_increasing and not self.hasnans:
+                codes = self.codes
+                n = len(codes)
+                if len(target_codes) >= n:
+                    # Bulk lookup: a single vectorized ``searchsorted`` on the
+                    # strictly-increasing unique codes replaces per-element
+                    # hash-table lookups (and avoids building the hash table).
+                    if n == 0:
+                        indexer = np.full(len(target_codes), -1, dtype=np.intp)
+                    else:
+                        pos = np.searchsorted(codes, target_codes, side="left")
+                        np.clip(pos, 0, n - 1, out=pos)
+                        indexer = np.where(
+                            codes[pos] == target_codes, pos, -1
+                        ).astype(np.intp, copy=False)
+                elif (
+                    codes.dtype.kind == "i"
+                    and target_codes.dtype.kind == "i"
+                    and codes.dtype == target_codes.dtype
+                ):
+                    # Small target on a large monotonic-unique index: a single
+                    # fused Cython binary search beats cached hash-table
+                    # lookups (no per-call numpy overhead, no hash-table
+                    # build/lookup).
+                    indexer = libalgos.get_indexer_sorted_unique(
+                        codes, target_codes
+                    )
+                else:
+                    indexer = self._engine.get_indexer(target_codes)
+            else:
+                indexer = self._engine.get_indexer(target_codes)
             if self.hasnans and target.hasnans:
                 # After _maybe_cast_listlike_indexer, target elements which do not
                 # belong to some category are changed to NaNs
@@ -5991,15 +6026,30 @@ class Index(IndexOpsMixin, PandasObject):
         >>> idx.sort_values(ascending=False, return_indexer=True)
         (Index([1000, 100, 10, 1], dtype='int64'), array([3, 1, 0, 2]))
         """
-        if key is None and (
-            (ascending and self.is_monotonic_increasing)
-            or (not ascending and self.is_monotonic_decreasing)
-        ):
-            if return_indexer:
-                indexer = np.arange(len(self), dtype=np.intp)
-                return self.copy(), indexer
-            else:
-                return self.copy()
+        if key is None:
+            if (ascending and self.is_monotonic_increasing) or (
+                not ascending and self.is_monotonic_decreasing
+            ):
+                if return_indexer:
+                    indexer = np.arange(len(self), dtype=np.intp)
+                    return self.copy(), indexer
+                else:
+                    return self.copy()
+
+            elif (
+                IS_ARM
+                and not ascending
+                and self.is_monotonic_increasing
+                and self.is_unique
+            ):
+                # ARM-only fastpath: reversing a unique monotonic-increasing
+                # index yields a correctly sorted descending index in O(n)
+                # instead of an O(n log n) argsort.
+                indexer = np.arange(len(self), dtype=np.intp)[::-1]
+                if return_indexer:
+                    return self[::-1], indexer
+                else:
+                    return self[::-1]
 
         # GH 35584. Sort missing values according to na_position kwarg
         # ignore na_position for MultiIndex

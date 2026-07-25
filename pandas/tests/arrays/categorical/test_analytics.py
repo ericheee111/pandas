@@ -225,6 +225,11 @@ class TestCategoricalAnalytics:
         with pytest.raises(TypeError, match=msg):
             ser.searchsorted(["bread", "cucumber"])
 
+    def test_searchsorted_non_category_scalar(self, ordered):
+        cat = Categorical([1, 2, 3], categories=[1, 2, 3, 4, 5], ordered=ordered)
+        with pytest.raises(TypeError, match="99"):
+            cat.searchsorted(99)
+
     def test_unique(self, ordered):
         # GH38140
         dtype = CategoricalDtype(["a", "b", "c"], ordered=ordered)

@@ -31,6 +31,7 @@ from pandas._libs import (
 )
 from pandas._libs.interval import Interval
 from pandas._libs.properties import cache_readonly
+from pandas.compat._arch import IS_ARM
 from pandas._libs.tslibs import (
     BaseOffset,
     NaT,
@@ -394,20 +395,37 @@ class CategoricalDtype(PandasExtensionDtype, ExtensionDtype):
         self._ordered = ordered
 
     def __setstate__(self, state: MutableMapping[str_type, Any]) -> None:
-        # for pickle compat. __get_state__ is defined in the
+        # pickle compat. __get_state__ is defined in the
         # PandasExtensionDtype superclass and uses the public properties to
         # pickle -> need to set the settable private ones here (see GH26067)
         self._categories = state.pop("categories", None)
         self._ordered = state.pop("ordered", False)
+        # invalidate cached hash (not part of pickled state, but be safe)
+        self.__dict__.pop("_hash", None)
+        self.__dict__.pop("_hash_categories", None)
 
     def __hash__(self) -> int:
         # _hash_categories returns a uint64, so use the negative
-        # space for when we have unknown categories to avoid a conflict
+        # space for when we have unknown categories to avoid a conflict.
+        if IS_ARM:
+            # CategoricalDtype is immutable after construction (categories/
+            # ordered have no public setter; set_categories builds a *new*
+            # dtype), so the O(n) _hash_categories result can be cached.
+            # hash() is called repeatedly, e.g. by
+            # _categories_match_up_to_permutation during equals /
+            # _is_dtype_compat / _maybe_cast_listlike_indexer.
+            try:
+                return self._hash
+            except AttributeError:
+                if self.categories is None:
+                    self._hash = -1 if self.ordered else -2
+                else:
+                    # We *do* want to include the real self.ordered here
+                    self._hash = int(self._hash_categories)
+                return self._hash
+        # non-ARM: original (recompute on every call)
         if self.categories is None:
-            if self.ordered:
-                return -1
-            else:
-                return -2
+            return -1 if self.ordered else -2
         # We *do* want to include the real self.ordered here
         return int(self._hash_categories)
 
