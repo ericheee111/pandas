@@ -1222,7 +1222,7 @@ cdef bint _group_prod_float64_1d_min_count_le0(
     uint8_t[:, ::1] result_mask,
     Py_ssize_t ncounts,
     Py_ssize_t min_count,
-) noexcept:
+):
     """
     AArch64 K==1 specialization for skipna ``prod`` on a single native float64
     column without a mask when ``min_count <= 0``.
@@ -1237,6 +1237,14 @@ cdef bint _group_prod_float64_1d_min_count_le0(
     the multiplicative identity.  Returns True if handled; the caller falls
     back otherwise.  Eligibility uses only dtype, column count, mask/skipna/
     min_count semantics, and contiguity -- never benchmark parameters.
+
+    Not ``noexcept``: the helper allocates ``prodx``/``nobs`` via ``np.ones``/
+    ``np.zeros`` (GIL-held, before the ``nogil`` loop), which can raise
+    ``MemoryError``.  With ``noexcept`` Cython 3 would swallow the exception
+    and return an indeterminate ``bint``, leaving the caller's
+    ``if helper(...): return`` guard unreliable.  Dropping ``noexcept`` lets
+    the exception propagate; the hot loop itself stays ``nogil`` and adds no
+    per-iteration check.
     """
     cdef:
         Py_ssize_t i, N, K, lab
@@ -1293,8 +1301,12 @@ cdef bint _group_prod_float32_1d_min_count_le0(
     uint8_t[:, ::1] result_mask,
     Py_ssize_t ncounts,
     Py_ssize_t min_count,
-) noexcept:
-    """float32 variant of ``_group_prod_float64_1d_min_count_le0``."""
+):
+    """float32 variant of ``_group_prod_float64_1d_min_count_le0``.
+
+    Not ``noexcept``: allocates ``prodx``/``nobs`` via ``np.ones``/``np.zeros``
+    which can raise ``MemoryError``; see the float64 variant for details.
+    """
     cdef:
         Py_ssize_t i, N, K, lab
         float32_t val
@@ -2262,7 +2274,7 @@ cdef bint _group_last_float_reverse_scan(
     uint8_t[:, ::1] result_mask,
     Py_ssize_t ncounts,
     Py_ssize_t min_count,
-) noexcept:
+):
     """
     AArch64 K==1 reverse-scan specialization for skipna ``last`` on a single
     native float column without a mask.
@@ -2277,6 +2289,14 @@ cdef bint _group_last_float_reverse_scan(
     caller falls back to the generic implementation).  Eligibility uses only
     dtype, column count, mask/skipna/min_count semantics, and contiguity --
     never benchmark parameters.
+
+    Not ``noexcept``: the helper allocates ``seen``/``last_resx``/``last_nobs``
+    via ``np.zeros``/``np.empty_like``/``np.zeros`` (GIL-held, before the
+    ``nogil`` loop), which can raise ``MemoryError``.  With ``noexcept`` Cython
+    3 would swallow the exception and return an indeterminate ``bint``, leaving
+    the caller's ``if helper(...): return`` guard unreliable.  Dropping
+    ``noexcept`` lets the exception propagate; the hot loop itself stays
+    ``nogil`` and adds no per-iteration check.
     """
     cdef:
         Py_ssize_t i, N, K, lab

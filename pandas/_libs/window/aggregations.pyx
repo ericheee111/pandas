@@ -2387,6 +2387,13 @@ def roll_apply_builtin_sum(
         arr = arr.copy("C")
     values = arr
 
+    # The typed ``values[j]`` dereference below assumes aligned float64 access.
+    # ``np.copy("C")`` preserves a misaligned data offset, so a C-contiguous but
+    # unaligned source must fall back to the generic path rather than risk an
+    # unaligned load on strict-alignment architectures.
+    if not cnp.PyArray_ISALIGNED(arr):
+        return None
+
     if n == 0:
         return np.array([], dtype=np.float64)
 
@@ -2468,6 +2475,15 @@ def roll_apply(object obj,
         use_direct_call
         and cnp.PyArray_TYPE(arr) == cnp.NPY_FLOAT64
         and cnp.PyArray_ISNOTSWAPPED(arr)
+        # ``_create_raw_window_view`` wraps the source pointer with
+        # ``PyArray_SimpleNewFromData``, which defaults the new array's flags
+        # to ``C_CONTIGUOUS | ALIGNED | WRITEABLE`` without consulting the
+        # source's actual alignment.  Gate the direct-view path on the source
+        # being aligned so the window's ``ALIGNED`` flag is truthful and the
+        # typed pointer handed to the user callback is safe to dereference on
+        # strict-alignment architectures.  Misaligned input falls back to
+        # ``arr[s:e]``, whose flags NumPy computes from the real offset.
+        and cnp.PyArray_ISALIGNED(arr)
     )
 
     counts = roll_sum(np.isfinite(arr).astype(float), start, end, minp)

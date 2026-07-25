@@ -493,6 +493,11 @@ def _is_float64_monotonic_runs_candidate(values: np.ndarray) -> bool:
         or values.dtype != np.dtype(np.float64)
         or values.ndim != 1
         or not values.flags.c_contiguous
+        # The Cython kernel dereferences the buffer via a typed memoryview
+        # under ``nogil``; require aligned memory so the access is safe on
+        # strict-alignment architectures.  Misaligned input falls back to
+        # the hashtable path, which handles it via the same buffer protocol.
+        or not values.flags.aligned
     ):
         return False
 
@@ -543,6 +548,11 @@ def _is_int64_dense_range_candidate(values: np.ndarray) -> bool:
         or not values.dtype.isnative
         or values.ndim != 1
         or not values.flags.c_contiguous
+        # The Cython kernel dereferences the buffer via a typed memoryview
+        # under ``nogil``; require aligned memory so the access is safe on
+        # strict-alignment architectures.  Misaligned input falls back to
+        # the regular hashtable path.
+        or not values.flags.aligned
     ):
         return False
     return True

@@ -391,10 +391,12 @@ def test_raw_false_callback_inspects_index():
 def test_raw_false_callback_mutation_does_not_affect_source():
     arr = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     s = Series(arr.copy(), name="mut")
-    original = arr.copy()
+    mutation_attempts = []
+    expected_values = arr.copy()
 
     def cb(window):
         # attempt to mutate the received window
+        mutation_attempts.append(True)
         try:
             window.iloc[0] = 999.0
         except Exception:
@@ -403,8 +405,14 @@ def test_raw_false_callback_mutation_does_not_affect_source():
         return float(np.sum(window))
 
     s.rolling(3, min_periods=1).apply(cb, raw=False)
-    # source array unchanged
-    tm.assert_almost_equal(Series(arr), Series(original))
+    # The rolling operation runs on ``s`` (built from ``arr.copy()``); assert on
+    # ``s`` itself, not on the unrelated outer ``arr``.  Comparing ``arr`` to a
+    # copy of itself would pass trivially regardless of any mutation.
+    expected = Series(expected_values, name="mut")
+    tm.assert_series_equal(s, expected)
+    # Sanity-check that the callback actually ran and attempted a mutation on
+    # at least one window -- otherwise the test would not exercise the path.
+    assert len(mutation_attempts) >= 1
 
 
 # ---------------------------------------------------------------------------
