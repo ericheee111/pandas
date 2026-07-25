@@ -16,3 +16,19 @@ def test_difference_with_na(na_value):
     result = ci.difference(other)
     expected = CategoricalIndex(["a", "b"], categories=["a", "b", "c"])
     tm.assert_index_equal(result, expected)
+
+
+def test_intersection_sort_true():
+    ci1 = CategoricalIndex(["a", "b", "c"], categories=["a", "b", "c", "d"])
+    ci2 = CategoricalIndex(["b", "c", "d"], categories=["a", "b", "c", "d"])
+    result = ci1.intersection(ci2, sort=True)
+    expected = CategoricalIndex(["b", "c"], categories=["a", "b", "c", "d"])
+    tm.assert_index_equal(result, expected)
+
+
+def test_intersection_sort_false():
+    ci1 = CategoricalIndex(["a", "b", "c"], categories=["a", "b", "c", "d"])
+    ci2 = CategoricalIndex(["b", "c", "d"], categories=["a", "b", "c", "d"])
+    result = ci1.intersection(ci2, sort=False)
+    expected = CategoricalIndex(["b", "c"], categories=["a", "b", "c", "d"])
+    tm.assert_index_equal(result, expected)
