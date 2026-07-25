@@ -7,6 +7,7 @@ from libc.math cimport (
     signbit,
     sqrt,
 )
+from libc.stddef cimport size_t
 from libcpp.deque cimport deque
 from libcpp.stack cimport stack
 from libcpp.unordered_map cimport unordered_map
@@ -28,6 +29,14 @@ cnp.import_array()
 import cython
 
 from pandas._libs.algos import is_monotonic
+
+
+cdef extern from "pandas/window_aggregations.h" namespace "pandas":
+    bint all_finite(
+        const float64_t* values,
+        size_t n,
+        Py_ssize_t stride,
+    ) noexcept nogil
 
 
 cdef extern from "pandas/skiplist.h":
@@ -78,14 +87,16 @@ cdef bint is_monotonic_increasing_start_end_bounds(
 
 def roll_all_finite(const float64_t[:] values) -> bool:
     cdef:
-        Py_ssize_t i, N = len(values)
-        bint result = True
+        Py_ssize_t N = len(values)
+        Py_ssize_t stride
+        bint result
 
+    if N == 0:
+        return True
+
+    stride = values.strides[0] // sizeof(float64_t)
     with nogil:
-        for i in range(N):
-            if not isfinite(values[i]):
-                result = False
-                break
+        result = all_finite(&values[0], <size_t>N, stride)
     return result
 
 
@@ -447,6 +458,7 @@ def roll_var_fixed_no_nan(const float64_t[:] values,
                 mean_x = 0.0
                 ssqdm_x = 0.0
                 compensation_add = 0.0
+                compensation_remove = 0.0
                 for j in range(s, i + 1):
                     add_var(values[j], &nobs, &mean_x, &ssqdm_x,
                             &compensation_add, &numerically_unstable)
@@ -457,55 +469,235 @@ def roll_var_fixed_no_nan(const float64_t[:] values,
     return output
 
 
-def roll_std_fixed_no_nan(const float64_t[:] values,
-                          int64_t window_size, int64_t minp,
-                          int ddof) -> np.ndarray:
+ctypedef fused fixed_std_t:
+    float64_t
+    int64_t
+
+
+cdef ndarray[float64_t] _roll_std_fixed_no_nan_stable(
+    const fixed_std_t[:] values,
+    int64_t window_size,
+    int64_t minp,
+    int ddof,
+):
     cdef:
         Py_ssize_t i, j, N = len(values)
-        float64_t nobs, mean_x, ssqdm_x, compensation_add, compensation_remove
-        float64_t var_val
-        bint numerically_unstable
-        int64_t s
+        float64_t reference, delta, sum_x, sum_sq, mean_x, var_val
+        float64_t y, t
+        float64_t comp_x_add, comp_x_remove
+        float64_t comp_sq_add, comp_sq_remove
+        int64_t s, e, nobs
+        bint requires_recompute
         ndarray[float64_t] output
 
     output = np.empty(N, dtype=np.float64)
     minp = max(minp, 1)
+    if N == 0:
+        return output
 
     with nogil:
-        nobs = 0.0
-        mean_x = 0.0
-        ssqdm_x = 0.0
-        compensation_add = 0.0
-        compensation_remove = 0.0
-        numerically_unstable = False
+        reference = <float64_t>values[0]
+        sum_x = 0.0
+        sum_sq = 0.0
+        comp_x_add = 0.0
+        comp_x_remove = 0.0
+        comp_sq_add = 0.0
+        comp_sq_remove = 0.0
+        requires_recompute = False
 
         for i in range(N):
             s = max(0, i + 1 - window_size)
+            e = i + 1
+            nobs = e - s
 
-            if i > 0 and i >= window_size:
-                remove_var(values[i - window_size], &nobs, &mean_x,
-                           &ssqdm_x, &compensation_remove,
-                           &numerically_unstable)
+            if i >= window_size:
+                delta = <float64_t>values[i - window_size] - reference
+                y = -delta - comp_x_remove
+                t = sum_x + y
+                comp_x_remove = t - sum_x - y
+                sum_x = t
+                y = -(delta * delta) - comp_sq_remove
+                t = sum_sq + y
+                comp_sq_remove = t - sum_sq - y
+                sum_sq = t
+                if delta * delta * InvCondTol > fabs(sum_sq):
+                    requires_recompute = True
 
-            add_var(values[i], &nobs, &mean_x, &ssqdm_x,
-                    &compensation_add, &numerically_unstable)
+            delta = <float64_t>values[i] - reference
+            y = delta - comp_x_add
+            t = sum_x + y
+            comp_x_add = t - sum_x - y
+            sum_x = t
+            y = delta * delta - comp_sq_add
+            t = sum_sq + y
+            comp_sq_add = t - sum_sq - y
+            sum_sq = t
 
-            if i == 0 or numerically_unstable:
-                nobs = 0.0
-                mean_x = 0.0
-                ssqdm_x = 0.0
-                compensation_add = 0.0
-                for j in range(s, i + 1):
-                    add_var(values[j], &nobs, &mean_x, &ssqdm_x,
-                            &compensation_add, &numerically_unstable)
-                numerically_unstable = False
+            if requires_recompute:
+                reference = <float64_t>values[s]
+                sum_x = 0.0
+                sum_sq = 0.0
+                comp_x_add = 0.0
+                comp_x_remove = 0.0
+                comp_sq_add = 0.0
+                comp_sq_remove = 0.0
+                for j in range(s, e):
+                    delta = <float64_t>values[j] - reference
+                    y = delta - comp_x_add
+                    t = sum_x + y
+                    comp_x_add = t - sum_x - y
+                    sum_x = t
+                    y = delta * delta - comp_sq_add
+                    t = sum_sq + y
+                    comp_sq_add = t - sum_sq - y
+                    sum_sq = t
+                requires_recompute = False
 
-            var_val = calc_var(minp, ddof, nobs, ssqdm_x)
-            if var_val < 0:
-                var_val = 0
-            output[i] = sqrt(var_val)
+            if nobs >= minp and nobs > ddof:
+                mean_x = sum_x / <float64_t>nobs
+                var_val = sum_sq - sum_x * mean_x
+
+                if var_val < fabs(sum_sq) * InvCondTol:
+                    # Rebase the moments when their shifted values still cause
+                    # catastrophic cancellation.
+                    reference = <float64_t>values[s]
+                    sum_x = 0.0
+                    sum_sq = 0.0
+                    comp_x_add = 0.0
+                    comp_x_remove = 0.0
+                    comp_sq_add = 0.0
+                    comp_sq_remove = 0.0
+                    for j in range(s, e):
+                        delta = <float64_t>values[j] - reference
+                        y = delta - comp_x_add
+                        t = sum_x + y
+                        comp_x_add = t - sum_x - y
+                        sum_x = t
+                        y = delta * delta - comp_sq_add
+                        t = sum_sq + y
+                        comp_sq_add = t - sum_sq - y
+                        sum_sq = t
+                    mean_x = sum_x / <float64_t>nobs
+                    var_val = sum_sq - sum_x * mean_x
+
+                if var_val < 0:
+                    var_val = 0
+                output[i] = sqrt(
+                    var_val / (<float64_t>nobs - <float64_t>ddof)
+                )
+            else:
+                output[i] = NaN
 
     return output
+
+
+cdef ndarray[float64_t] _roll_std_fixed_no_nan(
+    const fixed_std_t[:] values,
+    int64_t window_size,
+    int64_t minp,
+    int ddof,
+):
+    cdef:
+        Py_ssize_t i, N = len(values), warmup_end
+        float64_t val, sum_x, sum_sq, mean_x, var_val
+        float64_t y, t
+        float64_t comp_x_add, comp_x_remove
+        float64_t comp_sq_add, comp_sq_remove
+        float64_t inv_window, inv_denom
+        int64_t nobs
+        bint numerically_unstable = False
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+    minp = max(minp, 1)
+    if window_size <= 0 or window_size < minp or window_size <= ddof:
+        with nogil:
+            for i in range(N):
+                output[i] = NaN
+        return output
+
+    warmup_end = min(window_size, N)
+    inv_window = 1.0 / <float64_t>window_size
+    inv_denom = 1.0 / (<float64_t>window_size - <float64_t>ddof)
+
+    with nogil:
+        sum_x = 0.0
+        sum_sq = 0.0
+        comp_x_add = 0.0
+        comp_x_remove = 0.0
+        comp_sq_add = 0.0
+        comp_sq_remove = 0.0
+
+        for i in range(warmup_end):
+            val = <float64_t>values[i]
+            y = val - comp_x_add
+            t = sum_x + y
+            comp_x_add = t - sum_x - y
+            sum_x = t
+            y = val * val - comp_sq_add
+            t = sum_sq + y
+            comp_sq_add = t - sum_sq - y
+            sum_sq = t
+
+            nobs = i + 1
+            if nobs >= minp and nobs > ddof:
+                mean_x = sum_x / <float64_t>nobs
+                var_val = sum_sq - sum_x * mean_x
+                numerically_unstable |= (
+                    var_val < fabs(sum_sq) * InvCondTol
+                )
+                if var_val < 0:
+                    var_val = 0
+                output[i] = sqrt(
+                    var_val / (<float64_t>nobs - <float64_t>ddof)
+                )
+            else:
+                output[i] = NaN
+
+        for i in range(window_size, N):
+            val = <float64_t>values[i - window_size]
+            y = -val - comp_x_remove
+            t = sum_x + y
+            comp_x_remove = t - sum_x - y
+            sum_x = t
+            y = -(val * val) - comp_sq_remove
+            t = sum_sq + y
+            comp_sq_remove = t - sum_sq - y
+            sum_sq = t
+            numerically_unstable |= (
+                val * val * InvCondTol > fabs(sum_sq)
+            )
+
+            val = <float64_t>values[i]
+            y = val - comp_x_add
+            t = sum_x + y
+            comp_x_add = t - sum_x - y
+            sum_x = t
+            y = val * val - comp_sq_add
+            t = sum_sq + y
+            comp_sq_add = t - sum_sq - y
+            sum_sq = t
+
+            mean_x = sum_x * inv_window
+            var_val = sum_sq - sum_x * mean_x
+            numerically_unstable |= (
+                var_val < fabs(sum_sq) * InvCondTol
+            )
+            if var_val < 0:
+                var_val = 0
+            output[i] = sqrt(var_val * inv_denom)
+
+    if numerically_unstable:
+        return _roll_std_fixed_no_nan_stable(
+            values, window_size, minp, ddof
+        )
+    return output
+
+
+def roll_std_fixed_no_nan(const float64_t[:] values,
+                          int64_t window_size, int64_t minp,
+                          int ddof) -> np.ndarray:
+    return _roll_std_fixed_no_nan(values, window_size, minp, ddof)
 
 
 # ----------------------------------------------------------------------
@@ -548,52 +740,7 @@ def roll_mean_fixed_no_nan_int64(const int64_t[:] values,
 def roll_std_fixed_no_nan_int64(const int64_t[:] values,
                                 int64_t window_size, int64_t minp,
                                 int ddof) -> np.ndarray:
-    cdef:
-        Py_ssize_t i, j, N = len(values)
-        float64_t nobs, mean_x, ssqdm_x, compensation_add, compensation_remove
-        float64_t var_val
-        bint numerically_unstable
-        int64_t s
-        ndarray[float64_t] output
-
-    output = np.empty(N, dtype=np.float64)
-    minp = max(minp, 1)
-
-    with nogil:
-        nobs = 0.0
-        mean_x = 0.0
-        ssqdm_x = 0.0
-        compensation_add = 0.0
-        compensation_remove = 0.0
-        numerically_unstable = False
-
-        for i in range(N):
-            s = max(0, i + 1 - window_size)
-
-            if i > 0 and i >= window_size:
-                remove_var(<float64_t>values[i - window_size], &nobs, &mean_x,
-                           &ssqdm_x, &compensation_remove,
-                           &numerically_unstable)
-
-            add_var(<float64_t>values[i], &nobs, &mean_x, &ssqdm_x,
-                    &compensation_add, &numerically_unstable)
-
-            if i == 0 or numerically_unstable:
-                nobs = 0.0
-                mean_x = 0.0
-                ssqdm_x = 0.0
-                compensation_add = 0.0
-                for j in range(s, i + 1):
-                    add_var(<float64_t>values[j], &nobs, &mean_x, &ssqdm_x,
-                            &compensation_add, &numerically_unstable)
-                numerically_unstable = False
-
-            var_val = calc_var(minp, ddof, nobs, ssqdm_x)
-            if var_val < 0:
-                var_val = 0
-            output[i] = sqrt(var_val)
-
-    return output
+    return _roll_std_fixed_no_nan(values, window_size, minp, ddof)
 
 
 # ----------------------------------------------------------------------

@@ -130,6 +130,25 @@ def test_roll_all_finite(values, expected):
     assert result is expected
 
 
+@pytest.mark.parametrize("nonfinite", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("position", [0, 7, 8])
+def test_roll_all_finite_vectorized_boundaries(nonfinite, position):
+    values = np.arange(9, dtype=np.float64)
+    assert window_aggregations.roll_all_finite(values)
+
+    values[position] = nonfinite
+
+    assert not window_aggregations.roll_all_finite(values)
+
+
+def test_roll_all_finite_strided():
+    values = np.array([0.0, np.nan, 1.0, np.inf, 2.0])
+
+    assert window_aggregations.roll_all_finite(values[::2])
+    assert window_aggregations.roll_all_finite(values[::-2])
+    assert not window_aggregations.roll_all_finite(values[1::2])
+
+
 @pytest.mark.parametrize("dtype", [np.float64, np.int64])
 @pytest.mark.parametrize("minp", [0, 1, 3])
 @pytest.mark.parametrize("window", [1, 3, 10])
@@ -172,6 +191,45 @@ def test_fixed_no_nan_matches_general(dtype, minp, window, method, kernel):
         np.testing.assert_allclose(result, expected, rtol=1e-10, equal_nan=True)
     else:
         tm.assert_numpy_array_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "dtype,kernel,method",
+    [
+        (np.float64, "roll_var_fixed_no_nan", "var"),
+        (np.float64, "roll_std_fixed_no_nan", "std"),
+        (np.int64, "roll_std_fixed_no_nan_int64", "std"),
+    ],
+)
+@pytest.mark.parametrize("window", [1, 3, 10])
+@pytest.mark.parametrize("minp,ddof", [(1, 0), (1, 1), (3, 1), (1, 10)])
+def test_fixed_no_nan_variance_numerical_stability(
+    dtype, kernel, method, window, minp, ddof
+):
+    values = np.array(
+        [0, 10**12 + 1] + [10**12 + 2] * 12 + [3, 4, 5],
+        dtype=dtype,
+    )
+    start = np.maximum(0, np.arange(len(values)) + 1 - window).astype(np.int64)
+    end = np.arange(1, len(values) + 1, dtype=np.int64)
+    if method == "var":
+        expected = window_aggregations.roll_var(
+            values, start, end, minp, ddof
+        )
+    else:
+        expected = np.full(len(values), np.nan)
+        for i, (s, e) in enumerate(zip(start, end, strict=True)):
+            if e - s >= minp and e - s > ddof:
+                current = values[s:e].astype(np.float64)
+                expected[i] = np.std(current - current[0], ddof=ddof)
+
+    result = getattr(window_aggregations, kernel)(values, window, minp, ddof)
+
+    np.testing.assert_allclose(
+        result, expected, rtol=1e-10, atol=1e-15, equal_nan=True
+    )
+    if method == "std" and window >= minp and window > ddof:
+        assert result[11] == 0
 
 
 @pytest.mark.parametrize("dtype", [np.float64, np.int64])
