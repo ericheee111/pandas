@@ -10,6 +10,109 @@ from numpy cimport (
 # Cython routines for window indexers
 
 
+cdef void _calculate_variable_window_bounds_group(
+    int64_t window_size,
+    bint center,
+    bint left_closed,
+    bint right_closed,
+    const int64_t* index,
+    Py_ssize_t index_stride,
+    int64_t group_start,
+    int64_t group_end,
+    int64_t* start,
+    int64_t* end,
+) noexcept nogil:
+    cdef:
+        int64_t start_bound, end_bound, index_growth_sign = 1
+        Py_ssize_t i, j
+
+    if group_end <= group_start:
+        return
+
+    if index[(group_end - 1) * index_stride] < index[group_start * index_stride]:
+        index_growth_sign = -1
+
+    start[group_start] = group_start
+    if right_closed:
+        end[group_start] = group_start + 1
+    else:
+        end[group_start] = group_start
+
+    if center:
+        end_bound = (
+            index[group_start * index_stride]
+            + index_growth_sign * window_size / 2
+        )
+        for j in range(group_start, group_end):
+            if (index[j * index_stride] - end_bound) * index_growth_sign < 0:
+                end[group_start] = j + 1
+            elif (
+                (index[j * index_stride] - end_bound) * index_growth_sign == 0
+                and right_closed
+            ):
+                end[group_start] = j + 1
+            elif (index[j * index_stride] - end_bound) * index_growth_sign >= 0:
+                end[group_start] = j
+                break
+
+    for i in range(group_start + 1, group_end):
+        if center:
+            end_bound = (
+                index[i * index_stride]
+                + index_growth_sign * window_size / 2
+            )
+            start_bound = (
+                index[i * index_stride]
+                - index_growth_sign * window_size / 2
+            )
+        else:
+            end_bound = index[i * index_stride]
+            start_bound = (
+                index[i * index_stride] - index_growth_sign * window_size
+            )
+
+        if left_closed:
+            start_bound -= index_growth_sign
+
+        start[i] = i
+        for j in range(start[i - 1], i):
+            if (index[j * index_stride] - start_bound) * index_growth_sign > 0:
+                start[i] = j
+                break
+
+        if center:
+            for j in range(end[i - 1], group_end + 1):
+                if j == group_end:
+                    end[i] = j
+                elif (
+                    (index[j * index_stride] - end_bound) * index_growth_sign == 0
+                    and right_closed
+                ):
+                    end[i] = j + 1
+                elif (
+                    (index[j * index_stride] - end_bound) * index_growth_sign
+                    >= 0
+                ):
+                    end[i] = j
+                    break
+        elif (
+            index[end[i - 1] * index_stride] == end_bound
+            and not right_closed
+        ):
+            end[i] = end[i - 1] + 1
+        elif (
+            (index[end[i - 1] * index_stride] - end_bound)
+            * index_growth_sign
+            <= 0
+        ):
+            end[i] = i + 1
+        else:
+            end[i] = end[i - 1]
+
+        if not right_closed and not center:
+            end[i] -= 1
+
+
 def calculate_variable_window_bounds(
     int64_t num_values,
     int64_t window_size,
@@ -49,8 +152,7 @@ def calculate_variable_window_bounds(
         bint left_closed = False
         bint right_closed = False
         ndarray[int64_t, ndim=1] start, end
-        int64_t start_bound, end_bound, index_growth_sign = 1
-        Py_ssize_t i, j
+        Py_ssize_t index_stride = index.strides[0] // sizeof(int64_t)
 
     if num_values <= 0:
         return np.empty(0, dtype="int64"), np.empty(0, dtype="int64")
@@ -73,79 +175,77 @@ def calculate_variable_window_bounds(
         right_closed = True
         left_closed = True
 
-    if index[num_values - 1] < index[0]:
-        index_growth_sign = -1
-
     start = np.empty(num_values, dtype="int64")
-    start.fill(-1)
     end = np.empty(num_values, dtype="int64")
-    end.fill(-1)
-
-    start[0] = 0
-
-    # right endpoint is closed
-    if right_closed:
-        end[0] = 1
-    # right endpoint is open
-    else:
-        end[0] = 0
-    if center:
-        end_bound = index[0] + index_growth_sign * window_size / 2
-        for j in range(0, num_values):
-            if (index[j] - end_bound) * index_growth_sign < 0:
-                end[0] = j + 1
-            elif (index[j] - end_bound) * index_growth_sign == 0 and right_closed:
-                end[0] = j + 1
-            elif (index[j] - end_bound) * index_growth_sign >= 0:
-                end[0] = j
-                break
 
     with nogil:
+        _calculate_variable_window_bounds_group(
+            window_size,
+            center,
+            left_closed,
+            right_closed,
+            &index[0],
+            index_stride,
+            0,
+            num_values,
+            &start[0],
+            &end[0],
+        )
 
-        # start is start of slice interval (including)
-        # end is end of slice interval (not including)
-        for i in range(1, num_values):
-            if center:
-                end_bound = index[i] + index_growth_sign * window_size / 2
-                start_bound = index[i] - index_growth_sign * window_size / 2
-            else:
-                end_bound = index[i]
-                start_bound = index[i] - index_growth_sign * window_size
+    return start, end
 
-            # left endpoint is closed
-            if left_closed:
-                start_bound -= 1 * index_growth_sign
 
-            # advance the start bound until we are
-            # within the constraint
-            start[i] = i
-            for j in range(start[i - 1], i):
-                if (index[j] - start_bound) * index_growth_sign > 0:
-                    start[i] = j
-                    break
+def calculate_variable_window_bounds_grouped(
+    int64_t num_values,
+    int64_t window_size,
+    object min_periods,
+    bint center,
+    str closed,
+    ndarray[int64_t, ndim=1] index,
+    ndarray[int64_t, ndim=1] group_starts,
+):
+    """
+    Calculate time-based rolling-window boundaries for contiguous groups.
+    """
+    cdef:
+        bint left_closed = False
+        bint right_closed = False
+        ndarray[int64_t, ndim=1] start, end
+        Py_ssize_t group, num_groups = len(group_starts) - 1
+        Py_ssize_t index_stride = index.strides[0] // sizeof(int64_t)
 
-            # for centered window advance the end bound until we are
-            # outside the constraint
-            if center:
-                for j in range(end[i - 1], num_values + 1):
-                    if j == num_values:
-                        end[i] = j
-                    elif ((index[j] - end_bound) * index_growth_sign == 0 and
-                          right_closed):
-                        end[i] = j + 1
-                    elif (index[j] - end_bound) * index_growth_sign >= 0:
-                        end[i] = j
-                        break
-            # end bound is previous end
-            # or current index
-            elif index[end[i - 1]] == end_bound and not right_closed:
-                end[i] = end[i - 1] + 1
-            elif (index[end[i - 1]] - end_bound) * index_growth_sign <= 0:
-                end[i] = i + 1
-            else:
-                end[i] = end[i - 1]
+    if num_values <= 0:
+        return np.empty(0, dtype="int64"), np.empty(0, dtype="int64")
 
-            # right endpoint is open
-            if not right_closed and not center:
-                end[i] -= 1
+    if closed is None:
+        closed = "right"
+
+    if closed in ["right", "both"]:
+        right_closed = True
+
+    if closed in ["left", "both"]:
+        left_closed = True
+
+    if center and window_size % 2 == 1:
+        right_closed = True
+        left_closed = True
+
+    start = np.empty(num_values, dtype="int64")
+    end = np.empty(num_values, dtype="int64")
+
+    with nogil:
+        for group in range(num_groups):
+            _calculate_variable_window_bounds_group(
+                window_size,
+                center,
+                left_closed,
+                right_closed,
+                &index[0],
+                index_stride,
+                group_starts[group],
+                group_starts[group + 1],
+                &start[0],
+                &end[0],
+            )
+
     return start, end

@@ -7,7 +7,11 @@ from datetime import timedelta
 import numpy as np
 
 from pandas._libs.tslibs import BaseOffset
-from pandas._libs.window.indexers import calculate_variable_window_bounds
+from pandas._libs.window.indexers import (
+    calculate_variable_window_bounds,
+    calculate_variable_window_bounds_grouped,
+)
+from pandas.compat._arch import IS_ARM
 from pandas.util._decorators import set_module
 
 from pandas.core.dtypes.common import ensure_platform_int
@@ -608,10 +612,74 @@ class GroupbyIndexer(BaseIndexer):
         # 1) For each group, get the indices that belong to the group
         # 2) Use the indices to calculate the start & end bounds of the window
         # 3) Append the window bounds in group order
+        if len(self.groupby_indices) == 0:
+            return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+        group_indices = list(self.groupby_indices.values())
+        group_sizes = np.fromiter(
+            (len(indices) for indices in group_indices),
+            dtype=np.int64,
+            count=len(group_indices),
+        )
+        group_ends = group_sizes.cumsum()
+        group_starts = np.concatenate(([0], group_ends[:-1]))
+
+        use_grouped_bounds = IS_ARM and step is None
+
+        if use_grouped_bounds and self.window_indexer is ExpandingIndexer:
+            start = np.repeat(group_starts, group_sizes)
+            end = np.arange(1, group_ends[-1] + 1, dtype=np.int64)
+            return start, end
+
+        if use_grouped_bounds and self.window_indexer is FixedWindowIndexer:
+            repeated_group_starts = np.repeat(group_starts, group_sizes)
+            repeated_group_ends = np.repeat(group_ends, group_sizes)
+            if center or self.window_size == 0:
+                offset = (self.window_size - 1) // 2
+            else:
+                offset = 0
+
+            end = np.arange(
+                1 + offset,
+                len(repeated_group_starts) + 1 + offset,
+                dtype=np.int64,
+            )
+            start = end - self.window_size
+            if closed in ["left", "both"]:
+                start -= 1
+            if closed in ["left", "neither"]:
+                end -= 1
+
+            start = np.clip(start, repeated_group_starts, repeated_group_ends)
+            end = np.clip(end, repeated_group_starts, repeated_group_ends)
+            return start, end
+
+        if use_grouped_bounds and self.window_indexer is VariableWindowIndexer:
+            assert self.index_array is not None
+            if (index_length := len(self.index_array)) < num_values:
+                raise ValueError(
+                    "Variable rolling window requires the index to be at least as long "
+                    f"as the 'other' index. Got {index_length} < {num_values}. "
+                    "Please align 'other' to the rolling object's index using "
+                    "reindex_like() or similar method."
+                )
+            indexer = np.concatenate(group_indices)
+            index_array = self.index_array.take(ensure_platform_int(indexer))
+            group_boundaries = np.concatenate(([0], group_ends))
+            return calculate_variable_window_bounds_grouped(
+                len(indexer),
+                self.window_size,
+                min_periods,
+                center,  # type: ignore[arg-type]
+                closed,
+                index_array,
+                group_boundaries,
+            )
+
         start_arrays = []
         end_arrays = []
         window_indices_start = 0
-        for indices in self.groupby_indices.values():
+        for indices in group_indices:
             index_array: np.ndarray | None
 
             if self.index_array is not None:
@@ -634,17 +702,14 @@ class GroupbyIndexer(BaseIndexer):
             # Cannot use groupby_indices as they might not be monotonic with the object
             # we're rolling over
             window_indices = np.arange(
-                window_indices_start, window_indices_start + len(indices)
+                window_indices_start,
+                window_indices_start + len(indices) + 1,
+                dtype=np.int64,
             )
             window_indices_start += len(indices)
             # Extend as we'll be slicing window like [start, end)
-            window_indices = np.append(window_indices, [window_indices[-1] + 1]).astype(
-                np.int64, copy=False
-            )
             start_arrays.append(window_indices.take(ensure_platform_int(start)))
             end_arrays.append(window_indices.take(ensure_platform_int(end)))
-        if len(start_arrays) == 0:
-            return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
         start = np.concatenate(start_arrays)
         end = np.concatenate(end_arrays)
         return start, end
