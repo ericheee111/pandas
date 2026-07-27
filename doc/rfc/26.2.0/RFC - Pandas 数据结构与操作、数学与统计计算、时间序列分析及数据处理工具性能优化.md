@@ -20,7 +20,7 @@
 
 Pandas 作为 Python 数据科学生态的核心库之一，其性能上限远未被充分挖掘。当前在鲲鹏平台上面临以下核心痛点：
 
-**算法在鲲鹏上性能表现不佳**：HashTable 等底层核心算法存在较多分支预测和随机访存，大量用例在鲲鹏平台上的性能表现弱于 Zen4，反映出算法对鲲鹏微架构的亲和性不足。
+**算法在鲲鹏上性能表现不佳**：HashTable 等底层核心算法存在较多分支预测和随机访存，大量用例在鲲鹏平台上的性能表现弱于 xx，反映出算法对鲲鹏微架构的亲和性不足。
 
 **社区 ARM64 优化覆盖不足**：Pandas 依赖于 NumPy、PyArrow等三方库的向量化优化，目前没有任何直接的 SIMD 代码，虽然有若干 PR 尝试添加 SIMD 支持（如 skew/kurtosis 的 SIMD 计算等），但整体缺乏统一的 SIMD 策略。
 
@@ -39,7 +39,7 @@ Pandas 作为 Python 数据科学生态的核心库之一，其性能上限远�
 
 **目标：**
 
-1. **性能目标**：相关性能测试用例在鲲鹏平台上的整体性能提升15%，920B 持平Zen4，950 优于Zen4
+1. **性能目标**：相关性能测试用例在鲲鹏平台上的整体性能提升，920B 持平xx，950 优于xx
 2. **兼容性目标**：100% 保持 Pandas 公有 API 兼容性，通过 Pandas 官方测试套件
 3. **生态目标**：核心优化以 PR 形式提交 Pandas 上游社区，建立 ARM64 基准测试长期运行机制
 4. **可观测性目标**：建立优化场景用例的 ASV 基准测试体系，关键基准组设置 5% 回归阈值
@@ -105,8 +105,8 @@ Pandas 作为 Python 数据科学生态的核心库之一，其性能上限远�
 
 **关键性能指标**：
 - 单算子性能提升超过5%才能计算受益，下降超5%视为劣化。
-- 相关性能测试用例在鲲鹏平台上的整体性能提升15%，920B 持平Zen4，950 优于 Zen4 15%。
-- 单算子用例在 Zen4 上的性能自提升不超过鲲鹏性能自提升的 1/3。
+- 相关性能测试用例在鲲鹏平台上的整体性能提升，920B 持平xx，950 优于 xx。
+- 单算子用例在 xx 上的性能自提升不超过鲲鹏性能自提升的 xx。
 
 **质量要求**：
 - 所有优化必须 100% 保持 Pandas 公有 API 语义兼容，用户的存量代码无需修改即可在优化版本上运行。
@@ -534,7 +534,7 @@ setitem 的瓶颈是 BlockManager 重建次数而非元素级运算。单列标�
 
 **（4）MultiIndex level 对齐**
 
-为 DataFrame-vs-DataFrame flex arithmetic（`df.add(..., level=, axis="columns")`）增加窄快路径。当满足指定 level、无 fill_value、左侧 index 为 MultiIndex、左右 columns 完全一致、右侧 index 唯一且精确覆盖左侧指定 level 的全部 labels 时，直接用 `self.index.codes[level]` 与 `other.index.get_indexer(self.index.levels[level])` 构造右侧行索引器，绕过通用 `MultiIndex._join_level` 哈希 join。构造完索引器后仍复用 `_reindex_with_indexers` 走现有 BlockManager take 与 blockwise arithmetic 路径。该项为平台无关优化，Kunpeng920b 与 Zen4 均受益。不满足条件或构造阶段抛出 `IndexError/KeyError/TypeError/ValueError` 时自动回退原通用对齐路径。
+为 DataFrame-vs-DataFrame flex arithmetic（`df.add(..., level=, axis="columns")`）增加窄快路径。当满足指定 level、无 fill_value、左侧 index 为 MultiIndex、左右 columns 完全一致、右侧 index 唯一且精确覆盖左侧指定 level 的全部 labels 时，直接用 `self.index.codes[level]` 与 `other.index.get_indexer(self.index.levels[level])` 构造右侧行索引器，绕过通用 `MultiIndex._join_level` 哈希 join。构造完索引器后仍复用 `_reindex_with_indexers` 走现有 BlockManager take 与 blockwise arithmetic 路径。该项为平台无关优化，Kunpeng920b 与 xx 均受益。不满足条件或构造阶段抛出 `IndexError/KeyError/TypeError/ValueError` 时自动回退原通用对齐路径。
 
 **（5）isin/factorize SwissTable 后端**
 
