@@ -421,7 +421,17 @@ class WrappedCythonOp:
             if (
                 comp_ids[0] == 0
                 and comp_ids[-1] == ngroups - 1
-                and (len(comp_ids) < 8 or (np.diff(comp_ids[:8]) >= 0).all())
+                and (
+                    len(comp_ids) < 8
+                    or comp_ids[0]
+                    <= comp_ids[1]
+                    <= comp_ids[2]
+                    <= comp_ids[3]
+                    <= comp_ids[4]
+                    <= comp_ids[5]
+                    <= comp_ids[6]
+                    <= comp_ids[7]
+                )
             ):
                 diff = np.diff(comp_ids)
             else:
@@ -464,7 +474,17 @@ class WrappedCythonOp:
             if (
                 comp_ids[0] == 0
                 and comp_ids[-1] == ngroups - 1
-                and (len(comp_ids) < 8 or (np.diff(comp_ids[:8]) >= 0).all())
+                and (
+                    len(comp_ids) < 8
+                    or comp_ids[0]
+                    <= comp_ids[1]
+                    <= comp_ids[2]
+                    <= comp_ids[3]
+                    <= comp_ids[4]
+                    <= comp_ids[5]
+                    <= comp_ids[6]
+                    <= comp_ids[7]
+                )
             ):
                 diff = np.diff(comp_ids)
             else:
