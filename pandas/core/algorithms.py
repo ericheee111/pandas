@@ -1344,7 +1344,7 @@ def duplicated(
           occurrence.
         - ``last`` : Mark duplicates as ``True`` except for the last
           occurrence.
-        - False : Mark all duplicates as ``True``.
+        - ``False`` : Mark all duplicates as ``True``.
     mask : ndarray[bool], optional
         array indicating which elements to exclude from checking
 
@@ -1352,9 +1352,26 @@ def duplicated(
     -------
     duplicated : ndarray[bool]
     """
+    from pandas.compat._arch import IS_ARM
     from pandas.core.config_init import get_use_swisstable
 
     values = _ensure_data(values)
+
+    if IS_ARM and mask is None and isinstance(values, np.ndarray):
+        if values.dtype == np.int64 and keep in ("first", "last") and len(values) > 0:
+            vmin = values.min()
+            vmax = values.max()
+            # Check for overflow before computing range
+            if vmax >= 0 and vmin < 0:
+                # Potential overflow case: use Python int arithmetic
+                vrange = int(vmax) - int(vmin)
+            else:
+                vrange = vmax - vmin
+            if vrange < 100000:
+                return htable.duplicated_int64_small_range(
+                    values, vmin, vmax, keep=keep
+                )
+
     if get_use_swisstable():
         duplicated_funcs = {
             np.dtype("int64"): swisstable.duplicated_int64,
