@@ -58,6 +58,7 @@ from pandas.core.base import SelectionMixin
 import pandas.core.common as com
 from pandas.core.indexers.objects import (
     BaseIndexer,
+    ExpandingIndexer,
     FixedWindowIndexer,
     GroupbyIndexer,
     VariableWindowIndexer,
@@ -341,7 +342,9 @@ class BaseWindow(SelectionMixin):
             result = obj.iloc[slice(s, e)]
             yield result
 
-    def _prep_values(self, values: ArrayLike, convert_inf: bool = True) -> np.ndarray:
+    def _prep_values(
+        self, values: ArrayLike, convert_inf: bool = True, keep_int: bool = False
+    ) -> np.ndarray:
         """Convert input to numpy arrays for Cython routines"""
         if needs_i8_conversion(values.dtype):
             raise NotImplementedError(
@@ -350,13 +353,18 @@ class BaseWindow(SelectionMixin):
             )
         # GH #12373 : rolling functions error on float32 data
         # make sure the data is coerced to float64
-        try:
-            if isinstance(values, ExtensionArray):
-                values = values.to_numpy(np.float64, na_value=np.nan)
-            else:
-                values = ensure_float64(values)
-        except (ValueError, TypeError) as err:
-            raise TypeError(f"cannot handle this type -> {values.dtype}") from err
+        if keep_int and isinstance(values, np.ndarray) and np.issubdtype(
+            values.dtype, np.integer
+        ):
+            values = np.asarray(values, dtype=np.int64)
+        else:
+            try:
+                if isinstance(values, ExtensionArray):
+                    values = values.to_numpy(np.float64, na_value=np.nan)
+                else:
+                    values = ensure_float64(values)
+            except (ValueError, TypeError) as err:
+                raise TypeError(f"cannot handle this type -> {values.dtype}") from err
 
         if convert_inf:
             # Convert inf to nan for C funcs
@@ -433,23 +441,28 @@ class BaseWindow(SelectionMixin):
         name: str | None = None,
         convert_inf: bool = True,
         use_manager_constructor: bool = False,
+        keep_int: bool = False,
     ) -> Series:
         """
         Series version of _apply_columnwise
         """
+        from pandas import Series
+
         obj = self._create_data(self._selected_obj)
 
         if name == "count":
             # GH 12541: Special case for count where we support date-like types
             obj = notna(obj).astype(int)
         try:
-            values = self._prep_values(obj._values, convert_inf=convert_inf)
+            values = self._prep_values(
+                obj._values, convert_inf=convert_inf, keep_int=keep_int
+            )
         except (TypeError, NotImplementedError) as err:
             raise DataError("No numeric types to aggregate") from err
 
         result = homogeneous_func(values)
         index = self._slice_axis_for_step(obj.index, result)
-        if use_manager_constructor:
+        if use_manager_constructor and type(obj) is Series:
             mgr = SingleBlockManager.from_array(result, index)
             out = obj._constructor_from_mgr(mgr, axes=mgr.axes)
             out._name = obj.name
@@ -463,6 +476,7 @@ class BaseWindow(SelectionMixin):
         numeric_only: bool = False,
         convert_inf: bool = True,
         use_manager_constructor: bool = False,
+        keep_int: bool = False,
     ) -> DataFrame | Series:
         """
         Apply the given function to the DataFrame broken down into homogeneous
@@ -475,6 +489,7 @@ class BaseWindow(SelectionMixin):
                 name,
                 convert_inf=convert_inf,
                 use_manager_constructor=use_manager_constructor,
+                keep_int=keep_int,
             )
 
         obj = self._create_data(self._selected_obj, numeric_only)
@@ -489,7 +504,9 @@ class BaseWindow(SelectionMixin):
             # GH#42736 operate column-wise instead of block-wise
             # As of 2.0, hfunc will raise for nuisance columns
             try:
-                arr = self._prep_values(arr, convert_inf=convert_inf)
+                arr = self._prep_values(
+                    arr, convert_inf=convert_inf, keep_int=keep_int
+                )
             except (TypeError, NotImplementedError) as err:
                 raise DataError(
                     f"Cannot aggregate non-numeric type: {arr.dtype}"
@@ -591,48 +608,128 @@ class BaseWindow(SelectionMixin):
         )
 
         use_fast_path = IS_ARM and (
-            isinstance(self.window, int)
-            and not self.center
+            not self.center
             and self.step is None
-            and isinstance(window_indexer, FixedWindowIndexer)
             and self.closed is None
             and self._win_freq_i8 is None
             and not numba_args
-            and name in ("mean", "std")
+            and name in ("mean", "std", "sum", "max", "min", "count")
             and self.method == "single"
+            and (
+                (
+                    isinstance(self.window, int)
+                    and self.window > 0
+                    and isinstance(window_indexer, FixedWindowIndexer)
+                )
+                or isinstance(window_indexer, ExpandingIndexer)
+            )
         )
+        is_expanding = isinstance(window_indexer, ExpandingIndexer)
 
         def homogeneous_func(values: np.ndarray):
             # calculation function
 
             if values.size == 0:
-                return values.copy()
+                return np.asarray(values, dtype=np.float64)
 
             if use_fast_path:
-                win_size = self.window
                 minp = min_periods
+                if not is_expanding:
+                    win_size = self.window
+
                 if np.issubdtype(values.dtype, np.integer):
                     int_values = np.asarray(values, dtype=np.int64)
                     with np.errstate(all="ignore"):
-                        if name == "mean":
-                            return window_aggregations.roll_mean_fixed_no_nan_int64(
-                                int_values, win_size, minp
-                            )
+                        if is_expanding:
+                            if name in ("sum", "count"):
+                                return window_aggregations.roll_sum_expanding_no_nan_int64(
+                                    int_values, minp
+                                )
+                            elif name == "mean":
+                                return window_aggregations.roll_mean_expanding_no_nan_int64(
+                                    int_values, minp
+                                )
+                            elif name == "std":
+                                ddof = kwargs.get("ddof", 1)
+                                return window_aggregations.roll_std_expanding_no_nan_int64(
+                                    int_values, minp, ddof
+                                )
+                            elif name == "max":
+                                return window_aggregations.roll_max_expanding_no_nan_int64(
+                                    int_values, minp
+                                )
+                            elif name == "min":
+                                return window_aggregations.roll_min_expanding_no_nan_int64(
+                                    int_values, minp
+                                )
                         else:
-                            ddof = kwargs.get("ddof", 1)
-                            return window_aggregations.roll_std_fixed_no_nan_int64(
-                                int_values, win_size, minp, ddof
-                            )
+                            if name in ("sum", "count"):
+                                return window_aggregations.roll_sum_fixed_no_nan_int64(
+                                    int_values, win_size, minp
+                                )
+                            elif name == "mean":
+                                return window_aggregations.roll_mean_fixed_no_nan_int64(
+                                    int_values, win_size, minp
+                                )
+                            elif name == "std":
+                                ddof = kwargs.get("ddof", 1)
+                                return window_aggregations.roll_std_fixed_no_nan_int64(
+                                    int_values, win_size, minp, ddof
+                                )
+                            elif name == "max":
+                                return window_aggregations.roll_max_fixed_no_nan_int64(
+                                    int_values, win_size, minp
+                                )
+                            elif name == "min":
+                                return window_aggregations.roll_min_fixed_no_nan_int64(
+                                    int_values, win_size, minp
+                                )
                 elif window_aggregations.roll_all_finite(values):
                     with np.errstate(all="ignore"):
-                        if name == "mean":
-                            return window_aggregations.roll_mean_fixed_no_nan(
-                                values, win_size, minp
-                            )
-                        ddof = kwargs.get("ddof", 1)
-                        return window_aggregations.roll_std_fixed_no_nan(
-                            values, win_size, minp, ddof
-                        )
+                        if is_expanding:
+                            if name in ("sum", "count"):
+                                return window_aggregations.roll_sum_expanding_no_nan(
+                                    values, minp
+                                )
+                            elif name == "mean":
+                                return window_aggregations.roll_mean_expanding_no_nan(
+                                    values, minp
+                                )
+                            elif name == "std":
+                                ddof = kwargs.get("ddof", 1)
+                                return window_aggregations.roll_std_expanding_no_nan(
+                                    values, minp, ddof
+                                )
+                            elif name == "max":
+                                return window_aggregations.roll_max_expanding_no_nan(
+                                    values, minp
+                                )
+                            elif name == "min":
+                                return window_aggregations.roll_min_expanding_no_nan(
+                                    values, minp
+                                )
+                        else:
+                            if name in ("sum", "count"):
+                                return window_aggregations.roll_sum_fixed_no_nan(
+                                    values, win_size, minp
+                                )
+                            elif name == "mean":
+                                return window_aggregations.roll_mean_fixed_no_nan(
+                                    values, win_size, minp
+                                )
+                            elif name == "std":
+                                ddof = kwargs.get("ddof", 1)
+                                return window_aggregations.roll_std_fixed_no_nan(
+                                    values, win_size, minp, ddof
+                                )
+                            elif name == "max":
+                                return window_aggregations.roll_max_fixed_no_nan(
+                                    values, win_size, minp
+                                )
+                            elif name == "min":
+                                return window_aggregations.roll_min_fixed_no_nan(
+                                    values, win_size, minp
+                                )
 
                 inf = np.isinf(values)
                 if inf.any():
@@ -661,7 +758,9 @@ class BaseWindow(SelectionMixin):
                 name,
                 numeric_only,
                 convert_inf=not use_fast_path,
-                use_manager_constructor=use_fast_path
+                use_manager_constructor=use_fast_path,
+                keep_int=use_fast_path
+                and name in ("sum", "max", "min", "count", "mean", "std"),
             )
         else:
             return self._apply_tablewise(homogeneous_func, name, numeric_only)
@@ -1814,17 +1913,11 @@ class RollingAndExpandingMixin(BaseWindow):
         def zsqrt_func(values, begin, end, min_periods):
             return zsqrt(window_func(values, begin, end, min_periods, ddof=ddof))
 
-        if IS_ARM:
-            return self._apply(
-                zsqrt_func,
-                name="std",
-                numeric_only=numeric_only,
-                ddof=ddof,
-            )
         return self._apply(
             zsqrt_func,
             name="std",
             numeric_only=numeric_only,
+            ddof=ddof,
         )
 
     def var(
