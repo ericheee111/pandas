@@ -9,6 +9,7 @@ from typing import (
 )
 
 cimport cython
+from libc.string cimport memcpy
 from cpython.datetime cimport (
     PyDate_Check,
     PyDateTime_Check,
@@ -20,6 +21,7 @@ from cpython.datetime cimport (
     time,
     timedelta,
 )
+from cpython.dict cimport PyDict_GetItemWithError
 from cpython.iterator cimport PyIter_Check
 from cpython.long cimport (
     PyLong_AsLongLongAndOverflow,
@@ -37,10 +39,19 @@ from cpython.tuple cimport (
     PyTuple_New,
     PyTuple_SET_ITEM,
 )
+from cpython.unicode cimport (
+    PyUnicode_4BYTE_KIND,
+    PyUnicode_CheckExact,
+    PyUnicode_Contains,
+    PyUnicode_FromKindAndData,
+    PyUnicode_GET_LENGTH,
+)
 from cython cimport (
     Py_ssize_t,
     floating,
 )
+from libc.stdint cimport uint32_t
+from libc.string cimport memcmp
 
 from pandas._config import using_string_dtype
 
@@ -83,6 +94,14 @@ PandasParser_IMPORT
 
 cdef extern from "pandas/portable.h":
     bint pandas_is_aarch64() noexcept nogil
+
+cdef extern from "Python.h":
+    void* PyUnicode_DATA(object o)
+    Py_ssize_t PyUnicode_GET_LENGTH(object o)
+    bint PyUnicode_IS_COMPACT_ASCII(object o)
+    bint PyUnicode_Check(object o)
+    object PyUnicode_New(Py_ssize_t size, unsigned int maxchar)
+    object PyUnicode_Concat(object left, object right)
 
 from pandas._libs cimport util
 from pandas._libs.util cimport (
@@ -703,6 +722,76 @@ ctypedef fused ndarr_object:
     ndarray[object, ndim=1]
     ndarray[object, ndim=2]
 
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef object _deduplicate_unicode_array(ndarray arr):
+    cdef:
+        Py_ssize_t i, j, k, length
+        Py_ssize_t n = len(arr)
+        Py_ssize_t width = arr.dtype.itemsize // sizeof(uint32_t)
+        Py_ssize_t cache_size = 0
+        Py_ssize_t offsets[64]
+        Py_ssize_t lengths[64]
+        uint64_t hashes[64]
+        uint64_t value_hash
+        uint64_t packed_ascii
+        bint ascii_value
+        bint ascii_cache[64]
+        uint32_t *data = <uint32_t *>arr.data
+        uint32_t *value
+        uint32_t *cached
+        ndarray[object] result = np.empty(n, dtype=object)
+        object py_value
+
+    for i in range(n):
+        value = data + i * width
+        length = width
+        while length > 0 and value[length - 1] == 0:
+            length -= 1
+        value_hash = <uint64_t>1469598103934665603
+        packed_ascii = 0
+        ascii_value = width <= 8
+        for k in range(length):
+            value_hash = (
+                value_hash ^ <uint64_t>value[k]
+            ) * <uint64_t>1099511628211
+            if value[k] <= 127:
+                packed_ascii = (packed_ascii << 7) | value[k]
+            else:
+                ascii_value = False
+        if ascii_value:
+            value_hash = packed_ascii
+
+        for j in range(cache_size):
+            if (
+                hashes[j] != value_hash
+                or lengths[j] != length
+                or ascii_cache[j] != ascii_value
+            ):
+                continue
+            cached = data + offsets[j] * width
+            if ascii_value or memcmp(
+                value, cached, length * sizeof(uint32_t)
+            ) == 0:
+                result[i] = result[offsets[j]]
+                break
+        else:
+            if cache_size == 64:
+                return None
+            py_value = PyUnicode_FromKindAndData(
+                PyUnicode_4BYTE_KIND, value, length
+            )
+            result[i] = py_value
+            offsets[cache_size] = i
+            lengths[cache_size] = length
+            hashes[cache_size] = value_hash
+            ascii_cache[cache_size] = ascii_value
+            cache_size += 1
+
+    return result
+
+
 # TODO: get rid of this in StringArray and modify
 #  and go through ensure_string_array instead
 
@@ -795,6 +884,19 @@ cpdef ndarray[object] ensure_string_array(
         input_arr = arr
         arr = np.empty(len(arr), dtype="object")
         arr[:] = input_arr
+
+    if (
+        pandas_is_aarch64()
+        and isinstance(arr, np.ndarray)
+        and arr.ndim == 1
+        and arr.dtype.kind == "U"
+        and arr.dtype.isnative
+        and arr.flags.c_contiguous
+        and n >= 100_000
+    ):
+        result = _deduplicate_unicode_array(arr)
+        if result is not None:
+            return result
 
     result = np.asarray(arr, dtype="object")
 
@@ -3249,6 +3351,56 @@ def map_contains(
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
+def fast_string_upper(ndarray[object] arr):
+    cdef:
+        Py_ssize_t i
+        object val
+        ndarray[object] result = np.empty(len(arr), dtype=object)
+
+    for i in range(len(arr)):
+        val = arr[i]
+        if not PyUnicode_CheckExact(val):
+            return None
+        result[i] = val.upper()
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def fast_string_contains(ndarray[object] arr, object pat):
+    cdef:
+        Py_ssize_t i
+        object val
+        ndarray[cnp.npy_bool] result = np.empty(len(arr), dtype=np.bool_)
+
+    if not PyUnicode_CheckExact(pat):
+        return None
+    for i in range(len(arr)):
+        val = arr[i]
+        if not PyUnicode_CheckExact(val):
+            return None
+        result[i] = PyUnicode_Contains(val, pat)
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def fast_string_len(ndarray[object] arr):
+    cdef:
+        Py_ssize_t i
+        object val
+        ndarray[int64_t] result = np.empty(len(arr), dtype=np.int64)
+
+    for i in range(len(arr)):
+        val = arr[i]
+        if not PyUnicode_CheckExact(val):
+            return None
+        result[i] = PyUnicode_GET_LENGTH(val)
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
 def map_infer(
     ndarray arr, object f, *, bint convert=True, bint ignore_na=False
 ) -> "ArrayLike":
@@ -3406,18 +3558,28 @@ def fast_multiget(
     cdef:
         Py_ssize_t i, n = len(keys)
         object val
+        PyObject* item
         ndarray[object] output = np.empty(n, dtype="O")
 
     if n == 0:
         # kludge, for Series
         return np.empty(0, dtype="f8")
 
-    for i in range(n):
-        val = keys[i]
-        if val in mapping:
-            output[i] = mapping[val]
-        else:
-            output[i] = default
+    if pandas_is_aarch64():
+        for i in range(n):
+            val = keys[i]
+            item = PyDict_GetItemWithError(mapping, val)
+            if item != NULL:
+                output[i] = <object>item
+            else:
+                output[i] = default
+    else:
+        for i in range(n):
+            val = keys[i]
+            if val in mapping:
+                output[i] = mapping[val]
+            else:
+                output[i] = default
 
     return maybe_convert_objects(output)
 
@@ -3458,6 +3620,72 @@ def is_bool_list(obj: list) -> bool:
 
     # Note: we return True for empty list
     return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def bool_list_to_indexer(obj: list) -> tuple:
+    """
+    Validate that ``obj`` is a list of Python bools and compute the positional
+    indexer used for boolean row selection (``df[mask]``).
+
+    This reduces what used to be three separate full passes over the list
+    (validation via ``is_bool_list``, conversion to a bool ndarray and
+    ``nonzero``) to one pass (contiguous ``True`` case) or two passes
+    (non-contiguous case, where a second pass materialises the positions),
+    and additionally detects the common case in which the ``True`` values
+    form a single contiguous run.
+
+    Returns
+    -------
+    tuple
+        ``(False, None)``
+            ``obj`` is not a list of bools; the caller should fall back to
+            the generic indexing path.
+        ``(True, slice(start, stop))``
+            The ``True`` values form a single contiguous run ``[start, stop)``;
+            the caller may use a (copy-on-write) slice instead of a gather.
+        ``(True, ndarray[np.intp])``
+            A 1-D array of the ``True`` positions for the non-contiguous case.
+    """
+    cdef:
+        Py_ssize_t n = len(obj)
+        Py_ssize_t i
+        Py_ssize_t count = 0
+        Py_ssize_t first = -1
+        Py_ssize_t last = -1
+        Py_ssize_t j = 0
+        object item
+        ndarray[intp_t, ndim=1] positions
+
+    if n == 0:
+        # match is_bool_indexer, which returns False for an empty list
+        return (False, None)
+
+    for i in range(n):
+        item = obj[i]
+        if not util.is_bool_object(item):
+            return (False, None)
+        if item:
+            count += 1
+            if first == -1:
+                first = i
+            last = i
+
+    if count == 0:
+        # all False -> empty selection
+        return (True, slice(0, 0))
+    if last - first + 1 == count:
+        # the True values form a single contiguous run
+        return (True, slice(first, last + 1))
+
+    # non-contiguous: materialize the positions in a second pass
+    positions = np.empty(count, dtype=np.intp)
+    for i in range(n):
+        if obj[i]:
+            positions[j] = i
+            j += 1
+    return (True, positions)
 
 
 cpdef ndarray eq_NA_compat(ndarray[object] arr, object key):
@@ -3693,3 +3921,139 @@ def fast_bool_mask_indexer(ndarray data, ndarray mask):
         result = data[mask]
 
     return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def cat_join(object[:] arr, str sep=""):
+    """
+    Join string elements of an object array, skipping PySequence_Fast list
+    creation used by CPython str.join.
+
+    ASCII fast path: if all elements and sep are compact ASCII, uses direct
+    byte memcpy. Falls back to sep.join(list(arr)) for non-ASCII or
+    non-string elements.
+    """
+    cdef:
+        Py_ssize_t n = arr.shape[0]
+        Py_ssize_t sep_len = PyUnicode_GET_LENGTH(sep)
+        Py_ssize_t total_len = 0
+        Py_ssize_t i, offset = 0, item_len
+        object item
+        bint all_ascii = 1
+        object result
+        char* result_data
+        char* item_data
+        char* sep_data
+
+    if n == 0:
+        return ""
+
+    if not PyUnicode_IS_COMPACT_ASCII(sep):
+        all_ascii = 0
+
+    for i in range(n):
+        item = arr[i]
+        if not PyUnicode_Check(item):
+            return sep.join(list(arr))
+        if all_ascii and not PyUnicode_IS_COMPACT_ASCII(item):
+            all_ascii = 0
+        total_len += PyUnicode_GET_LENGTH(item)
+
+    if sep_len > 0 and n > 1:
+        total_len += sep_len * (n - 1)
+
+    if all_ascii:
+        result = PyUnicode_New(total_len, 127)
+        result_data = <char*>PyUnicode_DATA(result)
+        sep_data = <char*>PyUnicode_DATA(sep)
+
+        for i in range(n):
+            item = arr[i]
+            item_len = PyUnicode_GET_LENGTH(item)
+            item_data = <char*>PyUnicode_DATA(item)
+            memcpy(result_data + offset, item_data, item_len)
+            offset += item_len
+
+            if sep_len > 0 and i < n - 1:
+                memcpy(result_data + offset, sep_data, sep_len)
+                offset += sep_len
+
+        return result
+    else:
+        return sep.join(list(arr))
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def cat_join_multi(list list_of_columns, str sep):
+    """
+    Concatenate multiple columns row-wise.
+
+    Replaces cat_core's np.sum(arr, axis=0) for object dtype, which calls
+    Python str.__add__ per element (creating intermediate strings + Python frame
+    overhead). Uses C-level PyUnicode_Concat or ASCII memcpy fast path instead.
+    """
+    cdef:
+        Py_ssize_t ncols = len(list_of_columns)
+        Py_ssize_t n = len(list_of_columns[0])
+        Py_ssize_t sep_len = PyUnicode_GET_LENGTH(sep)
+        Py_ssize_t i, j, total_len, offset, item_len
+        object item, s
+        object[:] result
+        object[:, :] arr
+        bint all_ascii, sep_ascii
+        char* result_data
+        char* item_data
+        char* sep_data
+
+    if n == 0:
+        return np.empty(0, dtype=object)
+
+    result = np.empty(n, dtype=object)
+    arr = np.asarray(list_of_columns, dtype=object)
+
+    sep_ascii = PyUnicode_IS_COMPACT_ASCII(sep)
+    if sep_ascii:
+        sep_data = <char*>PyUnicode_DATA(sep)
+
+    for i in range(n):
+        all_ascii = sep_ascii
+        total_len = 0
+        for j in range(ncols):
+            item = arr[j, i]
+            if not PyUnicode_Check(item):
+                raise TypeError(
+                    f"sequence item {j}: expected str instance, "
+                    f"{type(item).__name__} found"
+                )
+            if all_ascii and not PyUnicode_IS_COMPACT_ASCII(item):
+                all_ascii = 0
+            total_len += PyUnicode_GET_LENGTH(item)
+
+        if sep_len > 0 and ncols > 1:
+            total_len += sep_len * (ncols - 1)
+
+        if all_ascii:
+            s = PyUnicode_New(total_len, 127)
+            result_data = <char*>PyUnicode_DATA(s)
+            offset = 0
+            for j in range(ncols):
+                item = arr[j, i]
+                item_len = PyUnicode_GET_LENGTH(item)
+                item_data = <char*>PyUnicode_DATA(item)
+                memcpy(result_data + offset, item_data, item_len)
+                offset += item_len
+                if sep_len > 0 and j < ncols - 1:
+                    memcpy(result_data + offset, sep_data, sep_len)
+                    offset += sep_len
+            result[i] = s
+        else:
+            s = arr[0, i]
+            for j in range(1, ncols):
+                if sep_len > 0:
+                    s = PyUnicode_Concat(s, sep)
+                s = PyUnicode_Concat(s, arr[j, i])
+            result[i] = s
+
+    return np.asarray(result)

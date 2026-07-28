@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import decimal
 import operator
-from pandas.compat import is_platform_arm
 from typing import (
     TYPE_CHECKING,
     Literal,
@@ -18,6 +17,8 @@ from typing import (
 import warnings
 
 import numpy as np
+
+from pandas.compat import is_platform_arm
 
 _IS_ARM = is_platform_arm()
 
@@ -41,7 +42,6 @@ from pandas._typing import (
 from pandas.util._decorators import set_module
 from pandas.util._exceptions import find_stack_level
 
-from pandas.core import _boostkit_fastpaths
 from pandas.core.dtypes.cast import (
     construct_1d_object_array_from_listlike,
     np_find_common_type,
@@ -85,6 +85,7 @@ from pandas.core.dtypes.missing import (
     na_value_for_dtype,
 )
 
+from pandas.core import boostkit_fastpaths
 from pandas.core.array_algos.take import take_nd
 from pandas.core.construction import (
     array as pd_array,
@@ -508,7 +509,7 @@ def _is_float64_monotonic_runs_candidate(values: np.ndarray) -> bool:
 def _unique_float64_monotonic_runs(
     values: np.ndarray,
 ) -> npt.NDArray[np.float64] | None:
-    if not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
         return None
 
     if not _is_float64_monotonic_runs_candidate(values):
@@ -520,7 +521,7 @@ def _unique_float64_monotonic_runs(
 def _factorize_float64_monotonic_runs(
     values: np.ndarray,
 ) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.float64]] | None:
-    if not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
         return None
 
     if not _is_float64_monotonic_runs_candidate(values):
@@ -569,7 +570,7 @@ def _factorize_int64_dense_range(
     caller can skip ``safe_sort`` for ``sort=True``), or ``None`` to fall
     back to the regular hashtable path.
     """
-    if not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
         return None
 
     if not _is_int64_dense_range_candidate(values):
@@ -592,7 +593,7 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         # Dispatch to Index's unique.
         return values.unique()
 
-    if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS and mask is None:
+    if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS and mask is None:
         result = _unique_float64_monotonic_runs(values)
         if result is not None:
             return result
@@ -630,7 +631,7 @@ _ZERO_RANGE_ISIN_DTYPES = {"float64", "int64", "uint64"}
 def _isin_zero_range(
     comps_array: np.ndarray, values: np.ndarray
 ) -> npt.NDArray[np.bool_] | None:
-    if not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
         return None
 
     if (
@@ -736,7 +737,7 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
     # GH60678
     # Ensure values don't contain <NA>, otherwise it throws exception with np.in1d
 
-    if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+    if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
         result = _isin_zero_range(comps_array, values)
         if result is not None:
             return result
@@ -747,14 +748,14 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
         and comps_array.dtype != object
         and (
             (values.dtype != object or not any(v is NA for v in values))
-            if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
             else not any(v is NA for v in values)
         )
     ):
         # If the values include nan we need to check for nan explicitly
         # since np.nan it not equal to np.nan
         if isna(values).any():
-            if _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+            if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
                 return np.logical_or(
                     np.isin(comps_array, values).ravel(), np.isnan(comps_array)
                 )
@@ -762,14 +763,14 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
             def f(c, v):
                 return np.logical_or(np.isin(c, v).ravel(), np.isnan(c))
 
-        elif _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        elif boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
             return np.isin(comps_array, values).ravel()
         else:
             f = lambda a, b: np.isin(a, b).ravel()
 
     else:
         if (
-            not _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
             or values.dtype != comps_array.dtype
             or not values.dtype.isnative
             or values.dtype.name not in _hashtables
@@ -862,7 +863,7 @@ def factorize_array(
         na_value = iNaT
 
     if (
-        _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+        boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
         and use_na_sentinel
         and na_value is None
         and mask is None
@@ -1082,7 +1083,7 @@ def factorize(
         if (
             sort
             and use_na_sentinel
-            and _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
             and values.dtype == np.dtype(np.int64)
         ):
             result = _factorize_int64_dense_range(values)
@@ -1104,7 +1105,7 @@ def factorize(
 
     if sort and len(uniques) > 0 and not dense_int64_sorted:
         already_sorted = (
-            _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
             and isinstance(uniques, np.ndarray)
             and uniques.dtype == np.float64
             and uniques[0] <= uniques[-1]

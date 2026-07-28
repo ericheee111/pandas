@@ -14,6 +14,7 @@ from pandas.errors import Pandas4Warning
 from pandas import (
     DataFrame,
     DatetimeIndex,
+    Index,
     MultiIndex,
     Series,
     Timedelta,
@@ -53,6 +54,25 @@ def test_constructor(frame_or_series):
 
     with pytest.raises(ValueError, match=msg):
         c(-1)
+
+
+def test_rolling_series_subclass_constructor():
+    class StrictSeries(Series):
+        @property
+        def _constructor(self):
+            return type(self)
+
+        def __init__(self, data=None, *args, **kwargs):
+            if isinstance(data, Series):
+                raise AssertionError("expected ndarray or list input")
+            super().__init__(data, *args, **kwargs)
+
+    ser = StrictSeries([1.0, 2.0, 3.0], name="values")
+
+    result = ser.rolling(2).sum()
+
+    expected = StrictSeries([np.nan, 3.0, 5.0], name="values")
+    tm.assert_series_equal(result, expected)
 
 
 @pytest.mark.parametrize("w", [2.0, "foo", np.array([2])])
@@ -2113,3 +2133,31 @@ class TestMinMax:
             ValueError, match="Start/End ordering requirement is violated at index 3"
         ):
             r.max()
+
+
+@pytest.mark.parametrize("method", ["mean", "std"])
+def test_fixed_window_series_subclass_result(method):
+    ser = tm.SubclassedSeries(
+        [1.0, 2.0, 3.0, 4.0],
+        index=Index(["a", "b", "c", "d"], name="row"),
+        name="values",
+    )
+
+    result = getattr(ser.rolling(2, min_periods=1), method)()
+    expected = getattr(Series(ser).rolling(2, min_periods=1), method)()
+
+    assert isinstance(result, tm.SubclassedSeries)
+    assert result.name == "values"
+    tm.assert_index_equal(result.index, ser.index)
+    tm.assert_numpy_array_equal(result.to_numpy(), expected.to_numpy())
+
+
+@pytest.mark.parametrize("method", ["mean", "std"])
+@pytest.mark.parametrize("nonfinite", [np.nan, np.inf, -np.inf])
+def test_fixed_window_nonfinite_matches_standard_path(method, nonfinite):
+    ser = Series([1.0, nonfinite, 3.0, 4.0], name="values")
+
+    result = getattr(ser.rolling(2, min_periods=1), method)()
+    expected = getattr(ser.rolling(2, min_periods=1, closed="right"), method)()
+
+    tm.assert_series_equal(result, expected)

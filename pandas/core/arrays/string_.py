@@ -20,6 +20,7 @@ from pandas._config import (
 )
 
 from pandas._libs import (
+    hashtable as libhashtable,
     lib,
     missing as libmissing,
     ops as libops,
@@ -701,8 +702,12 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
             dtype = StringDtype()
         values = extract_array(values)
 
-        super().__init__(values, copy=copy)
-        if not isinstance(values, type(self)):
+        normalize_na = isinstance(values, type(self)) and (
+            (values.dtype.na_value is libmissing.NA)
+            != (dtype.na_value is libmissing.NA)
+        )
+        super().__init__(values, copy=copy or normalize_na)
+        if not isinstance(values, type(self)) or normalize_na:
             self._validate(dtype)
         NDArrayBacked.__init__(
             self,
@@ -742,7 +747,7 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
                     "StringArray requires a sequence of strings "
                     "or NaN. Got '{self._ndarray.dtype}' dtype instead."
                 )
-            # TODO validate or force NA/None to NaN
+            self._ndarray[isna(self._ndarray)] = dtype.na_value
 
     def _validate_scalar(self, value):
         # used by NDArrayBackedExtensionIndex.insert
@@ -829,6 +834,26 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
         arr = self._ndarray
 
         return arr, self.dtype.na_value
+
+    def factorize(
+        self,
+        use_na_sentinel: bool = True,
+    ) -> tuple[np.ndarray, ExtensionArray]:
+        if not IS_ARM or not use_na_sentinel:
+            return super().factorize(use_na_sentinel=use_na_sentinel)
+
+        table = libhashtable.StringHashTable(len(self))
+        try:
+            uniques, codes = table.factorize(
+                self._ndarray,
+                na_sentinel=-1,
+                na_value=self.dtype.na_value,
+                ignore_na=True,
+                string_array=True,
+            )
+        except UnicodeEncodeError:
+            return super().factorize(use_na_sentinel=use_na_sentinel)
+        return codes, self._from_factorized(uniques, self)
 
     def _maybe_convert_setitem_value(self, value):
         """Maybe convert value to be pyarrow compatible."""

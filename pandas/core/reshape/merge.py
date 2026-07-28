@@ -429,6 +429,30 @@ def _cross_merge(
             "left_index=True"
         )
 
+    # Architecture isolation: on ARM (aarch64) the cartesian product is
+    # expanded directly with broadcast/tile kernels and a zero-copy block
+    # assembly (see ``_cross_merge_arm``), which avoids the factorize/hash +
+    # Cython join machinery and the synthetic constant-key column. On x86
+    # the original synthetic-column inner-join path below is used unchanged,
+    # so x86 behaviour and performance are not affected. The fast path is
+    # also skipped for ``indicator``/``validate``, which need the full merge
+    # machinery.
+    if IS_ARM and not indicator and validate is None:
+        try:
+            return _cross_merge_arm(left, right, suffixes)
+        except Exception as e:
+            # Safety net: fall back to the synthetic-column path below if the
+            # ARM fast path unexpectedly fails for some input.
+            warnings.warn(
+                f"ARM cross-merge fast path failed, falling back: {e}",
+                RuntimeWarning,
+                stacklevel=find_stack_level(),
+            )
+
+    # Generic path (x86, and ARM fallback for indicator/validate or an
+    # unexpected fast-path failure): synthesise a constant key column on both
+    # sides and inner-merge on it, then drop the synthetic column. For cross
+    # joins ``sort`` is a no-op (the synthetic key has a single unique value).
     cross_col = f"_cross_{uuid.uuid4()}"
     left = left.assign(**{cross_col: 1})
     right = right.assign(**{cross_col: 1})
@@ -451,6 +475,193 @@ def _cross_merge(
     )
     del res[cross_col]
     return res
+
+
+def _cross_merge_arm(
+    left: DataFrame,
+    right: DataFrame,
+    suffixes: Suffixes,
+) -> DataFrame:
+    """ARM-only fast path for a cross (cartesian) merge.
+
+    The row pairing of a cross join is fully determined (every left row is
+    paired with every right row, in order), so each column can be expanded
+    directly -- left columns via a broadcast-store (each value repeated
+    n_right times) and right columns via a block memcpy (tiled n_left times)
+    -- without materialising any take indexer and without the per-element
+    indirect gather of ``reindex_indexer``. The expanded columns are
+    assembled with a zero-copy block manager, bypassing the factorize/hash +
+    Cython join + synthetic constant-column machinery used by the generic
+    path in :func:`_cross_merge`.
+
+    Column types that cannot be expanded directly fall back to a block
+    reindex+concat path (still avoiding the synthetic column). Any
+    unexpected failure propagates to the caller, which falls back to the
+    generic synthetic-column path.
+    """
+    n_left = len(left)
+    n_right = len(right)
+    total = n_left * n_right
+
+    llabels, rlabels = _items_overlap_with_suffix(
+        left.columns, right.columns, suffixes
+    )
+
+    if total == 0:
+        # One side is empty: the cartesian product is empty. Preserve
+        # the suffixed column layout and the per-side dtypes without
+        # mutating the inputs.
+        from pandas import concat  # late import to avoid circular dependency
+
+        left_part = left.iloc[:0].set_axis(llabels, axis=1)
+        right_part = right.iloc[:0].set_axis(rlabels, axis=1)
+        result = concat([left_part, right_part], axis=1)
+        result.index = default_index(0)
+        return result.__finalize__(
+            types.SimpleNamespace(
+                input_objs=[left, right], left=left, right=right
+            ),
+            method="merge",
+        )
+
+    # Direct cartesian expansion via broadcast/tile kernels with a
+    # zero-copy block assembly.
+    #
+    # Applicable to columns backed by a plain ndarray or by an
+    # NDArrayBacked ExtensionArray (StringArray(python), DatetimeArray, ...),
+    # and to pyarrow-backed ExtensionArrays (ArrowStringArray, ...) via
+    # zero-copy chunked views; other ExtensionArrays fall through to the
+    # block reindex+concat path below.
+    # late imports to avoid circular dependencies
+    from pandas._libs.arrays import NDArrayBacked
+    from pandas.core.internals.managers import (
+        create_block_manager_from_column_arrays,
+    )
+
+    def _expand(arr: np.ndarray, n_other: int, *, is_left: bool) -> np.ndarray:
+        if is_left:
+            # each value repeated n_other times consecutively
+            return np.ascontiguousarray(
+                np.broadcast_to(arr[:, None], (len(arr), n_other))
+            ).reshape(-1)
+        # the whole array tiled n_other times
+        return np.tile(arr, n_other)
+
+    def _expand_ea(val, n_other: int, *, is_left: bool):
+        # Expand a single column for the cartesian product. Returns the
+        # expanded column (ndarray or ExtensionArray) or raises if the
+        # column type can't be expanded directly, in which case the caller
+        # falls back to the block reindex+concat path below.
+        if isinstance(val, np.ndarray):
+            return _expand(val, n_other, is_left=is_left)
+        if isinstance(val, NDArrayBacked):
+            # StringArray(python storage), DatetimeArray, ... backed by a
+            # plain ndarray; expand the backing ndarray and re-wrap.
+            return type(val)._simple_new(
+                _expand(val._ndarray, n_other, is_left=is_left), dtype=val.dtype
+            )
+        pa_arr = getattr(val, "_pa_array", None)
+        if pa_arr is not None:
+            # pyarrow-backed ExtensionArray (e.g. ArrowStringArray): the
+            # expansion can be done with ZERO element/data copies by
+            # reusing the underlying Arrow buffers.
+            #  - right (tile): a ChunkedArray of n_other references to the
+            #    same chunk -> the whole array tiled n_other times.
+            #  - left (repeat): a ChunkedArray of one constant chunk per
+            #    source element, each referencing that element's value ->
+            #    each value repeated n_other times.
+            import pyarrow as pa
+
+            if pa_arr.num_chunks != 1:
+                pa_arr = pa_arr.combine_chunks()
+            chunk = pa_arr.chunk(0)
+            if is_left:
+                new_ca = pa.chunked_array(
+                    [pa.repeat(chunk[i], n_other) for i in range(len(chunk))]
+                )
+            else:
+                new_ca = pa.chunked_array([chunk] * n_other)
+            return type(val)._from_sequence(new_ca, dtype=val.dtype)
+        raise ValueError("column type not directly expandable")
+
+    left_vals = [
+        extract_array(left[c], extract_numpy=True) for c in left.columns
+    ]
+    right_vals = [
+        extract_array(right[c], extract_numpy=True) for c in right.columns
+    ]
+
+    arrays: list[AnyArrayLike] = []
+    refs: list = []
+    try:
+        for val in left_vals:
+            arrays.append(_expand_ea(val, n_right, is_left=True))
+            refs.append(None)
+        for val in right_vals:
+            arrays.append(_expand_ea(val, n_left, is_left=False))
+            refs.append(None)
+        mgr = create_block_manager_from_column_arrays(
+            arrays,
+            [llabels.append(rlabels), default_index(total)],
+            False,
+            refs,
+        )
+        result = left._constructor_from_mgr(mgr, axes=mgr.axes)
+        return result.__finalize__(
+            types.SimpleNamespace(
+                input_objs=[left, right], left=left, right=right
+            ),
+            method="merge",
+        )
+    except (ValueError, TypeError):
+        # Any column type that can't be expanded directly (or any issue
+        # in the block assembly) falls back to the block reindex+concat
+        # path below rather than raising.
+        pass
+
+    # Block reindex+concat fallback for ExtensionArray columns that could
+    # not be expanded directly. Computes the take indexers directly with
+    # numpy and reuses the block reindex + concat machinery, still avoiding
+    # the synthetic constant key column.
+    from pandas.core.internals.concat import (  # late import to avoid circular dependency
+        concatenate_managers,
+    )
+
+    result_index = default_index(total)
+
+    # left_indexer[i] = i // n_right  -> each left row repeated n_right
+    # times consecutively; right_indexer[i] = i % n_right -> the right
+    # rows tiled n_left times.
+    left_indexer = np.repeat(
+        np.arange(n_left, dtype=np.intp), n_right
+    )
+    right_indexer = np.tile(
+        np.arange(n_right, dtype=np.intp), n_left
+    )
+
+    left_indexers: dict[int, npt.NDArray[np.intp]] = {}
+    right_indexers: dict[int, npt.NDArray[np.intp]] = {}
+    if not is_range_indexer(left_indexer, n_left):
+        left_indexers[1] = left_indexer
+    if not is_range_indexer(right_indexer, n_right):
+        right_indexers[1] = right_indexer
+
+    result_columns = llabels.append(rlabels)
+    result_axes = [result_columns, result_index]
+
+    result_mgr = concatenate_managers(
+        [(left._mgr, left_indexers), (right._mgr, right_indexers)],
+        result_axes,
+        concat_axis=0,
+        copy=False,
+    )
+    result = left._constructor_from_mgr(result_mgr, axes=result_mgr.axes)
+    return result.__finalize__(
+        types.SimpleNamespace(
+            input_objs=[left, right], left=left, right=right
+        ),
+        method="merge",
+    )
 
 
 def _groupby_and_merge(
@@ -1370,6 +1581,16 @@ class _MergeOperation:
                         is_inner or (left_indexer >= 0).all()
                     ):
                         lvals = take_left.take(left_indexer)
+                    elif IS_ARM and isinstance(take_left, BaseMaskedArray) and is_inner:
+                        # Inner join -> left_indexer has no -1, so we can gather
+                        # the masked EA key as two plain ndarray takes on the
+                        # backing _data/_mask (much faster than the generic
+                        # ExtensionBlock.take_nd path).
+                        lvals = type(take_left)(
+                            take_left._data.take(left_indexer),
+                            take_left._mask.take(left_indexer),
+                            copy=False,
+                        )
                     else:
                         lfill = na_value_for_dtype(take_left.dtype)
                         lvals = algos.take_nd(take_left, left_indexer, fill_value=lfill)
@@ -1377,6 +1598,12 @@ class _MergeOperation:
                 if take_right is None:
                     rvals = result[name]._values
                 elif right_indexer is None:
+                    rvals = take_right
+                elif is_inner:
+                    # Inner join: the right key is never used to build the
+                    # result key column (only lvals is, see the key_col
+                    # construction below). Skip the expensive gather of rvals;
+                    # only its dtype is needed for result_dtype.
                     rvals = take_right
                 else:
                     # TODO: can we pin down take_right's type earlier?
@@ -1941,20 +2168,37 @@ class _MergeOperation:
                 # use the common columns
                 left_cols = self.left.columns
                 right_cols = self.right.columns
-                common_cols = left_cols.intersection(right_cols)
-                if len(common_cols) == 0:
-                    raise MergeError(
-                        "No common columns to perform merge on. "
-                        f"Merge options: left_on={left_on}, "
-                        f"right_on={right_on}, "
-                        f"left_index={self.left_index}, "
-                        f"right_index={self.right_index}"
-                    )
-                if (
-                    not left_cols.join(common_cols, how="inner").is_unique
-                    or not right_cols.join(common_cols, how="inner").is_unique
-                ):
-                    raise MergeError(f"Data columns not unique: {common_cols!r}")
+                if left_cols.is_unique and right_cols.is_unique:
+                    # Fast path: both frames have unique column names -> the
+                    # common columns are a simple isin mask gather on left_cols.
+                    # This avoids the expensive Index.intersection + Index.join
+                    # (which build hash tables for what is a small set op here
+                    # and dominate __init__ time for narrow frames).
+                    common_mask = left_cols.isin(right_cols)
+                    if not common_mask.any():
+                        raise MergeError(
+                            "No common columns to perform merge on. "
+                            f"Merge options: left_on={left_on}, "
+                            f"right_on={right_on}, "
+                            f"left_index={self.left_index}, "
+                            f"right_index={self.right_index}"
+                        )
+                    common_cols = left_cols[common_mask]
+                else:
+                    common_cols = left_cols.intersection(right_cols)
+                    if len(common_cols) == 0:
+                        raise MergeError(
+                            "No common columns to perform merge on. "
+                            f"Merge options: left_on={left_on}, "
+                            f"right_on={right_on}, "
+                            f"left_index={self.left_index}, "
+                            f"right_index={self.right_index}"
+                        )
+                    if (
+                        not left_cols.join(common_cols, how="inner").is_unique
+                        or not right_cols.join(common_cols, how="inner").is_unique
+                    ):
+                        raise MergeError(f"Data columns not unique: {common_cols!r}")
                 left_on = right_on = common_cols
         elif self.on is not None:
             if left_on is not None or right_on is not None:
@@ -2362,6 +2606,13 @@ def get_join_indexers(
         lkey = left_keys[0]
         rkey = right_keys[0]
 
+    # IS_ARM fast path: single-column inner join on numeric keys goes straight
+    # to the hash-join (which is now pre-allocated & nogil-compressed in
+    # hash_inner_join). We intentionally do NOT check is_monotonic_increasing
+    # first: the optimized hash-join is faster than Index.join's two-pointer
+    # for these sizes, and the monotonic scan would tax every non-monotonic
+    # merge. Monotonic+unique inputs that would benefit from the two-pointer
+    # are rare and fall through to the general else-branch below on non-ARM.
     if IS_ARM and (
         how == "inner"
         and not sort
@@ -2438,7 +2689,7 @@ def get_join_indexers_non_unique(
     right: ArrayLike,
     sort: bool = False,
     how: JoinHow = "inner",
-) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp]]:
+) -> tuple[npt.NDArray[np.intp] | None, npt.NDArray[np.intp] | None]:
     """
     Get join indexers for left and right.
 
@@ -2451,10 +2702,12 @@ def get_join_indexers_non_unique(
 
     Returns
     -------
-    np.ndarray[np.intp]
-        Indexer into left.
-    np.ndarray[np.intp]
-        Indexer into right.
+    np.ndarray[np.intp] or None
+        Indexer into left.  ``None`` when the left side is an identity
+        range (left join hash-join fast path).
+    np.ndarray[np.intp] or None
+        Indexer into right.  ``None`` when the right side is an identity
+        range (right join hash-join fast path).
     """
     lkey, rkey, count = _factorize_keys(left, right, sort=sort, how=how)
     if count == -1:
@@ -3076,12 +3329,61 @@ def _left_join_on_index(
     return left_ax, None, right_indexer
 
 
+def _masked_hash_inner_join_fastpath(
+    lk: BaseMaskedArray,
+    rk: BaseMaskedArray,
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], int] | None:
+    """
+    Hash inner-join fast path for masked ExtensionArray numeric keys.
+
+    Skips the full dtype dispatch in ``_factorize_keys`` and avoids the
+    wasteful labels/uniques allocation that ``factorize()`` would do: only
+    the hash table (key -> position) is needed for the probe.
+
+    Returns ``(lidx, ridx, -1)`` if the right keys are safe for the
+    unique-right probe (at most one NA and no duplicate non-NA key, i.e.
+    each left row matches at most one right row), else ``None`` so the
+    caller falls back to the general dispatch.
+
+    Note: ``len(HashTable)`` (see ``HashTable.__len__``) returns
+    ``table.size + (1 if na_position != -1 else 0)``, so it counts the
+    single NA slot (if any) in addition to the non-NA buckets.  The
+    guard ``len(rizer.table) != n_right`` therefore correctly accepts
+    right keys with zero or one NA and no non-NA duplicates.
+    """
+    klass = _factorizers.get(lk.dtype.type)
+    if klass is None:
+        return None
+    # Size the hash table for the right key when it hashes well (int kinds):
+    # a smaller table fits L2 and probes faster. Float kinds cluster more under
+    # khash's hashing, so keep the oversized table (max(l,r)) to avoid collisions.
+    if lk.dtype.kind in "iu":
+        rizer = klass(len(rk), uses_mask=True)
+    else:
+        rizer = klass(max(len(lk), len(rk)), uses_mask=True)
+    # Build the table on the right key (key -> last position) WITHOUT
+    # materialising the labels/uniques arrays that factorize() allocates.
+    rizer.table.map_locations(rk._data, mask=rk._mask)
+    n_right = len(rk._data)
+    # len(table) == n_right  <=>  right has at most one NA and no non-NA dup.
+    # HashTable.__len__ returns table.size + (1 if na_position != -1 else 0),
+    # so the single NA slot (if any) IS counted.  Non-NA dups overwrite the
+    # same bucket, shrinking table.size below the unique non-NA count; multiple
+    # NAs are collapsed into one na_position, so len < n_right in both cases.
+    # In that case each left row matches <= 1 right row, which is the only
+    # situation hash_inner_join is correct for.
+    if len(rizer.table) != n_right:
+        return None
+    ridx, lidx = rizer.hash_inner_join(lk._data, mask=lk._mask)
+    return lidx, ridx, -1
+
+
 def _factorize_keys(
     lk: ArrayLike,
     rk: ArrayLike,
     sort: bool = True,
     how: str | None = None,
-) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.intp], int]:
+) -> tuple[npt.NDArray[np.intp] | None, npt.NDArray[np.intp] | None, int]:
     """
     Encode left and right keys as enumerated types.
 
@@ -3102,10 +3404,14 @@ def _factorize_keys(
 
     Returns
     -------
-    np.ndarray[np.intp]
+    np.ndarray[np.intp] or None
         Left (resp. right if called with `key='right'`) labels, as enumerated type.
-    np.ndarray[np.intp]
+        ``None`` when the left/right hash-join fast path is used and the fact-side
+        indexer is an identity range (``how='left'`` → left is identity,
+        ``how='right'`` → right is identity).
+    np.ndarray[np.intp] or None
         Right (resp. left if called with `key='right'`) labels, as enumerated type.
+        ``None`` for the symmetric case described above.
     int
         Number of unique elements in union of left and right labels. -1 if we used
         a hash-join.
@@ -3135,6 +3441,21 @@ def _factorize_keys(
     (array([0, 1, 2]), array([0, 1]), 3)
     """
     # TODO: if either is a RangeIndex, we can likely factorize more efficiently?
+
+    # Fast path: masked EA numeric keys, inner join, no sort. Skips the full
+    # dtype dispatch below and the labels/uniques allocation that factorize()
+    # would do (only the hash table is needed for the probe).
+    if (
+        how == "inner"
+        and not sort
+        and isinstance(lk, BaseMaskedArray)
+        and isinstance(rk, BaseMaskedArray)
+        and lk.dtype == rk.dtype
+        and lk.dtype.kind in "iuf"
+    ):
+        result = _masked_hash_inner_join_fastpath(lk, rk)
+        if result is not None:
+            return result
 
     if (
         isinstance(lk.dtype, DatetimeTZDtype) and isinstance(rk.dtype, DatetimeTZDtype)
@@ -3274,8 +3595,16 @@ def _factorize_keys(
             lk_data, rk_data = lk, rk  # type: ignore[assignment]
             lk_mask, rk_mask = None, None
 
-        hash_join_available = how == "inner" and not sort and lk.dtype.kind in "iufb"
-        if hash_join_available and lk_mask is None and lk.dtype.kind in "iu" and len(rk_data) > 0:
+        hash_join_available = (
+            how in ("inner", "left", "right") and not sort and lk.dtype.kind in "iufb"
+        )
+        if (
+            hash_join_available
+            and how == "inner"
+            and lk_mask is None
+            and lk.dtype.kind in "iu"
+            and len(rk_data) > 0
+        ):
             rk_min = int(rk_data.min())
             rk_max = int(rk_data.max())
             rk_range = rk_max - rk_min + 1
@@ -3319,15 +3648,38 @@ def _factorize_keys(
             lk_data, rk_data = lk, rk  # type: ignore[assignment]
             lk_mask, rk_mask = None, None
 
-        hash_join_available = how == "inner" and not sort and lk.dtype.kind in "iufb"
+        hash_join_available = (
+            how == "inner" and not sort and lk.dtype.kind in "iufb"
+        )
 
+    # Hash-join fast path (inner/left/right).
+    #
+    # NaN safety invariant: when the dimension side contains NA values,
+    # ``factorize`` with ``ignore_na=True`` skips them, so
+    # ``get_count() < len(labels)`` and the uniqueness check fails →
+    # automatic fallback to the groupsort path.  When only the fact side
+    # has NA, ``HashTable.lookup`` respects the mask and returns
+    # ``na_position`` (which stays -1 after ``factorize``) for NA rows,
+    # so they are correctly treated as unmatched.
     if hash_join_available:
-        rlab = rizer.factorize(rk_data, mask=rk_mask)
-        if rizer.get_count() == len(rlab):
-            ridx, lidx = rizer.hash_inner_join(lk_data, lk_mask)
-            return lidx, ridx, -1
-        else:
+        if how in ("inner", "left"):
+            rlab = rizer.factorize(rk_data, mask=rk_mask)
+            if rizer.get_count() == len(rlab):
+                if how == "inner":
+                    ridx, lidx = rizer.hash_inner_join(lk_data, lk_mask)
+                    return lidx, ridx, -1
+                else:  # how == "left"
+                    ridx = rizer.table.lookup(lk_data, lk_mask)
+                    return None, ridx, -1
+            else:
+                llab = rizer.factorize(lk_data, mask=lk_mask)
+        else:  # how == "right"
             llab = rizer.factorize(lk_data, mask=lk_mask)
+            if rizer.get_count() == len(llab):
+                lidx = rizer.table.lookup(rk_data, rk_mask)
+                return lidx, None, -1
+            else:
+                rlab = rizer.factorize(rk_data, mask=rk_mask)
     else:
         llab = rizer.factorize(lk_data, mask=lk_mask)
         rlab = rizer.factorize(rk_data, mask=rk_mask)

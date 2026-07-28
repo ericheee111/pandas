@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from pandas._libs import algos
+from pandas.compat._arch import IS_ARM
 
 import pandas as pd
 from pandas import (
@@ -288,21 +289,35 @@ class TestDataFrameMissingData:
 
 
 @pytest.mark.parametrize("how", ["any", "all"])
-def test_dropna_float_block_axis_1_uses_nancount(monkeypatch, how):
+@pytest.mark.parametrize("axis", [0, 1])
+def test_dropna_float_block_uses_arch_reduction(monkeypatch, how, axis):
     df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
-    original = algos.nancount_2d
-    called = False
+    original_nanvalidity = algos.nanvalidity_2d
+    original_nancount = algos.nancount_2d
+    nanvalidity_called = False
+    nancount_called = False
 
-    def wrapped(values, op_axis):
-        nonlocal called
-        called = True
-        return original(values, op_axis)
+    def wrapped_nanvalidity(values, op_axis, all_valid):
+        nonlocal nanvalidity_called
+        nanvalidity_called = True
+        return original_nanvalidity(values, op_axis, all_valid)
 
-    monkeypatch.setattr(algos, "nancount_2d", wrapped)
-    result = df.dropna(axis=1, how=how)
-    assert called
+    def wrapped_nancount(values, op_axis):
+        nonlocal nancount_called
+        nancount_called = True
+        return original_nancount(values, op_axis)
+
+    monkeypatch.setattr(algos, "nanvalidity_2d", wrapped_nanvalidity)
+    monkeypatch.setattr(algos, "nancount_2d", wrapped_nancount)
+    result = df.dropna(axis=axis, how=how)
+    if IS_ARM:
+        assert nanvalidity_called
+        assert not nancount_called
+    else:
+        assert not nanvalidity_called
+        assert nancount_called == (axis == 1)
     if how == "any":
-        expected = df.iloc[:, :0]
+        expected = df.iloc[:0] if axis == 0 else df.iloc[:, :0]
     else:
         expected = df
     tm.assert_frame_equal(result, expected)
@@ -324,19 +339,6 @@ def test_dropna_float_block_thresh_uses_nancount(monkeypatch, axis):
     result = df.dropna(axis=axis, thresh=2)
     assert called
     expected = df if axis == 0 else df.iloc[:, [2]]
-    tm.assert_frame_equal(result, expected)
-
-
-@pytest.mark.parametrize("how", ["any", "all"])
-def test_dropna_float_block_axis_0_does_not_use_nancount(monkeypatch, how):
-    df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
-
-    def fail_if_called(*args, **kwargs):
-        pytest.fail("nancount_2d is slower than boolean reduction for axis=0")
-
-    monkeypatch.setattr(algos, "nancount_2d", fail_if_called)
-    result = df.dropna(axis=0, how=how)
-    expected = df.iloc[:0] if how == "any" else df
     tm.assert_frame_equal(result, expected)
 
 

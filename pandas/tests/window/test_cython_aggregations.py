@@ -112,3 +112,19 @@ def test_rolling_aggregation_with_unused_elements(rolling_aggregation):
     )
     assert np.isfinite(expected.values).all(), "Not all expected values are finite"
     tm.assert_equal(expected, result)
+
+
+@pytest.mark.parametrize(
+    "values, expected",
+    [
+        ([], True),
+        ([0.0, -1.0, np.finfo(np.float64).max], True),
+        ([0.0, np.nan], False),
+        ([0.0, np.inf], False),
+        ([0.0, -np.inf], False),
+    ],
+)
+def test_roll_all_finite(values, expected):
+    result = window_aggregations.roll_all_finite(np.array(values, dtype=np.float64))
+
+    assert result is expected

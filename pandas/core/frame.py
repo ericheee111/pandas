@@ -49,7 +49,10 @@ from pandas._libs import (
 )
 from pandas.compat._arch import IS_ARM
 from pandas._libs.hashtable import duplicated
-from pandas._libs.lib import is_range_indexer
+from pandas._libs.lib import (
+    bool_list_to_indexer,
+    is_range_indexer,
+)
 from pandas.compat import CHAINED_WARNING_DISABLED
 from pandas.compat._constants import (
     REF_COUNT,
@@ -4366,6 +4369,23 @@ class DataFrame(NDFrame, OpsMixin):
             return self.where(key)
 
         # Do we have a (boolean) 1d indexer?
+        if IS_ARM and isinstance(key, list):
+            # ARM-only fast path for a python list of bools: validate and
+            # compute the positional indexer in a single pass (fusing the
+            # validation, conversion to a bool ndarray and ``nonzero``),
+            # detecting the common case where the True values are contiguous.
+            # On non-ARM (x86) we fall through to the generic bool-indexer
+            # path below, preserving the original behavior.
+            # GH#42461: Cython rejects list subclasses (e.g. FrozenList);
+            # convert to a plain list before calling bool_list_to_indexer.
+            valid, indexer = bool_list_to_indexer(list(key))
+            if valid:
+                if len(key) != len(self.index):
+                    raise ValueError(
+                        f"Item wrong length {len(key)} instead of {len(self.index)}."
+                    )
+                return self._getitem_bool_indexer(indexer)
+
         if com.is_bool_indexer(key):
             return self._getitem_bool_array(key)
 
@@ -4430,6 +4450,22 @@ class DataFrame(NDFrame, OpsMixin):
 
         indexer = key.nonzero()[0]
         return self.take(indexer, axis=0)
+
+    def _getitem_bool_indexer(self, indexer):
+        # `indexer` is produced by ``bool_list_to_indexer`` and is either:
+        #   * a slice -> the True values form a single contiguous run, so we
+        #     can select via iloc and obtain a (copy-on-write) view instead of
+        #     gathering rows one-by-one;
+        #   * an intp ndarray -> the True positions, guaranteed to lie in
+        #     ``[0, len(self))`` because the boolean list was validated to have
+        #     the same length as the index, so we can skip the bounds check.
+        # Precondition: caller must ensure indexer values are in
+        # ``[0, len(self.index))``. The ARM fast path in ``__getitem__``
+        # guarantees this by checking ``len(key) == len(self.index)`` before
+        # calling this method.
+        if isinstance(indexer, slice):
+            return self.iloc[indexer]
+        return self.take(indexer, axis=0, verify=False)
 
     def _getitem_multilevel(self, key):
         # self.columns is a MultiIndex
@@ -7894,30 +7930,55 @@ class DataFrame(NDFrame, OpsMixin):
                 raise KeyError(np.array(subset)[check].tolist())
             agg_obj = self.take(indices, axis=agg_axis)
 
-        nancount = (
-            agg_obj._nancount_float_block(agg_axis)
-            if subset is None and agg_axis == 0
-            else None
-        )
+        if IS_ARM:
+            float_values = (
+                agg_obj._float_block_values()
+                if subset is None
+                else None
+            )
+            nancount = None
+        else:
+            float_values = None
+            nancount = (
+                agg_obj._nancount_float_block(agg_axis)
+                if subset is None and agg_axis == 0
+                else None
+            )
         if thresh is not lib.no_default:
+            if IS_ARM:
+                nancount = agg_obj._nancount_float_block(agg_axis)
             count = (
                 agg_obj.count(axis=agg_axis) if nancount is None else nancount
             )
             mask = count >= thresh
         elif how == "any":
             # faster equivalent to 'agg_obj.count(agg_axis) == self.shape[agg_axis]'
-            mask = (
-                notna(agg_obj).all(axis=agg_axis, bool_only=False)
-                if nancount is None
-                else nancount == agg_obj.shape[agg_axis]
-            )
+            if IS_ARM:
+                mask = (
+                    notna(agg_obj).all(axis=agg_axis, bool_only=False)
+                    if float_values is None
+                    else libalgos.nanvalidity_2d(float_values, agg_axis, True)
+                )
+            else:
+                mask = (
+                    notna(agg_obj).all(axis=agg_axis, bool_only=False)
+                    if nancount is None
+                    else nancount == agg_obj.shape[agg_axis]
+                )
         elif how == "all":
             # faster equivalent to 'agg_obj.count(agg_axis) > 0'
-            mask = (
-                notna(agg_obj).any(axis=agg_axis, bool_only=False)
-                if nancount is None
-                else nancount > 0
-            )
+            if IS_ARM:
+                mask = (
+                    notna(agg_obj).any(axis=agg_axis, bool_only=False)
+                    if float_values is None
+                    else libalgos.nanvalidity_2d(float_values, agg_axis, False)
+                )
+            else:
+                mask = (
+                    notna(agg_obj).any(axis=agg_axis, bool_only=False)
+                    if nancount is None
+                    else nancount > 0
+                )
         else:
             raise ValueError(f"invalid how option: {how}")
 
@@ -13610,7 +13671,7 @@ class DataFrame(NDFrame, OpsMixin):
     # ----------------------------------------------------------------------
     # ndarray-like stats methods
 
-    def _nancount_float_block(self, axis: AxisInt) -> np.ndarray | None:
+    def _float_block_values(self) -> np.ndarray | None:
         """Count non-NA values in a homogeneous NumPy float block."""
         if len(self._mgr.blocks) != 1:
             return None
@@ -13621,6 +13682,13 @@ class DataFrame(NDFrame, OpsMixin):
             or values.ndim != 2
             or values.dtype not in (np.dtype("float32"), np.dtype("float64"))
         ):
+            return None
+
+        return values
+
+    def _nancount_float_block(self, axis: AxisInt) -> np.ndarray | None:
+        values = self._float_block_values()
+        if values is None:
             return None
 
         return libalgos.nancount_2d(values, axis)

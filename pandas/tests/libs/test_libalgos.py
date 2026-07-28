@@ -56,6 +56,19 @@ def test_groupsort_indexer():
     tm.assert_numpy_array_equal(result, expected)
 
 
+def test_count_categorical_codes():
+    for dtype in ["int8", "int16", "int32", "int64"]:
+        codes = np.array([0, 1, 1, -1, 2], dtype=dtype)
+
+        result = libalgos.count_categorical_codes(codes, 4, dropna=True)
+        expected = np.array([1, 2, 1, 0], dtype=np.int64)
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = libalgos.count_categorical_codes(codes, 4, dropna=False)
+        expected = np.array([1, 2, 1, 0, 1], dtype=np.int64)
+        tm.assert_numpy_array_equal(result, expected)
+
+
 class TestPadBackfill:
     def test_backfill(self):
         old = np.array([1, 5, 10], dtype=np.int64)
@@ -161,8 +174,6 @@ class TestInfinity:
         assert not NegInf <= np.nan
         assert not NegInf == np.nan
         assert NegInf != np.nan
-
-
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("axis", [0, 1])
 def test_nancount_2d(dtype, axis):
@@ -170,6 +181,20 @@ def test_nancount_2d(dtype, axis):
     result = libalgos.nancount_2d(values, axis)
     expected = np.count_nonzero(~np.isnan(values), axis=1 if axis == 0 else 0)
     tm.assert_numpy_array_equal(result, expected.astype(np.intp))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("all_valid", [False, True])
+def test_nanvalidity_2d(dtype, axis, all_valid):
+    values = np.array(
+        [[1.0, np.nan, 3.0], [np.nan, np.nan, 4.0]], dtype=dtype
+    )
+    result = libalgos.nanvalidity_2d(values, axis, all_valid)
+    valid = ~np.isnan(values)
+    op_axis = 1 if axis == 0 else 0
+    expected = valid.all(op_axis) if all_valid else valid.any(op_axis)
+    tm.assert_numpy_array_equal(result, expected)
 
 
 def test_nancount_2d_rejects_bad_axis():
@@ -182,3 +207,16 @@ def test_nancount_2d_rejects_integer_dtype():
     values = np.ones((2, 2), dtype=np.int64)
     with pytest.raises(TypeError):
         libalgos.nancount_2d(values, 0)
+
+
+def test_putmask_masked_float64():
+    values = np.array([1.0, 2.0, 3.0])
+    validity = np.array([False, True, True])
+    mask = np.array([False, True, False])
+
+    libalgos.putmask_masked_float64(values, validity, mask, 4.0)
+
+    expected_values = np.array([1.0, 4.0, 3.0])
+    expected_validity = np.array([False, False, True])
+    tm.assert_numpy_array_equal(values, expected_values)
+    tm.assert_numpy_array_equal(validity, expected_validity)

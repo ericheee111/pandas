@@ -31,6 +31,11 @@ def groupsort_indexer(
     np.ndarray,  # ndarray[int64_t, ndim=1]
     np.ndarray,  # ndarray[int64_t, ndim=1]
 ]: ...
+def count_categorical_codes(
+    codes: np.ndarray,
+    ncategories: int,
+    dropna: bool,
+) -> npt.NDArray[np.int64]: ...
 def kth_smallest(
     arr: np.ndarray,  # numeric[:]
     k: int,
@@ -39,6 +44,25 @@ def kth_smallest(
 def nancount_2d(
     values: np.ndarray, axis: int
 ) -> npt.NDArray[np.intp]: ...
+
+def putmask_masked_float64(
+    values: npt.NDArray[np.float64],
+    validity: npt.NDArray[np.bool_],
+    mask: npt.NDArray[np.bool_],
+    value: float,
+) -> None: ...
+
+def factorize_bool_masked(
+    values: npt.NDArray[np.bool_],
+    mask: npt.NDArray[np.bool_],
+    use_na_sentinel: bool,
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.bool_], npt.NDArray[np.bool_]]: ...
+
+def nanvalidity_2d(
+    values: np.ndarray,
+    axis: int,
+    all_valid: bool,
+) -> npt.NDArray[np.bool_]: ...
 
 # ----------------------------------------------------------------------
 # Pairwise correlation/covariance

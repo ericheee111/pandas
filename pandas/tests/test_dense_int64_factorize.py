@@ -30,9 +30,9 @@ from pandas.core import algorithms
 
 def _set_fastpaths(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
     """Toggle both the Python-level and Cython-level BoostKit gate."""
-    fastpaths = importlib.import_module("pandas.core._boostkit_fastpaths")
+    fastpaths = importlib.import_module("pandas.core.boostkit_fastpaths")
     monkeypatch.setattr(fastpaths, "USE_BOOSTKIT_FASTPATHS", enabled)
-    ht._set_use_boostkit_fastpaths(enabled)
+    ht.set_use_boostkit_fastpaths(enabled)
 
 
 @pytest.fixture(autouse=True)
@@ -48,10 +48,10 @@ def _restore_fastpath_state(monkeypatch: pytest.MonkeyPatch):
     suite had intentionally disabled it).  Mirrors the fixture in
     ``pandas/tests/test_boostkit_fastpaths.py``.
     """
-    fastpaths = importlib.import_module("pandas.core._boostkit_fastpaths")
+    fastpaths = importlib.import_module("pandas.core.boostkit_fastpaths")
     original = fastpaths.USE_BOOSTKIT_FASTPATHS
     yield
-    ht._set_use_boostkit_fastpaths(original)
+    ht.set_use_boostkit_fastpaths(original)
 
 
 def _make_dense_int64(n: int, ngroups: int, start: int = 0) -> np.ndarray:

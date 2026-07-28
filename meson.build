@@ -23,6 +23,7 @@ if get_option('pandas_cython_coverage')
     add_project_arguments(
         [
             '-DCYTHON_TRACE=1',
+            '-DCYTHON_TRACE_NOGIL=1',
             '-DCYTHON_USE_SYS_MONITORING=0',
         ],
         language: ['c', 'cpp'],

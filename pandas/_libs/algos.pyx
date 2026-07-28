@@ -90,6 +90,101 @@ def nancount_2d(const nancount_float_t[:, :] values, int axis):
     return out
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def putmask_masked_float64(
+    float64_t[:] values,
+    cnp.npy_bool[:] validity,
+    const cnp.npy_bool[:] mask,
+    float64_t value,
+):
+    cdef Py_ssize_t i
+    for i in range(values.shape[0]):
+        if mask[i]:
+            values[i] = value
+            validity[i] = False
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def factorize_bool_masked(
+    const cnp.npy_bool[:] values,
+    const cnp.npy_bool[:] mask,
+    bint use_na_sentinel,
+):
+    cdef:
+        Py_ssize_t i, n = values.shape[0]
+        int false_code = -1
+        int true_code = -1
+        int na_code = -1
+        int nuniques = 0
+        ndarray[intp_t] codes = np.empty(n, dtype=np.intp)
+        ndarray[cnp.npy_bool] uniques = np.empty(3, dtype=np.bool_)
+        ndarray[cnp.npy_bool] uniques_mask = np.zeros(3, dtype=np.bool_)
+
+    for i in range(n):
+        if mask[i]:
+            if use_na_sentinel:
+                codes[i] = -1
+            else:
+                if na_code == -1:
+                    na_code = nuniques
+                    uniques[nuniques] = False
+                    uniques_mask[nuniques] = True
+                    nuniques += 1
+                codes[i] = na_code
+        elif values[i]:
+            if true_code == -1:
+                true_code = nuniques
+                uniques[nuniques] = True
+                nuniques += 1
+            codes[i] = true_code
+        else:
+            if false_code == -1:
+                false_code = nuniques
+                uniques[nuniques] = False
+                nuniques += 1
+            codes[i] = false_code
+
+    return (
+        codes,
+        uniques[:nuniques],
+        uniques_mask[:nuniques],
+    )
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def nanvalidity_2d(
+    const nancount_float_t[:, :] values, int axis, bint all_valid
+):
+    """Reduce the non-NA mask without materializing it."""
+    cdef:
+        Py_ssize_t i, j
+        ndarray[cnp.npy_bool] out
+
+    if axis == 0:
+        out = np.empty(values.shape[0], dtype=np.bool_)
+        for i in range(values.shape[0]):
+            out[i] = all_valid
+            for j in range(values.shape[1]):
+                if (values[i, j] == values[i, j]) != all_valid:
+                    out[i] = not all_valid
+                    break
+    elif axis == 1:
+        out = np.empty(values.shape[1], dtype=np.bool_)
+        for j in range(values.shape[1]):
+            out[j] = all_valid
+            for i in range(values.shape[0]):
+                if (values[i, j] == values[i, j]) != all_valid:
+                    out[j] = not all_valid
+                    break
+    else:
+        raise ValueError("axis must be 0 or 1")
+
+    return out
+
+
 tiebreakers = {
     "average": TIEBREAK_AVERAGE,
     "min": TIEBREAK_MIN,
@@ -97,6 +192,13 @@ tiebreakers = {
     "first": TIEBREAK_FIRST,
     "dense": TIEBREAK_DENSE,
 }
+
+
+ctypedef fused categorical_code_t:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
 
 
 class Infinity:
@@ -279,6 +381,62 @@ def groupsort_indexer(const intp_t[:] index, Py_ssize_t ngroups):
             where[label] += 1
 
     return indexer.base, counts.base
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def count_categorical_codes(
+    const categorical_code_t[:] codes,
+    Py_ssize_t ncategories,
+    bint dropna,
+):
+    cdef:
+        Py_ssize_t i, code, limit
+        Py_ssize_t n = len(codes)
+        Py_ssize_t nslots = ncategories if dropna else ncategories + 1
+        int64_t[::1] counts = np.zeros(nslots, dtype=np.int64)
+        int64_t[::1] counts1 = np.zeros(nslots, dtype=np.int64)
+        int64_t[::1] counts2 = np.zeros(nslots, dtype=np.int64)
+        int64_t[::1] counts3 = np.zeros(nslots, dtype=np.int64)
+
+    with nogil:
+        limit = n - n % 4
+        for i in range(0, limit, 4):
+            code = codes[i]
+            if code >= 0:
+                counts[code] += 1
+            elif not dropna:
+                counts[ncategories] += 1
+
+            code = codes[i + 1]
+            if code >= 0:
+                counts1[code] += 1
+            elif not dropna:
+                counts1[ncategories] += 1
+
+            code = codes[i + 2]
+            if code >= 0:
+                counts2[code] += 1
+            elif not dropna:
+                counts2[ncategories] += 1
+
+            code = codes[i + 3]
+            if code >= 0:
+                counts3[code] += 1
+            elif not dropna:
+                counts3[ncategories] += 1
+
+        for i in range(limit, n):
+            code = codes[i]
+            if code >= 0:
+                counts[code] += 1
+            elif not dropna:
+                counts[ncategories] += 1
+
+        for i in range(nslots):
+            counts[i] += counts1[i] + counts2[i] + counts3[i]
+
+    return counts.base
 
 
 cdef Py_ssize_t swap(numeric_t *a, numeric_t *b) noexcept nogil:

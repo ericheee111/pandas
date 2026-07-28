@@ -60,7 +60,7 @@ from pandas.core.dtypes.generic import (
 )
 from pandas.core.dtypes.missing import notna
 
-from pandas.core import _boostkit_fastpaths
+from pandas.core import boostkit_fastpaths
 from pandas.core._numba import executor
 from pandas.core.algorithms import factorize
 from pandas.core.apply import (
@@ -83,6 +83,7 @@ from pandas.core.indexes.api import (
     PeriodIndex,
     TimedeltaIndex,
 )
+from pandas.core.internals import SingleBlockManager
 from pandas.core.reshape.concat import concat
 from pandas.core.util.numba_ import (
     get_jit_arguments,
@@ -354,7 +355,7 @@ class BaseWindow(SelectionMixin):
             result = obj.iloc[slice(s, e)]
             yield result
 
-    def _prep_values(self, values: ArrayLike) -> np.ndarray:
+    def _prep_values(self, values: ArrayLike, convert_inf: bool = True) -> np.ndarray:
         """Convert input to numpy arrays for Cython routines"""
         if needs_i8_conversion(values.dtype):
             raise NotImplementedError(
@@ -371,13 +372,14 @@ class BaseWindow(SelectionMixin):
         except (ValueError, TypeError) as err:
             raise TypeError(f"cannot handle this type -> {values.dtype}") from err
 
-        # Convert inf to nan for C funcs
-        if IS_ARM and np.issubdtype(values.dtype, np.integer):
-            pass
-        else:
-            inf = np.isinf(values)
-            if inf.any():
-                values = np.where(inf, np.nan, values)
+        if convert_inf:
+            # Convert inf to nan for C funcs
+            if IS_ARM and np.issubdtype(values.dtype, np.integer):
+                pass
+            else:
+                inf = np.isinf(values)
+                if inf.any():
+                    values = np.where(inf, np.nan, values)
 
         return values
 
@@ -440,7 +442,11 @@ class BaseWindow(SelectionMixin):
         return FixedWindowIndexer(window_size=self.window)
 
     def _apply_series(
-        self, homogeneous_func: Callable[..., ArrayLike], name: str | None = None
+        self,
+        homogeneous_func: Callable[..., ArrayLike],
+        name: str | None = None,
+        convert_inf: bool = True,
+        use_manager_constructor: bool = False,
     ) -> Series:
         """
         Series version of _apply_columnwise
@@ -451,12 +457,17 @@ class BaseWindow(SelectionMixin):
             # GH 12541: Special case for count where we support date-like types
             obj = notna(obj).astype(int)
         try:
-            values = self._prep_values(obj._values)
+            values = self._prep_values(obj._values, convert_inf=convert_inf)
         except (TypeError, NotImplementedError) as err:
             raise DataError("No numeric types to aggregate") from err
 
         result = homogeneous_func(values)
         index = self._slice_axis_for_step(obj.index, result)
+        if use_manager_constructor:
+            mgr = SingleBlockManager.from_array(result, index)
+            out = obj._constructor_from_mgr(mgr, axes=mgr.axes)
+            out._name = obj.name
+            return out
         return obj._constructor(result, index=index, name=obj.name)
 
     def _apply_columnwise(
@@ -464,6 +475,8 @@ class BaseWindow(SelectionMixin):
         homogeneous_func: Callable[..., ArrayLike],
         name: str,
         numeric_only: bool = False,
+        convert_inf: bool = True,
+        use_manager_constructor: bool = False,
     ) -> DataFrame | Series:
         """
         Apply the given function to the DataFrame broken down into homogeneous
@@ -471,7 +484,12 @@ class BaseWindow(SelectionMixin):
         """
         self._validate_numeric_only(name, numeric_only)
         if self._selected_obj.ndim == 1:
-            return self._apply_series(homogeneous_func, name)
+            return self._apply_series(
+                homogeneous_func,
+                name,
+                convert_inf=convert_inf,
+                use_manager_constructor=use_manager_constructor,
+            )
 
         obj = self._create_data(self._selected_obj, numeric_only)
         if name == "count":
@@ -485,7 +503,7 @@ class BaseWindow(SelectionMixin):
             # GH#42736 operate column-wise instead of block-wise
             # As of 2.0, hfunc will raise for nuisance columns
             try:
-                arr = self._prep_values(arr)
+                arr = self._prep_values(arr, convert_inf=convert_inf)
             except (TypeError, NotImplementedError) as err:
                 raise DataError(
                     f"Cannot aggregate non-numeric type: {arr.dtype}"
@@ -619,19 +637,20 @@ class BaseWindow(SelectionMixin):
                             return window_aggregations.roll_std_fixed_no_nan_int64(
                                 int_values, win_size, minp, ddof
                             )
-                else:
-                    has_nan = np.isnan(values).any()
-                    if not has_nan:
-                        with np.errstate(all="ignore"):
-                            if name == "mean":
-                                return window_aggregations.roll_mean_fixed_no_nan(
-                                    values, win_size, minp
-                                )
-                            else:
-                                ddof = kwargs.get("ddof", 1)
-                                return window_aggregations.roll_std_fixed_no_nan(
-                                    values, win_size, minp, ddof
-                                )
+                elif window_aggregations.roll_all_finite(values):
+                    with np.errstate(all="ignore"):
+                        if name == "mean":
+                            return window_aggregations.roll_mean_fixed_no_nan(
+                                values, win_size, minp
+                            )
+                        ddof = kwargs.get("ddof", 1)
+                        return window_aggregations.roll_std_fixed_no_nan(
+                            values, win_size, minp, ddof
+                        )
+
+                inf = np.isinf(values)
+                if inf.any():
+                    values = np.where(inf, np.nan, values)
 
             def calc(x):
                 start, end = window_indexer.get_window_bounds(
@@ -651,7 +670,13 @@ class BaseWindow(SelectionMixin):
             return result
 
         if self.method == "single":
-            return self._apply_columnwise(homogeneous_func, name, numeric_only)
+            return self._apply_columnwise(
+                homogeneous_func,
+                name,
+                numeric_only,
+                convert_inf=not use_fast_path,
+                use_manager_constructor=use_fast_path
+            )
         else:
             return self._apply_tablewise(homogeneous_func, name, numeric_only)
 
@@ -1637,7 +1662,7 @@ class RollingAndExpandingMixin(BaseWindow):
         from pandas import Series
 
         use_builtin_sum_fast_path = (
-            _boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
             and raw is True
             and function is _ORIGINAL_BUILTIN_SUM
             and builtins.sum is _ORIGINAL_BUILTIN_SUM

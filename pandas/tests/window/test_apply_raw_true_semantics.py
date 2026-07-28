@@ -11,7 +11,7 @@ from pandas import (
     Series,
 )
 import pandas._testing as tm
-from pandas.core import _boostkit_fastpaths
+from pandas.core import boostkit_fastpaths
 from pandas._libs.window import aggregations as window_aggregations
 
 
@@ -49,7 +49,7 @@ def _apply_builtin_sum_and_oracle(
 
 @pytest.fixture
 def enable_boostkit_fastpaths(monkeypatch):
-    monkeypatch.setattr(_boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", True)
+    monkeypatch.setattr(boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", True)
 
 
 @pytest.mark.usefixtures("enable_boostkit_fastpaths")
@@ -483,7 +483,7 @@ def test_raw_builtin_sum_active_hook_fallback(
 
 
 def test_raw_builtin_sum_disabled_boostkit_fallback(monkeypatch):
-    monkeypatch.setattr(_boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", False)
+    monkeypatch.setattr(boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", False)
     monkeypatch.setattr(
         window_aggregations,
         "roll_apply_builtin_sum",
