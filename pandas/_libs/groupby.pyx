@@ -77,6 +77,25 @@ cdef enum InterpolationEnumType:
     INTERPOLATION_MIDPOINT
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def group_nth_zero_mask(const intp_t[::1] labels, Py_ssize_t ngroups):
+    """Return a mask selecting the first non-null row from each group."""
+    cdef:
+        Py_ssize_t i, lab, n = len(labels)
+        uint8_t[::1] seen = np.zeros(ngroups, dtype=np.uint8)
+        uint8_t[::1] result = np.zeros(n, dtype=np.uint8)
+
+    with nogil:
+        for i in range(n):
+            lab = labels[i]
+            if lab >= 0 and seen[lab] == 0:
+                seen[lab] = 1
+                result[i] = 1
+
+    return result.base.view(np.bool_)
+
+
 cdef float64_t median_linear_mask(
     float64_t* a,
     int n,

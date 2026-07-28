@@ -11,6 +11,8 @@ from pandas import (
     isna,
 )
 import pandas._testing as tm
+from pandas.core.groupby import indexing
+from pandas.core.groupby.groupby import GroupBy
 
 
 def test_first_last_nth(df):
@@ -215,6 +217,22 @@ def test_nth():
 
     tm.assert_frame_equal(gb.nth(7, dropna="any"), df.iloc[:0])
     tm.assert_frame_equal(gb.nth(2, dropna="any"), df.iloc[:0])
+
+
+def test_nth_zero_arm_does_not_compute_cumcount(monkeypatch):
+    df = DataFrame({"key": [1, 1, 2, np.nan], "value": [10, 11, 12, 13]})
+    grouped = df.groupby("key")
+
+    monkeypatch.setattr(indexing, "IS_ARM", True, raising=False)
+
+    def fail_cumcount(self, ascending=True):
+        raise AssertionError("_cumcount_array should not be called")
+
+    monkeypatch.setattr(GroupBy, "_cumcount_array", fail_cumcount)
+
+    result = grouped.nth(0)
+    expected = df.iloc[[0, 2]]
+    tm.assert_frame_equal(result, expected)
 
 
 def test_nth2():

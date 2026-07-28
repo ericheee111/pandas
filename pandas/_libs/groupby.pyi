@@ -4,6 +4,10 @@ import numpy as np
 
 from pandas._typing import npt
 
+def group_nth_zero_mask(
+    labels: npt.NDArray[np.intp],
+    ngroups: int,
+) -> npt.NDArray[np.bool_]: ...
 def group_median_float64(
     out: np.ndarray,  # ndarray[float64_t, ndim=2]
     counts: npt.NDArray[np.int64],
