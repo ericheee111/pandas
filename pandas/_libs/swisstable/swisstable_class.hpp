@@ -55,6 +55,9 @@ using ctrl_t = int8_t;
 #define CTRL_DELETED ((ctrl_t)0xFE)  // -2: Deleted slot (tombstone)
 // 0x00-0x7F: Occupied slot, stores swiss_h2(hash)
 
+constexpr size_t PREFETCH_DISTANCE = 16;
+constexpr size_t PREFETCH_MIN_CAPACITY = 1 << 16;
+
 // Extract H2 (top 7 bits) from hash
 // Returns ctrl_t in range 0x00-0x7F (always non-negative)
 // Using top bits for H2 while H1 (index) uses low bits reduces correlation
@@ -642,6 +645,58 @@ public:
         }
     }
 
+    inline size_t find_with_hash(const Key &key, uint64_t hash) const noexcept
+    {
+        if (capacity_ == 0) {
+            return capacity_;
+        }
+
+        ctrl_t h2 = swiss_h2(hash);
+        size_t index = hash & mask_;
+        ctrl_t ctrl = ctrl_[index];
+
+        // Fast path: first slot is empty (key not in table) - COMMON in sparse tables
+        if (ctrl == CTRL_EMPTY) {
+            return capacity_;
+        }
+
+        // Fast path: first slot matches - COMMON in cache-friendly access
+        if (ctrl == h2 && EqualFn::equal(keys_[index], key)) {
+            return index;
+        }
+
+        // SIMD path: scan groups
+        ProbeSeq seq(hash, mask_);
+        bool first_group = true;
+
+        while (true) {
+            size_t offset = seq.offset;
+            Group g = Group::load(&ctrl_[offset]);
+            uint16_t match_mask = g.match(h2);
+
+            // Skip already-checked first slot (index) on first group
+            if (first_group) {
+                match_mask &= ~1;
+                first_group = false;
+            }
+
+            while (match_mask != 0) {
+                int bit = countr_zero(match_mask);
+                size_t idx = (offset + bit) & mask_;
+                if (EqualFn::equal(keys_[idx], key)) {
+                    return idx;
+                }
+                match_mask &= match_mask - 1;
+            }
+
+            if (g.match_any_empty() != 0) {
+                return capacity_;
+            }
+
+            seq.next();
+        }
+    }
+
     // =========================================================================
     // Insert or update key-value pair
     // Returns: 0 if key already existed (updated), 1 if newly inserted, -1 on error
@@ -732,6 +787,65 @@ public:
         }
 
         uint64_t hash = HashFn::hash(key);
+        ctrl_t h2 = swiss_h2(hash);
+        size_t index = hash & mask_;
+        ctrl_t c0 = ctrl_[index];
+
+        // Fast path: check if first slot is empty
+        if (c0 == CTRL_EMPTY) {
+            set_ctrl(index, h2);
+            keys_[index] = key;
+            size_++;
+            growth_left_--;
+            return 1;
+        }
+
+        // Fast path: check if first slot has matching key
+        if (c0 == h2 && EqualFn::equal(keys_[index], key)) {
+            return 0;
+        }
+
+        // Slow path: SIMD group operations
+        ProbeSeq seq(hash, mask_);
+        bool first_group = true;
+
+        while (true) {
+            size_t offset = seq.offset;
+            Group g = Group::load(&ctrl_[offset]);
+            uint16_t match_mask = g.match(h2);
+
+            // Skip already-checked first slot (index) on first group
+            if (first_group) {
+                match_mask &= ~1;
+                first_group = false;
+            }
+
+            while (match_mask != 0) {
+                int bit = countr_zero(match_mask);
+                size_t idx = (offset + bit) & mask_;
+                if (EqualFn::equal(keys_[idx], key)) {
+                    return 0;
+                }
+                match_mask &= match_mask - 1;
+            }
+
+            uint16_t empty_mask = g.match_empty();
+            if (empty_mask != 0) {
+                int bit = countr_zero(empty_mask);
+                size_t idx = (offset + bit) & mask_;
+                set_ctrl(idx, h2);
+                keys_[idx] = key;
+                size_++;
+                growth_left_--;
+                return 1;
+            }
+
+            seq.next();
+        }
+    }
+
+    inline int insert_key_only_with_hash(const Key &key, uint64_t hash) noexcept
+    {
         ctrl_t h2 = swiss_h2(hash);
         size_t index = hash & mask_;
         ctrl_t c0 = ctrl_[index];
@@ -1269,15 +1383,55 @@ public:
     // ------------------------------------------------------------------------
     int build_set(const Key *keys, size_t n) noexcept
     {
-        // Reserve capacity upfront
         if (!reserve(n)) {
             return -1;
         }
+
+#if defined(__GNUC__) || defined(__clang__)
+        if constexpr (std::is_integral_v<Key>) {
+            for (size_t i = 0; i < n; i++) {
+                if (insert_key_only(keys[i]) == -1) {
+                    return -1;
+                }
+            }
+            return 0;
+        }
+
+        if (capacity_ < PREFETCH_MIN_CAPACITY) {
+            for (size_t i = 0; i < n; i++) {
+                if (insert_key_only(keys[i]) == -1) {
+                    return -1;
+                }
+            }
+            return 0;
+        }
+
+        uint64_t hashes[PREFETCH_DISTANCE];
+        size_t prefetched = n < PREFETCH_DISTANCE ? n : PREFETCH_DISTANCE;
+        for (size_t i = 0; i < prefetched; i++) {
+            hashes[i] = HashFn::hash(keys[i]);
+            prefetch_for_write(hashes[i]);
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            size_t slot = i % PREFETCH_DISTANCE;
+            uint64_t hash = hashes[slot];
+            size_t next = i + PREFETCH_DISTANCE;
+            if (next < n) {
+                hashes[slot] = HashFn::hash(keys[next]);
+                prefetch_for_write(hashes[slot]);
+            }
+            if (insert_key_only_with_hash(keys[i], hash) == -1) {
+                return -1;
+            }
+        }
+#else
         for (size_t i = 0; i < n; i++) {
             if (insert_key_only(keys[i]) == -1) {
                 return -1;
             }
         }
+#endif
         return 0;
     }
 
@@ -1290,9 +1444,43 @@ public:
     // ------------------------------------------------------------------------
     void contains_batch(const Key *keys, size_t n, uint8_t *result) const noexcept
     {
+#if defined(__GNUC__) || defined(__clang__)
+        if constexpr (std::is_integral_v<Key>) {
+            for (size_t i = 0; i < n; i++) {
+                result[i] = (find(keys[i]) != capacity_) ? 1 : 0;
+            }
+            return;
+        }
+
+        if (capacity_ < PREFETCH_MIN_CAPACITY) {
+            for (size_t i = 0; i < n; i++) {
+                result[i] = (find(keys[i]) != capacity_) ? 1 : 0;
+            }
+            return;
+        }
+
+        uint64_t hashes[PREFETCH_DISTANCE];
+        size_t prefetched = n < PREFETCH_DISTANCE ? n : PREFETCH_DISTANCE;
+        for (size_t i = 0; i < prefetched; i++) {
+            hashes[i] = HashFn::hash(keys[i]);
+            prefetch_for_read(hashes[i]);
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            size_t slot = i % PREFETCH_DISTANCE;
+            uint64_t hash = hashes[slot];
+            size_t next = i + PREFETCH_DISTANCE;
+            if (next < n) {
+                hashes[slot] = HashFn::hash(keys[next]);
+                prefetch_for_read(hashes[slot]);
+            }
+            result[i] = (find_with_hash(keys[i], hash) != capacity_) ? 1 : 0;
+        }
+#else
         for (size_t i = 0; i < n; i++) {
             result[i] = (find(keys[i]) != capacity_) ? 1 : 0;
         }
+#endif
     }
 
     int64_t unique_batch(const Key *keys, size_t n, Key *uniques_out) noexcept
@@ -1383,6 +1571,22 @@ private:
     // =========================================================================
     // Helper Functions
     // =========================================================================
+
+#if defined(__GNUC__) || defined(__clang__)
+    inline void prefetch_for_read(uint64_t hash) const noexcept
+    {
+        size_t index = hash & mask_;
+        __builtin_prefetch(ctrl_ + index, 0, 1);
+        __builtin_prefetch(keys_ + index, 0, 1);
+    }
+
+    inline void prefetch_for_write(uint64_t hash) const noexcept
+    {
+        size_t index = hash & mask_;
+        __builtin_prefetch(ctrl_ + index, 1, 1);
+        __builtin_prefetch(keys_ + index, 1, 1);
+    }
+#endif
 
     bool resize(size_t new_capacity) noexcept
     {

@@ -676,6 +676,28 @@ class TestIsmember:
         expected = np.array([x in value_set for x in arr])
         tm.assert_numpy_array_equal(result, expected)
 
+    @pytest.mark.parametrize(
+        "ismember_fn,dtype",
+        [
+            (swisstable.ismember_int64, np.int64),
+            (swisstable.ismember_float64, np.float64),
+        ],
+    )
+    def test_large_batches(self, ismember_fn, dtype):
+        rng = np.random.default_rng(42)
+        values = rng.integers(-(2**40), 2**40, size=70_000).astype(dtype)
+        arr = np.concatenate(
+            [
+                values[:50_000],
+                rng.integers(-(2**40), 2**40, size=50_000).astype(dtype),
+            ]
+        )
+
+        result = ismember_fn(arr, values)
+
+        expected = np.isin(arr, values)
+        tm.assert_numpy_array_equal(result, expected)
+
 
 class TestUnique:
     """Test unique() method for getting unique values"""
