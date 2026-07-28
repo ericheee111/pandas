@@ -32,16 +32,7 @@ from numpy cimport (
 cnp.import_array()
 
 
-cdef extern from *:
-    """
-    static inline int pandas_is_aarch64(void) {
-    #if defined(__aarch64__)
-        return 1;
-    #else
-        return 0;
-    #endif
-    }
-    """
+cdef extern from "pandas/portable.h":
     bint pandas_is_aarch64() noexcept nogil
 
 
