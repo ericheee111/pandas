@@ -12,7 +12,10 @@ import numpy as np
 import pytest
 
 import pandas as pd
-from pandas._libs import swisstable
+from pandas._libs import (
+    swisstable,
+    swisstable_ismember,
+)
 
 import pandas._testing as tm
 
@@ -695,6 +698,56 @@ class TestIsmember:
 
         result = ismember_fn(arr, values)
 
+        expected = np.isin(arr, values)
+        tm.assert_numpy_array_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "ismember_fn,dtype",
+        [
+            (swisstable.ismember_int64, np.int64),
+            (swisstable.ismember_uint64, np.uint64),
+            (swisstable.ismember_int32, np.int32),
+            (swisstable.ismember_uint32, np.uint32),
+            (swisstable.ismember_int16, np.int16),
+            (swisstable.ismember_uint16, np.uint16),
+            (swisstable.ismember_int8, np.int8),
+            (swisstable.ismember_uint8, np.uint8),
+        ],
+    )
+    def test_integer_empty_arrays(self, ismember_fn, dtype):
+        empty = np.array([], dtype=dtype)
+        values = np.array([1, 2], dtype=dtype)
+
+        result = ismember_fn(empty, values)
+        tm.assert_numpy_array_equal(result, np.array([], dtype=np.bool_))
+
+        result = ismember_fn(values, empty)
+        tm.assert_numpy_array_equal(result, np.array([False, False]))
+
+    @pytest.mark.parametrize(
+        "ismember_fn,dtype",
+        [
+            (swisstable_ismember.ismember_int64, np.int64),
+            (swisstable_ismember.ismember_uint64, np.uint64),
+            (swisstable_ismember.ismember_int32, np.int32),
+            (swisstable_ismember.ismember_uint32, np.uint32),
+        ],
+    )
+    def test_integer_direct_set_collisions(self, ismember_fn, dtype):
+        size = 70_000
+        info = np.iinfo(dtype)
+        stride = 1 << (32 if info.bits == 64 else 16)
+        values = np.arange(size, dtype=np.uint64) * stride
+        values = values.astype(dtype)
+        arr = np.concatenate(
+            [
+                values[::700],
+                (values[::700].astype(np.uint64) + 1).astype(dtype),
+                np.array([info.min, info.max], dtype=dtype),
+            ]
+        )
+
+        result = ismember_fn(arr, values)
         expected = np.isin(arr, values)
         tm.assert_numpy_array_equal(result, expected)
 
