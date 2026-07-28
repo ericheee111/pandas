@@ -78,11 +78,12 @@ def use_numba_cb(key: str) -> None:
 use_swisstable_doc = """
 : bool
     Use Swiss Tables (SIMD-accelerated hash tables) for supported hash table
-    operations. This is experimental. Default is True on aarch64, other is False.
+    operations. This is experimental. Default is True on aarch64/arm64,
+    False otherwise.
     Valid values: False,True
 """
 
-_use_swisstable: bool = True if IS_ARM else False
+_use_swisstable: bool = IS_ARM
 
 
 def use_swisstable_cb(key: str) -> None:
@@ -110,7 +111,7 @@ with cf.config_prefix("compute"):
     )
     cf.register_option(
         "use_swisstable",
-        True if IS_ARM else False,
+        IS_ARM,
         use_swisstable_doc,
         validator=is_bool,
         cb=use_swisstable_cb,

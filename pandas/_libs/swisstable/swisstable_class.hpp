@@ -851,8 +851,14 @@ public:
         }
     }
 
-    inline int insert_key_only_with_hash(const Key &key, uint64_t hash) noexcept
+private:
+    // The caller must reserve enough capacity for the whole batch first.
+    // Keeping this helper private avoids a growth check in the hot loop.
+    inline int insert_key_only_with_hash_unchecked(
+        const Key &key, uint64_t hash) noexcept
     {
+        assert(growth_left_ > 0);
+
         ctrl_t h2 = swiss_h2(hash);
         size_t index = hash & mask_;
         ctrl_t c0 = ctrl_[index];
@@ -910,6 +916,7 @@ public:
         }
     }
 
+public:
     // =========================================================================
     // Get value by key (returns true if found, false otherwise)
     // =========================================================================
@@ -1396,6 +1403,8 @@ public:
 
 #if defined(__GNUC__) || defined(__clang__)
         if constexpr (std::is_integral_v<Key>) {
+            // Integer hashes are inexpensive; prefetch bookkeeping regresses
+            // the common integer membership workloads on aarch64.
             for (size_t i = 0; i < n; i++) {
                 if (insert_key_only(keys[i]) == -1) {
                     return -1;
@@ -1428,7 +1437,7 @@ public:
                 hashes[slot] = HashFn::hash(keys[next]);
                 prefetch_for_write(hashes[slot]);
             }
-            if (insert_key_only_with_hash(keys[i], hash) == -1) {
+            if (insert_key_only_with_hash_unchecked(keys[i], hash) == -1) {
                 return -1;
             }
         }
@@ -1453,6 +1462,8 @@ public:
     {
 #if defined(__GNUC__) || defined(__clang__)
         if constexpr (std::is_integral_v<Key>) {
+            // Integer hashes are inexpensive; prefetch bookkeeping regresses
+            // the common integer membership workloads on aarch64.
             for (size_t i = 0; i < n; i++) {
                 result[i] = (find(keys[i]) != capacity_) ? 1 : 0;
             }
@@ -1490,6 +1501,10 @@ public:
 #endif
     }
 
+    // Returns 0 when the direct set handled the operation, 1 when the caller
+    // should use the standard SwissTable path, and -1 on an overflow-table
+    // allocation failure. Direct-set allocation failures return 1 because the
+    // standard path uses less memory and can still succeed.
     int ismember_direct_batch(const Key *keys, size_t n, const Key *values,
         size_t n_values,
         uint8_t *result) noexcept
