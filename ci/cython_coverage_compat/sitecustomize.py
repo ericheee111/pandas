@@ -32,8 +32,21 @@ def _find_meson_c_source(base_path):
 
 
 def _find_dep_file_path(main_file, file_path, relative_path_search=False):
+    path = Path(file_path)
+
+    if not path.is_absolute():
+        for root in (_source_dir, _build_dir):
+            candidate = root / path
+            if candidate.is_file():
+                return _original_find_dep_file_path(
+                    main_file or str(candidate),
+                    str(candidate),
+                    False,
+                )
+
     if main_file is None:
-        main_file = str(_source_dir / file_path)
+        main_file = str(_source_dir / path)
+
     return _original_find_dep_file_path(
         main_file,
         file_path,
