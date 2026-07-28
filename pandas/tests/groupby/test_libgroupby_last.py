@@ -20,6 +20,7 @@ import pandas._testing as tm
 
 def _reference_last(values, labels, ngroups, skipna=True, min_count=1):
     """Independent NumPy reference for group_last semantics."""
+    min_count = max(min_count, 1)
     values = np.asarray(values)
     if values.ndim == 1:
         values = values[:, None]
@@ -204,6 +205,28 @@ def test_last_empty_groups():
 # ---------------------------------------------------------------------------
 # min_count behavior
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("min_count", [-1, 0])
+def test_reference_last_clamps_nonpositive_min_count(monkeypatch, min_count):
+    values = np.array([5.0, np.nan], dtype=np.float64)
+    labels = np.array([0, 1], dtype=np.intp)
+    expected = np.array([[5.0], [np.nan], [np.nan]], dtype=np.float64)
+    original_empty = np.empty
+
+    def poisoned_empty(*args, **kwargs):
+        result = original_empty(*args, **kwargs)
+        result.fill(123.0)
+        return result
+
+    with monkeypatch.context() as context:
+        context.setattr(np, "empty", poisoned_empty)
+        result, counts = _reference_last(
+            values, labels, ngroups=3, min_count=min_count
+        )
+
+    tm.assert_numpy_array_equal(result, expected)
+    tm.assert_numpy_array_equal(counts, np.array([1, 1, 0], dtype=np.int64))
+
 
 @pytest.mark.parametrize("mc", [-1, 0, 1, 2])
 def test_last_min_count(mc):
