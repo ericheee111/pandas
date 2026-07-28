@@ -2586,10 +2586,17 @@ cdef inline ndarray _create_raw_window_view(
     ndarray arr, Py_ssize_t start, Py_ssize_t end
 ):
     cdef:
-        cnp.npy_intp length = end - start
-        ndarray window = cnp.PyArray_SimpleNewFromData(
-            1, &length, cnp.NPY_FLOAT64, cnp.PyArray_GETPTR1(arr, start)
-        )
+        Py_ssize_t n = cnp.PyArray_DIM(arr, 0)
+        cnp.npy_intp length
+        ndarray window
+
+    if start < 0 or end < start or end > n:
+        return arr[start:end]
+
+    length = end - start
+    window = cnp.PyArray_SimpleNewFromData(
+        1, &length, cnp.NPY_FLOAT64, cnp.PyArray_GETPTR1(arr, start)
+    )
 
     cnp.set_array_base(window, arr)
     if not cnp.PyArray_ISWRITEABLE(arr):

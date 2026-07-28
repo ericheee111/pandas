@@ -10,6 +10,7 @@ from pandas import (
     DataFrame,
     Series,
 )
+from pandas.api.indexers import BaseIndexer
 import pandas._testing as tm
 from pandas.core import _boostkit_fastpaths
 from pandas._libs.window import aggregations as window_aggregations
@@ -595,6 +596,32 @@ def test_raw_true_empty_window_calls_callback():
     assert len(windows) == 2
     assert windows[0].shape == (0,)
     assert windows[0].dtype == np.dtype(np.float64)
+
+
+def test_raw_true_reversed_bounds_fall_back_to_numpy_slice():
+    class ReversedBoundsIndexer(BaseIndexer):
+        def get_window_bounds(
+            self, num_values, min_periods, center, closed, step
+        ):
+            start = np.array([0, 1, 2], dtype=np.int64)
+            end = np.array([1, 0, 3], dtype=np.int64)
+            return start, end
+
+    windows = []
+
+    def function(window):
+        windows.append(window.copy())
+        return len(window)
+
+    result = (
+        Series([1.0, 2.0, 3.0])
+        .rolling(ReversedBoundsIndexer(), min_periods=0)
+        .apply(function, raw=True)
+    )
+
+    expected = Series([1.0, 0.0, 1.0])
+    tm.assert_series_equal(result, expected)
+    assert [window.tolist() for window in windows] == [[1.0], [], [3.0]]
 
 
 def test_raw_true_nonempty_args_kwargs_fallback():
