@@ -1244,6 +1244,42 @@ def indices_fast(ndarray[intp_t, ndim=1] index, const int64_t[:] labels, list ke
     return result
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def indices_fast_single(
+    ndarray[intp_t, ndim=1] index,
+    const int64_t[:] labels,
+    object keys,
+) -> dict:
+    """
+    Construct indexers for a single grouping key.
+
+    Unlike ``indices_fast``, the sorted group codes identify the key directly,
+    so a separately sorted copy of the original codes is not required.
+    """
+    cdef:
+        Py_ssize_t i, j, lab, cur, start, n = len(labels)
+        dict result = {}
+
+    for j in range(n):
+        if labels[j] != -1:
+            break
+    else:
+        return result
+
+    cur = labels[j]
+    start = j
+    for i in range(j + 1, n):
+        lab = labels[i]
+        if lab != cur:
+            result[keys[cur]] = index[start:i]
+            start = i
+            cur = lab
+
+    result[keys[cur]] = index[start:]
+    return result
+
+
 # core.common import for fast inference checks
 
 @set_module("pandas.api.types")
