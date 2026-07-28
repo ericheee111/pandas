@@ -56,6 +56,23 @@ def test_groupsort_indexer():
     tm.assert_numpy_array_equal(result, expected)
 
 
+@pytest.mark.parametrize(
+    "positions,start,step,expected",
+    [
+        ([0, 2, 4], 10, 3, [10, 16, 22]),
+        ([0, 2, 4], 10, -2, [10, 6, 2]),
+        ([], 5, 7, []),
+    ],
+)
+def test_range_positions_to_labels(positions, start, step, expected):
+    positions = np.array(positions, dtype=np.intp)
+
+    result = libalgos.range_positions_to_labels(positions, start, step)
+
+    expected = np.array(expected, dtype=np.intp)
+    tm.assert_numpy_array_equal(result, expected)
+
+
 def test_count_categorical_codes():
     for dtype in ["int8", "int16", "int32", "int64"]:
         codes = np.array([0, 1, 1, -1, 2], dtype=dtype)
