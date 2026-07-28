@@ -185,10 +185,19 @@ def test_cross_merge_arm_pyarrow_multi_chunk():
     left = DataFrame({"a": pd.arrays.ArrowExtensionArray(left_arr)})
     right = DataFrame({"b": pd.arrays.ArrowExtensionArray(right_arr)})
     result = _cross_merge_arm(left, right, ("_x", "_y"))
+    # ``_cross_merge_arm`` preserves the per-column ExtensionArray type of
+    # its inputs, so the expected columns must be built with the same
+    # ``ArrowExtensionArray`` type (``ArrowDtype`` / ``string[pyarrow]``)
+    # rather than ``pd.array(..., dtype="string[pyarrow]")``, which yields
+    # ``ArrowStringArray`` (``StringDtype`` / ``string``).
     expected = DataFrame(
         {
-            "a": pd.array(["x", "x", "y", "y"], dtype="string[pyarrow]"),
-            "b": pd.array(["m", "n", "m", "n"], dtype="string[pyarrow]"),
+            "a": pd.arrays.ArrowExtensionArray(
+                pa.array(["x", "x", "y", "y"], type=pa.string())
+            ),
+            "b": pd.arrays.ArrowExtensionArray(
+                pa.array(["m", "n", "m", "n"], type=pa.string())
+            ),
         }
     )
     tm.assert_frame_equal(result, expected)
