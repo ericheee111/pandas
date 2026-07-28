@@ -56,6 +56,8 @@ def ismember_{{dtype}}(
         Py_ssize_t n_arr = len(arr), n_values = len(values)
         SwissTable[{{c_type}}, size_t] table
         int ret = 0
+        const {{c_type}}[:] arr_view = arr
+        const {{c_type}}[:] values_view = values
         np_uint8_t[::1] result_view
 
     result = np.empty(n_arr, dtype=np.uint8)
@@ -67,18 +69,25 @@ def ismember_{{dtype}}(
         result.fill(0)
         return result.view(np.bool_)
 
+    # The C++ implementation uses pointer arithmetic and requires contiguous
+    # buffers. Keep the common contiguous path free of Python calls.
+    if arr.strides[0] != sizeof({{c_type}}):
+        arr_view = np.ascontiguousarray(arr)
+    if values.strides[0] != sizeof({{c_type}}):
+        values_view = np.ascontiguousarray(values)
+
     with nogil:
         ret = table.ismember_direct_batch(
-            &arr[0],
+            &arr_view[0],
             <size_t>n_arr,
-            &values[0],
+            &values_view[0],
             <size_t>n_values,
             &result_view[0],
         )
     if ret == -1:
         raise MemoryError("Failed to allocate membership table")
     if ret == 1:
-        return swisstable.ismember_{{dtype}}(arr, values)
+        return swisstable.ismember_{{dtype}}(arr_view, values_view)
     return result.view(np.bool_)
 
 
