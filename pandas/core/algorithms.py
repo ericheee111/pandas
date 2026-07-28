@@ -28,6 +28,7 @@ from pandas._libs import (
     iNaT,
     lib,
     swisstable,
+    swisstable_ismember,
 )
 from pandas._libs.missing import NA
 from pandas._typing import (
@@ -777,12 +778,12 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
             common = np_find_common_type(values.dtype, comps_array.dtype)
             values = values.astype(common, copy=False)
             comps_array = comps_array.astype(common, copy=False)
-        f = _get_ismember_func(comps_array.dtype)
+        f = _get_ismember_func(comps_array.dtype, len(values))
 
     return f(comps_array, values)
 
 
-def _get_ismember_func(dtype: np.dtype):
+def _get_ismember_func(dtype: np.dtype, values_size: int = 0):
     from pandas.core.config_init import get_use_swisstable
 
     if get_use_swisstable() and dtype.kind in "iufc":
@@ -800,6 +801,16 @@ def _get_ismember_func(dtype: np.dtype):
             np.dtype("complex128"): swisstable.ismember_complex128,
             np.dtype("complex64"): swisstable.ismember_complex64,
         }
+        if values_size >= 65_536:
+            large_integer_funcs = {
+                np.dtype("int64"): swisstable_ismember.ismember_int64,
+                np.dtype("int32"): swisstable_ismember.ismember_int32,
+                np.dtype("uint64"): swisstable_ismember.ismember_uint64,
+                np.dtype("uint32"): swisstable_ismember.ismember_uint32,
+            }
+            func = large_integer_funcs.get(dtype)
+            if func is not None:
+                return func
         func = swisstable_funcs.get(dtype)
         if func is not None:
             return func

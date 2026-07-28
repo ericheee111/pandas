@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -57,6 +58,12 @@ using ctrl_t = int8_t;
 
 constexpr size_t PREFETCH_DISTANCE = 16;
 constexpr size_t PREFETCH_MIN_CAPACITY = 1 << 16;
+constexpr size_t DIRECT_SET_MIN_SIZE = 1 << 16;
+constexpr size_t DIRECT_SET_SAMPLE_SIZE = 1 << 10;
+constexpr size_t DIRECT_SET_VALUES_TO_KEYS_RATIO = 4;
+constexpr uint8_t DIRECT_SET_PRESENT = 1;
+constexpr uint8_t DIRECT_SET_BLOOM_LOW = 2;
+constexpr uint8_t DIRECT_SET_BLOOM_HIGH = 4;
 
 // Extract H2 (top 7 bits) from hash
 // Returns ctrl_t in range 0x00-0x7F (always non-negative)
@@ -1483,6 +1490,35 @@ public:
 #endif
     }
 
+    int ismember_direct_batch(const Key *keys, size_t n, const Key *values,
+        size_t n_values,
+        uint8_t *result) noexcept
+    {
+        destroy();
+
+        if (n == 0) {
+            return 0;
+        }
+        if (n_values == 0) {
+            std::memset(result, 0, n);
+            return 0;
+        }
+
+        if constexpr (std::is_integral_v<Key> && sizeof(Key) >= sizeof(uint32_t)) {
+            bool values_dominate =
+                n_values / n >= DIRECT_SET_VALUES_TO_KEYS_RATIO;
+            if (n_values >= DIRECT_SET_MIN_SIZE
+                && (values_dominate
+                    || direct_set_sample_has_duplicates(values, n_values))) {
+                int ret = ismember_direct_set(keys, n, values, n_values, result);
+                if (ret <= 0) {
+                    return ret;
+                }
+            }
+        }
+        return 1;
+    }
+
     int64_t unique_batch(const Key *keys, size_t n, Key *uniques_out) noexcept
     {
         // Reserve capacity upfront
@@ -1587,6 +1623,113 @@ private:
         __builtin_prefetch(keys_ + index, 1, 1);
     }
 #endif
+
+    static inline size_t direct_set_index(Key key, size_t mask) noexcept
+    {
+        static_assert(std::is_integral_v<Key>);
+        using UnsignedKey = std::make_unsigned_t<Key>;
+
+        uint64_t value = static_cast<uint64_t>(static_cast<UnsignedKey>(key));
+        if constexpr (sizeof(Key) > sizeof(uint32_t)) {
+            value ^= value >> 32;
+        }
+        value ^= value >> 16;
+        return static_cast<size_t>(value) & mask;
+    }
+
+    static bool direct_set_sample_has_duplicates(
+        const Key *values, size_t n_values) noexcept
+    {
+        size_t sample_size = std::min(n_values, DIRECT_SET_SAMPLE_SIZE);
+        SwissTable<Key, Value, HashFn, EqualFn> sample;
+        if (!sample.reserve(sample_size)) {
+            return false;
+        }
+
+        // Spread the sample over the input so clustered duplicates do not make
+        // the decision depend only on the beginning of a large array.
+        size_t stride = n_values / sample_size;
+        for (size_t i = 0; i < sample_size; i++) {
+            int ret = sample.insert_key_only(values[i * stride]);
+            if (ret == 0) {
+                return true;
+            }
+            if (ret == -1) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    int ismember_direct_set(const Key *keys, size_t n, const Key *values, size_t n_values,
+        uint8_t *result) noexcept
+    {
+        constexpr size_t max_size = std::numeric_limits<size_t>::max();
+        if (n_values > max_size / 2) {
+            return 1;
+        }
+
+        size_t wanted = n_values * 2;
+        size_t capacity = normalize_capacity(wanted);
+        if (capacity < wanted || capacity > max_size / sizeof(Key)) {
+            return 1;
+        }
+
+        auto *occupied = static_cast<uint8_t *>(SWISSTABLE_MALLOC(capacity));
+        if (occupied == nullptr) {
+            return 1;
+        }
+
+        auto *direct_keys =
+            static_cast<Key *>(SWISSTABLE_MALLOC(capacity * sizeof(Key)));
+        if (direct_keys == nullptr) {
+            SWISSTABLE_FREE(occupied);
+            return 1;
+        }
+        std::memset(occupied, 0, capacity);
+
+        size_t mask = capacity - 1;
+        for (size_t i = 0; i < n_values; i++) {
+            Key key = values[i];
+            size_t index = direct_set_index(key, mask);
+            if ((occupied[index] & DIRECT_SET_PRESENT) == 0) {
+                direct_keys[index] = key;
+                occupied[index] |= DIRECT_SET_PRESENT;
+            } else if (!EqualFn::equal(direct_keys[index], key)) {
+                uint64_t hash = HashFn::hash(key);
+                occupied[hash & mask] |= DIRECT_SET_BLOOM_LOW;
+                occupied[(hash >> 32) & mask] |= DIRECT_SET_BLOOM_HIGH;
+                if (insert_key_only(key) == -1) {
+                    SWISSTABLE_FREE(direct_keys);
+                    SWISSTABLE_FREE(occupied);
+                    return -1;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            Key key = keys[i];
+            size_t index = direct_set_index(key, mask);
+            bool found = (occupied[index] & DIRECT_SET_PRESENT) != 0
+                && EqualFn::equal(direct_keys[index], key);
+            if (!found && capacity_ != 0) {
+                uint64_t hash = HashFn::hash(key);
+                bool maybe_in_overflow =
+                    (occupied[hash & mask] & DIRECT_SET_BLOOM_LOW) != 0
+                    && (occupied[(hash >> 32) & mask]
+                           & DIRECT_SET_BLOOM_HIGH)
+                        != 0;
+                if (maybe_in_overflow) {
+                    found = find_with_hash(key, hash) != capacity_;
+                }
+            }
+            result[i] = found;
+        }
+
+        SWISSTABLE_FREE(direct_keys);
+        SWISSTABLE_FREE(occupied);
+        return 0;
+    }
 
     bool resize(size_t new_capacity) noexcept
     {
