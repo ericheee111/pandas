@@ -572,8 +572,14 @@ def _cross_merge_arm(
             #    each value repeated n_other times.
             import pyarrow as pa
 
+            # ``ChunkedArray.combine_chunks`` returns a flat ``pa.Array``
+            # (e.g. ``StringArray``), not a single-chunk ``ChunkedArray``;
+            # re-wrap so the subsequent ``.chunk(0)`` call below is valid
+            # for both the single-chunk and multi-chunk cases. The re-wrap
+            # is zero-copy: ``combine_chunks`` only concatenates buffer
+            # references without copying element data.
             if pa_arr.num_chunks != 1:
-                pa_arr = pa_arr.combine_chunks()
+                pa_arr = pa.chunked_array([pa_arr.combine_chunks()])
             chunk = pa_arr.chunk(0)
             if is_left:
                 new_ca = pa.chunked_array(
