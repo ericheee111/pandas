@@ -1319,7 +1319,7 @@ class FrameRowApply(FrameApply):
             for i in range(ncols):
                 yield obj._ixs(i, axis=1)
         else:
-            return (self.obj._ixs(i, axis=1) for i in range(len(self.columns)))
+            yield from (self.obj._ixs(i, axis=1) for i in range(len(self.columns)))
 
     @staticmethod
     @functools.cache
