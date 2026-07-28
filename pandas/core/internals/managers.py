@@ -31,6 +31,7 @@ from pandas._libs.internals import (
     BlockValuesRefs,
 )
 from pandas._libs.tslibs import Timestamp
+from pandas.compat._arch import IS_ARM
 from pandas.errors import (
     AbstractMethodError,
     PerformanceWarning,
@@ -53,6 +54,7 @@ from pandas.core.dtypes.dtypes import (
     CategoricalDtype,
     DatetimeTZDtype,
     ExtensionDtype,
+    NumpyEADtype,
     SparseDtype,
 )
 from pandas.core.dtypes.generic import (
@@ -463,6 +465,21 @@ class BaseBlockManager(PandasObject):
         )
 
     @final
+    def fillna_by_column(self, values: list, limit: int | None, inplace: bool) -> Self:
+        if limit is not None:
+            limit = libalgos.validate_limit(None, limit=limit)
+
+        result_blocks: list[Block] = []
+        for block in self.blocks:
+            loc = block.mgr_locs.as_array[0]
+            applied = block.fillna(value=values[loc], limit=limit, inplace=inplace)
+            result_blocks = extend_blocks(applied, result_blocks)
+
+        return type(self).from_blocks(
+            result_blocks, [axis.view() for axis in self.axes]
+        )
+
+    @final
     def where(self, other, cond, align: bool) -> Self:
         if align:
             align_keys = ["other", "cond"]
@@ -731,8 +748,14 @@ class BaseBlockManager(PandasObject):
         # TODO: Should deep=True be respected for axes?
         new_axes = [ax.view() for ax in self.axes]
 
-        res = self.apply("copy", deep=deep)
-        res.axes = new_axes
+        if IS_ARM and not deep and self.ndim > 1:
+            # The generic apply machinery is unnecessary for a shallow copy:
+            # every block is retained in the same position and shape.
+            blocks = tuple(blk.copy(deep=False) for blk in self.blocks)
+            res = type(self).from_blocks(blocks, new_axes)
+        else:
+            res = self.apply("copy", deep=deep)
+            res.axes = new_axes
 
         if self.ndim > 1:
             # Avoid needing to re-compute these
@@ -2250,12 +2273,13 @@ class SingleBlockManager(BaseBlockManager):
 
         Use at your own risk! This does not check if the passed values are
         valid for the current Block/SingleBlockManager (length, dtype, etc),
-        and this does not properly keep track of references.
+        does not update the block placement, and does not properly keep track
+        of references. The caller must ensure the length of the values matches
+        the manager index.
         """
         # NOTE(CoW) Currently this is only used for FrameColumnApply.series_generator
         # which handles CoW by setting the refs manually if necessary
         self.blocks[0].values = values
-        self.blocks[0]._mgr_locs = BlockPlacement(slice(len(values)))
 
     def _equal_values(self, other: Self) -> bool:
         """
@@ -2313,6 +2337,7 @@ def create_block_manager_from_column_arrays(
     axes: list[Index],
     consolidate: bool,
     refs: list,
+    unwrap_numpy_ea: bool = False,
 ) -> BlockManager:
     # Assertions disabled for performance (caller is responsible for verifying)
     # assert isinstance(axes, list)
@@ -2326,7 +2351,7 @@ def create_block_manager_from_column_arrays(
     #  verify_integrity=False below.
 
     try:
-        blocks = _form_blocks(arrays, consolidate, refs)
+        blocks = _form_blocks(arrays, consolidate, refs, unwrap_numpy_ea)
         mgr = BlockManager(blocks, axes, verify_integrity=False)
     except ValueError as e:
         raise_construction_error(len(arrays), arrays[0].shape, axes, e)
@@ -2377,17 +2402,34 @@ def _grouping_func(tup: tuple[int, ArrayLike]) -> tuple[int, DtypeObj]:
     return sep, dtype
 
 
-def _form_blocks(arrays: list[ArrayLike], consolidate: bool, refs: list) -> list[Block]:
+def _grouping_func_unwrap_numpy_ea(
+    tup: tuple[int, ArrayLike],
+) -> tuple[int, DtypeObj]:
+    dtype = tup[1].dtype
+    if isinstance(dtype, NumpyEADtype):
+        dtype = dtype.numpy_dtype
+    return 0, dtype
+
+
+def _form_blocks(
+    arrays: list[ArrayLike],
+    consolidate: bool,
+    refs: list,
+    unwrap_numpy_ea: bool = False,
+) -> list[Block]:
     tuples = enumerate(arrays)
 
     if not consolidate:
-        return _tuples_to_blocks_no_consolidate(tuples, refs)
+        return _tuples_to_blocks_no_consolidate(tuples, refs, unwrap_numpy_ea)
 
     # when consolidating, we can ignore refs (either stacking always copies,
     # or the EA is already copied in the calling dict_to_mgr)
 
     # group by dtype
-    grouper = itertools.groupby(tuples, _grouping_func)
+    grouping_func = (
+        _grouping_func_unwrap_numpy_ea if unwrap_numpy_ea else _grouping_func
+    )
+    grouper = itertools.groupby(tuples, grouping_func)
 
     nbs: list[Block] = []
     for (_, dtype), tup_block in grouper:
@@ -2423,8 +2465,18 @@ def _form_blocks(arrays: list[ArrayLike], consolidate: bool, refs: list) -> list
     return nbs
 
 
-def _tuples_to_blocks_no_consolidate(tuples, refs) -> list[Block]:
+def _tuples_to_blocks_no_consolidate(
+    tuples, refs, unwrap_numpy_ea: bool = False
+) -> list[Block]:
     # tuples produced within _form_blocks are of the form (placement, array)
+    if unwrap_numpy_ea:
+        tuples = (
+            (
+                i,
+                arr.to_numpy() if isinstance(arr.dtype, NumpyEADtype) else arr,
+            )
+            for i, arr in tuples
+        )
     return [
         new_block_2d(
             ensure_block_shape(arr, ndim=2), placement=BlockPlacement(i), refs=ref
@@ -2439,10 +2491,12 @@ def _stack_arrays(tuples, dtype: np.dtype):
     first = arrays[0]
     shape = (len(arrays), *first.shape)
 
-    stacked = np.empty(shape, dtype=dtype)
-    for i, arr in enumerate(arrays):
-        stacked[i] = arr
-
+    if IS_ARM:
+        stacked = np.array(arrays, dtype=dtype)
+    else:
+        stacked = np.empty(shape, dtype=dtype)
+        for i, arr in enumerate(arrays):
+            stacked[i] = arr
     return stacked, placement
 
 

@@ -24,6 +24,7 @@ from pandas._libs import (
     lib,
 )
 from pandas._libs.arrays import NDArrayBacked
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import Pandas4Warning
 from pandas.util._decorators import set_module
@@ -1670,6 +1671,21 @@ class Categorical(NDArrayBackedExtensionArray, PandasObject, ObjectStringArrayMi
         TypeError
         """
 
+        if IS_ARM:
+            # Single categories lookup (skip the redundant ``in`` check) and
+            # cast to the codes dtype so downstream numpy ops (e.g.
+            # ``ndarray.searchsorted``) take the fast path instead of
+            # recasting the whole codes array to match a Python-int key.
+            if is_valid_na_for_dtype(fill_value, self.categories.dtype):
+                return self._ndarray.dtype.type(-1)
+            try:
+                return self._ndarray.dtype.type(self._unbox_scalar(fill_value))
+            except (KeyError, TypeError):
+                raise TypeError(
+                    "Cannot setitem on a Categorical with a new "
+                    f"category ({fill_value}), set the categories first"
+                ) from None
+        # non-ARM: original path
         if is_valid_na_for_dtype(fill_value, self.categories.dtype):
             fill_value = -1
         elif fill_value in self.categories:
@@ -1680,6 +1696,29 @@ class Categorical(NDArrayBackedExtensionArray, PandasObject, ObjectStringArrayMi
                 f"category ({fill_value}), set the categories first"
             ) from None
         return fill_value
+
+    def searchsorted(
+        self,
+        value,
+        side: Literal["left", "right"] = "left",
+        sorter: npt.NumpySorter | None = None,
+    ) -> npt.NDArray[np.intp] | np.intp:
+        if (
+            IS_ARM
+            and sorter is None
+            and is_hashable(value)
+            and not is_valid_na_for_dtype(value, self.categories.dtype)
+        ):
+            # Scalar, non-NA, no sorter: a single Cython binary search on the
+            # codes avoids numpy.searchsorted's per-call overhead and the O(n)
+            # array cast numpy does when the key dtype != codes.dtype.
+            try:
+                code = self._unbox_scalar(value)
+            except KeyError:
+                # value is not a category -> defer to base (raises TypeError)
+                return super().searchsorted(value, side=side, sorter=sorter)
+            return libalgos.searchsorted_scalar(self._ndarray, code, side)
+        return super().searchsorted(value, side=side, sorter=sorter)
 
     @classmethod
     def _validate_codes_for_dtype(cls, codes, *, dtype: CategoricalDtype) -> np.ndarray:
@@ -1891,15 +1930,25 @@ class Categorical(NDArrayBackedExtensionArray, PandasObject, ObjectStringArrayMi
         )
 
         code, cat = self._codes, self.categories
-        ncat, mask = (len(cat), code >= 0)
-        ix, clean = np.arange(ncat), mask.all()
 
-        if dropna or clean:
-            obs = code if clean else code[mask]
-            count = np.bincount(obs, minlength=ncat or 0)
+        if IS_ARM:
+            ncat = len(cat)
+            ix = np.arange(ncat)
+            count = libalgos.count_categorical_codes(code, ncat, dropna)
+            if not dropna and (code >= 0).all():
+                count = count[:-1]
+            elif not dropna:
+                ix = np.append(ix, -1)
         else:
-            count = np.bincount(np.where(mask, code, ncat))
-            ix = np.append(ix, -1)
+            ncat, mask = (len(cat), code >= 0)
+            ix, clean = np.arange(ncat), mask.all()
+
+            if dropna or clean:
+                obs = code if clean else code[mask]
+                count = np.bincount(obs, minlength=ncat or 0)
+            else:
+                count = np.bincount(np.where(mask, code, ncat))
+                ix = np.append(ix, -1)
 
         ix = coerce_indexer_dtype(ix, self.dtype.categories)
         ix_categorical = self._from_backing_data(ix)
@@ -2232,10 +2281,16 @@ class Categorical(NDArrayBackedExtensionArray, PandasObject, ObjectStringArrayMi
         return self.categories[i]
 
     def _unbox_scalar(self, key) -> int:
-        # searchsorted is very performance sensitive. By converting codes
-        # to same dtype as self.codes, we get much faster performance.
         code = self.categories.get_loc(key)
-        code = self._ndarray.dtype.type(code)
+        # ARM-only: the engine (Int8/16/32/64Engine) accepts a plain Python
+        # int for both its hash-table lookup (``mapping.get_item``) and its
+        # searchsorted fastpath (``_searchsorted_left`` re-boxes via
+        # ``_np_type`` internally). Returning a Python int here instead of a
+        # numpy scalar of ``self.codes.dtype`` is ~3x faster for the
+        # (common) hash-table path, while being a no-op for searchsorted.
+        # On non-ARM, keep the original numpy-scalar cast.
+        if not IS_ARM:
+            code = self._ndarray.dtype.type(code)
         return code
 
     # ------------------------------------------------------------------

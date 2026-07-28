@@ -564,6 +564,16 @@ class TestRangeIndex:
 
         assert "_engine" not in idx._cache
 
+    def test_get_loc_negative_step(self):
+        idx = RangeIndex(10, 0, -2)
+        assert idx.get_loc(8) == 1
+        assert idx.get_loc(4) == 3
+        assert idx.get_loc(10) == 0
+        with pytest.raises(KeyError, match="5"):
+            idx.get_loc(5)
+        with pytest.raises(KeyError, match="0"):
+            idx.get_loc(0)
+
     @pytest.mark.parametrize(
         "ri",
         [

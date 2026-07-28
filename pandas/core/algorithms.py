@@ -18,6 +18,10 @@ import warnings
 
 import numpy as np
 
+from pandas.compat import is_platform_arm
+
+_IS_ARM = is_platform_arm()
+
 from pandas._libs import (
     algos,
     hashtable as htable,
@@ -81,6 +85,7 @@ from pandas.core.dtypes.missing import (
     na_value_for_dtype,
 )
 
+from pandas.core import boostkit_fastpaths
 from pandas.core.array_algos.take import take_nd
 from pandas.core.construction import (
     array as pd_array,
@@ -477,6 +482,49 @@ def nunique_ints(values: ArrayLike) -> int:
     return result
 
 
+_MINIMUM_MONOTONIC_RUN_LEN = 100_000
+_MONOTONIC_RUN_SAMPLE_SIZE = 257
+
+
+def _is_float64_monotonic_runs_candidate(values: np.ndarray) -> bool:
+    if (
+        not isinstance(values, np.ndarray)
+        or len(values) < _MINIMUM_MONOTONIC_RUN_LEN
+        or values.dtype != np.dtype(np.float64)
+        or values.ndim != 1
+        or not values.flags.c_contiguous
+    ):
+        return False
+
+    sample = values[:_MONOTONIC_RUN_SAMPLE_SIZE]
+    adjacent_equal = np.count_nonzero(sample[1:] == sample[:-1])
+    return adjacent_equal >= len(sample) // 2
+
+
+def _unique_float64_monotonic_runs(
+    values: np.ndarray,
+) -> npt.NDArray[np.float64] | None:
+    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        return None
+
+    if not _is_float64_monotonic_runs_candidate(values):
+        return None
+
+    return htable.unique_float64_monotonic(values)
+
+
+def _factorize_float64_monotonic_runs(
+    values: np.ndarray,
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.float64]] | None:
+    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        return None
+
+    if not _is_float64_monotonic_runs_candidate(values):
+        return None
+
+    return htable.factorize_float64_monotonic(values)
+
+
 def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
     """See algorithms.unique for docs. Takes a mask for masked arrays."""
     from pandas.core.config_init import get_use_swisstable
@@ -491,9 +539,15 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         # Dispatch to Index's unique.
         return values.unique()
 
+    if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS and mask is None:
+        result = _unique_float64_monotonic_runs(values)
+        if result is not None:
+            return result
+
     original = values
-    use_swiss = get_use_swisstable()
+    use_swiss = get_use_swisstable() and len(values) <= 1_000_000
     hashtable, values = _get_hashtable_algo(values, use_swisstable=use_swiss)
+    using_swisstable = use_swiss and hashtable in _swisstables.values()
 
     table = hashtable(len(values))
     if mask is None:
@@ -502,7 +556,7 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         return uniques
 
     else:
-        if use_swiss:
+        if using_swisstable:
             mask_uint8 = mask.view(np.uint8)
             uniques, result_mask = table.unique(values, mask=mask_uint8)
         else:
@@ -516,6 +570,45 @@ unique1d = unique
 
 
 _MINIMUM_COMP_ARR_LEN = 1_000_000
+_MAX_ZERO_RANGE_VALUES = _MINIMUM_COMP_ARR_LEN // 10
+_ZERO_RANGE_ISIN_DTYPES = {"float64", "int64", "uint64"}
+
+
+def _isin_zero_range(
+    comps_array: np.ndarray, values: np.ndarray
+) -> npt.NDArray[np.bool_] | None:
+    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        return None
+
+    if (
+        len(comps_array) < _MINIMUM_COMP_ARR_LEN
+        or len(values) > _MAX_ZERO_RANGE_VALUES
+        or values.dtype != comps_array.dtype
+        or not values.dtype.isnative
+        or values.dtype.name not in _ZERO_RANGE_ISIN_DTYPES
+        or comps_array.ndim != 1
+        or values.ndim != 1
+    ):
+        return None
+
+    n_values = len(values)
+    if n_values == 0 or values[0] != 0 or values[-1] != n_values - 1:
+        return None
+
+    if n_values > 1 and not bool(
+        np.all(values == np.arange(n_values, dtype=values.dtype))
+    ):
+        return None
+
+    if values.dtype.name == "float64":
+        if not comps_array.flags.c_contiguous:
+            return None
+        return htable.ismember_float64_zero_range(comps_array, n_values)
+    if values.dtype.name == "uint64":
+        return comps_array < n_values
+    # Negative int64 values become large uint64 values, folding both bounds
+    # into one comparison.
+    return comps_array.view("uint64") < n_values
 
 
 def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
@@ -590,27 +683,48 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
     # GH60678
     # Ensure values don't contain <NA>, otherwise it throws exception with np.in1d
 
+    if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        result = _isin_zero_range(comps_array, values)
+        if result is not None:
+            return result
+
     if (
         len(comps_array) > _MINIMUM_COMP_ARR_LEN
         and len(values) <= 26
         and comps_array.dtype != object
-        and not any(v is NA for v in values)
+        and (
+            (values.dtype != object or not any(v is NA for v in values))
+            if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            else not any(v is NA for v in values)
+        )
     ):
         # If the values include nan we need to check for nan explicitly
         # since np.nan it not equal to np.nan
         if isna(values).any():
+            if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+                return np.logical_or(
+                    np.isin(comps_array, values).ravel(), np.isnan(comps_array)
+                )
 
             def f(c, v):
                 return np.logical_or(np.isin(c, v).ravel(), np.isnan(c))
 
+        elif boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+            return np.isin(comps_array, values).ravel()
         else:
             f = lambda a, b: np.isin(a, b).ravel()
 
     else:
-        common = np_find_common_type(values.dtype, comps_array.dtype)
-        values = values.astype(common, copy=False)
-        comps_array = comps_array.astype(common, copy=False)
-        f = _get_ismember_func(common)
+        if (
+            not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            or values.dtype != comps_array.dtype
+            or not values.dtype.isnative
+            or values.dtype.name not in _hashtables
+        ):
+            common = np_find_common_type(values.dtype, comps_array.dtype)
+            values = values.astype(common, copy=False)
+            comps_array = comps_array.astype(common, copy=False)
+        f = _get_ismember_func(comps_array.dtype)
 
     return f(comps_array, values)
 
@@ -679,6 +793,14 @@ def factorize_array(
     from pandas.core.config_init import get_use_swisstable
 
     original = values
+    # AArch64-only fast path for object arrays that are entirely exact Python
+    # ints. Masks or explicit NA sentinels stay on the object path so missing
+    # value semantics are unchanged; non-matching arrays silently fall back.
+    if values.dtype == object and mask is None and na_value is None:
+        maybe_int64 = lib.maybe_convert_object_int64(values)
+        if maybe_int64 is not None:
+            values = maybe_int64
+
     if values.dtype.kind in "mM":
         # _get_hashtable_algo will cast dt64/td64 to i8 via _ensure_data, so we
         #  need to do the same to na_value. We are assuming here that the passed
@@ -686,11 +808,22 @@ def factorize_array(
         # e.g. test_where_datetimelike_categorical
         na_value = iNaT
 
-    use_swiss = get_use_swisstable()
+    if (
+        boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+        and use_na_sentinel
+        and na_value is None
+        and mask is None
+    ):
+        result = _factorize_float64_monotonic_runs(values)
+        if result is not None:
+            return result
+
+    use_swiss = get_use_swisstable() and mask is None
     hash_klass, values = _get_hashtable_algo(values, use_swisstable=use_swiss)
+    using_swisstable = use_swiss and hash_klass in _swisstables.values()
 
     table = hash_klass(size_hint or len(values))
-    if use_swiss:
+    if using_swisstable:
         mask_uint8 = mask.view(np.uint8) if mask is not None else None
         uniques, codes = table.factorize(
             values,
@@ -891,13 +1024,21 @@ def factorize(
         )
 
     if sort and len(uniques) > 0:
-        uniques, codes = safe_sort(
-            uniques,
-            codes,
-            use_na_sentinel=use_na_sentinel,
-            assume_unique=True,
-            verify=False,
+        already_sorted = (
+            boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            and isinstance(uniques, np.ndarray)
+            and uniques.dtype == np.float64
+            and uniques[0] <= uniques[-1]
+            and algos.is_monotonic(uniques, timelike=False)[0]
         )
+        if not already_sorted:
+            uniques, codes = safe_sort(
+                uniques,
+                codes,
+                use_na_sentinel=use_na_sentinel,
+                assume_unique=True,
+                verify=False,
+            )
 
     uniques = _reconstruct_data(uniques, original.dtype, original)
 
@@ -1017,6 +1158,84 @@ def value_counts_arraylike(
     original = values
     values = _ensure_data(values)
 
+    # Fast path: use np.bincount for non-negative integer arrays when
+    # the value range is reasonable. bincount is O(N) vs khash O(N*hash_cost).
+    # Conditions: integer dtype, all values >= 0, max < len*10, dropna=True,
+    # and no external mask (int64 cannot hold NA natively).
+    if (
+        _IS_ARM
+        and is_integer_dtype(values.dtype)
+        and dropna
+        and mask is None
+        and len(values) > 0
+    ):
+        vmin = values.min()
+        if vmin >= 0:
+            vmax = values.max()
+            # Threshold: bincount array size should not exceed 10x the input size
+            # to avoid excessive memory usage for sparse value ranges.
+            if vmax < len(values) * 10:
+                counts_arr = np.bincount(values)
+                nonzero_idx = np.nonzero(counts_arr)[0]
+                keys = nonzero_idx.astype(values.dtype)
+                counts = counts_arr[nonzero_idx].astype(np.int64)
+                res_keys = _reconstruct_data(keys, original.dtype, original)
+                return res_keys, counts, 0
+
+    # Fast path: use np.bincount for float arrays whose values are all
+    # integers (e.g. IDs or counts stored as float64).  np.modf detects
+    # non-integer values and NaN (whose fractional part is NaN), both of
+    # which trigger fallback to the khash path below.
+    if (
+        _IS_ARM
+        and values.dtype.kind == "f"
+        and dropna
+        and mask is None
+        and len(values) > 0
+    ):
+        frac, _ = np.modf(values)
+        if not frac.any() and np.isfinite(values).all():
+            with np.errstate(invalid="ignore"):
+                int_values = values.astype(np.int64)
+            vmin = int_values.min()
+            if vmin >= 0:
+                vmax = int_values.max()
+                if vmax < len(values) * 10:
+                    counts_arr = np.bincount(int_values)
+                    nonzero_idx = np.nonzero(counts_arr)[0]
+                    keys = nonzero_idx.astype(values.dtype)
+                    counts = counts_arr[nonzero_idx].astype(np.int64)
+                    res_keys = _reconstruct_data(keys, original.dtype, original)
+                    return res_keys, counts, 0
+
+    # Fast path: use np.bincount for object arrays containing all Python
+    # ints (e.g. randint results stored as object).  lib.infer_dtype with
+    # skipna=False returns "integer" only when every element is a Python
+    # int — None, float, str, and mixed types all trigger fallback.
+    if (
+        _IS_ARM
+        and values.dtype == object
+        and dropna
+        and mask is None
+        and len(values) > 0
+    ):
+        if lib.infer_dtype(values, skipna=False) == "integer":
+            try:
+                int_values = np.array(values, dtype=np.int64)
+            except OverflowError:
+                pass
+            else:
+                vmin = int_values.min()
+                if vmin >= 0:
+                    vmax = int_values.max()
+                    if vmax < len(values) * 10:
+                        counts_arr = np.bincount(int_values)
+                        nonzero_idx = np.nonzero(counts_arr)[0]
+                        keys = nonzero_idx.astype(object)
+                        counts = counts_arr[nonzero_idx].astype(np.int64)
+                        res_keys = _reconstruct_data(keys, original.dtype, original)
+                        return res_keys, counts, 0
+
     keys, counts, na_counter = htable.value_count(values, dropna, mask=mask)
 
     if needs_i8_conversion(original.dtype):
@@ -1047,7 +1266,7 @@ def duplicated(
           occurrence.
         - ``last`` : Mark duplicates as ``True`` except for the last
           occurrence.
-        - False : Mark all duplicates as ``True``.
+        - ``False`` : Mark all duplicates as ``True``.
     mask : ndarray[bool], optional
         array indicating which elements to exclude from checking
 
@@ -1055,9 +1274,26 @@ def duplicated(
     -------
     duplicated : ndarray[bool]
     """
+    from pandas.compat._arch import IS_ARM
     from pandas.core.config_init import get_use_swisstable
 
     values = _ensure_data(values)
+
+    if IS_ARM and mask is None and isinstance(values, np.ndarray):
+        if values.dtype == np.int64 and keep in ("first", "last") and len(values) > 0:
+            vmin = values.min()
+            vmax = values.max()
+            # Check for overflow before computing range
+            if vmax >= 0 and vmin < 0:
+                # Potential overflow case: use Python int arithmetic
+                vrange = int(vmax) - int(vmin)
+            else:
+                vrange = vmax - vmin
+            if vrange < 100000:
+                return htable.duplicated_int64_small_range(
+                    values, vmin, vmax, keep=keep
+                )
+
     if get_use_swisstable():
         duplicated_funcs = {
             np.dtype("int64"): swisstable.duplicated_int64,

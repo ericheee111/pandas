@@ -10,6 +10,7 @@ from typing import (
 import numpy as np
 
 from pandas._libs import lib
+from pandas.compat._arch import IS_ARM
 from pandas.util._decorators import set_module
 
 from pandas.core.dtypes.cast import maybe_downcast_to_dtype
@@ -18,13 +19,21 @@ from pandas.core.dtypes.common import (
     is_nested_list_like,
     is_scalar,
 )
-from pandas.core.dtypes.dtypes import ExtensionDtype
+from pandas.core.dtypes.dtypes import (
+    CategoricalDtype,
+    ExtensionDtype,
+)
 from pandas.core.dtypes.generic import (
+    ABCCategorical,
     ABCDataFrame,
+    ABCExtensionArray,
     ABCSeries,
 )
 
 import pandas.core.common as com
+from pandas.core.algorithms import factorize
+from pandas.core.arrays import PeriodArray
+from pandas.core.dtypes.missing import isna
 from pandas.core.groupby import Grouper
 from pandas.core.indexes.api import (
     Index,
@@ -241,6 +250,14 @@ def pivot_table(
     columns = _convert_by(columns)
 
     if isinstance(aggfunc, list):
+        if IS_ARM:
+            fast_result = _try_fast_pivot_table_multi_agg(
+                data, values, index, columns, aggfunc, fill_value, margins,
+                dropna, margins_name, observed, sort, kwargs,
+            )
+            if fast_result is not None:
+                return fast_result.__finalize__(data, method="pivot_table")
+
         pieces: list[DataFrame] = []
         keys = []
         for func in aggfunc:
@@ -281,6 +298,774 @@ def pivot_table(
     return table.__finalize__(data, method="pivot_table")
 
 
+def _try_fast_pivot_table(
+    data: DataFrame,
+    values,
+    index,
+    columns,
+    aggfunc,
+    fill_value,
+    margins: bool,
+    dropna: bool,
+    margins_name: Hashable,
+    observed: bool,
+    sort: bool,
+    kwargs,
+) -> DataFrame | None:
+    if kwargs:
+        return None
+    if not dropna:
+        return None
+    if not sort:
+        return None
+    if not isinstance(aggfunc, str):
+        return None
+    if aggfunc not in ("mean", "sum", "count"):
+        return None
+
+    n_idx = len(index)
+    n_col = len(columns)
+    if n_col == 0:
+        return None
+    
+    # n_idx == 0 case (only columns, no index) requires special handling
+    # For now, only support it when margins=False to avoid complexity
+    if n_idx == 0 and margins:
+        return None
+
+    keys = index + columns
+    for key in keys:
+        if isinstance(key, Grouper):
+            return None
+        if not isinstance(key, str):
+            return None
+        if key not in data.columns:
+            return None
+
+    values_passed = values is not None
+    if values_passed:
+        if is_list_like(values):
+            values_multi = True
+            values_list = list(values)
+        else:
+            values_multi = False
+            values_list = [values]
+        for v in values_list:
+            if not isinstance(v, str) or v not in data.columns:
+                return None
+            if v in keys:
+                return None
+    else:
+        values_multi = True
+        values_list = []
+        for col in data.columns:
+            if col not in keys:
+                try:
+                    if np.issubdtype(data[col].dtype, np.number):
+                        values_list.append(col)
+                    else:
+                        return None
+                except TypeError:
+                    return None
+        if not values_list:
+            return None
+
+    for key in keys:
+        col_vals = data[key]._values
+        if isinstance(col_vals, ABCExtensionArray):
+            if isinstance(col_vals, PeriodArray):
+                return None
+            if hasattr(col_vals, "tz") and col_vals.tz is not None:
+                return None
+            if isinstance(col_vals.dtype, CategoricalDtype):
+                if not observed:
+                    return None
+            elif not hasattr(col_vals, "_ndarray"):
+                return None
+        try:
+            if isinstance(col_vals, ABCCategorical):
+                if col_vals.isna().any():
+                    return None
+            elif np.any(isna(col_vals)):
+                return None
+        except (TypeError, ValueError):
+            return None
+
+    for v in values_list:
+        val_arr = data[v]._values
+        if isinstance(val_arr, ABCExtensionArray):
+            return None
+        if not np.issubdtype(val_arr.dtype, np.number):
+            return None
+        try:
+            if np.any(isna(val_arr)):
+                return None
+        except (TypeError, ValueError):
+            return None
+
+    n_rows = len(data)
+    idx_codes_list = []
+    idx_uniques_list = []
+    for key in keys:
+        col_vals = data[key]._values
+        if isinstance(col_vals, ABCCategorical):
+            codes, uniques = factorize(col_vals, sort=True, use_na_sentinel=True)
+        elif isinstance(col_vals, ABCExtensionArray) and hasattr(col_vals, "_ndarray"):
+            codes, uniques = factorize(col_vals._ndarray, sort=True, use_na_sentinel=True)
+        else:
+            codes, uniques = factorize(col_vals, sort=True, use_na_sentinel=True)
+        idx_codes_list.append(codes)
+        idx_uniques_list.append(uniques)
+
+    if n_idx > 0:
+        row_sizes = [len(idx_uniques_list[i]) for i in range(n_idx)]
+        row_codes = idx_codes_list[0]
+        for i in range(1, n_idx):
+            row_codes = row_codes * row_sizes[i] + idx_codes_list[i]
+        n_row_total = 1
+        for s in row_sizes:
+            n_row_total *= s
+    else:
+        row_codes = np.zeros(n_rows, dtype=np.intp)
+        n_row_total = 1
+        row_sizes = []
+
+    col_sizes = [len(idx_uniques_list[n_idx + i]) for i in range(n_col)]
+    col_codes = idx_codes_list[n_idx]
+    for i in range(1, n_col):
+        col_codes = col_codes * col_sizes[i] + idx_codes_list[n_idx + i]
+    n_col_total = 1
+    for s in col_sizes:
+        n_col_total *= s
+
+    if n_row_total * n_col_total > 10_000_000:
+        return None
+
+    flat_codes = row_codes * n_col_total + col_codes
+    n_groups = n_row_total * n_col_total
+
+    # Try to use Cython fused kernel for better performance
+    use_cython = False
+    if margins and len(values_list) > 0 and aggfunc in ("sum", "mean", "count"):
+        # Check if all value columns are numeric
+        all_float = all(
+            np.issubdtype(data[v]._values.dtype, np.floating) for v in values_list
+        )
+        if all_float:
+            try:
+                from pandas._libs import pivot_fused
+                use_cython = True
+            except ImportError:
+                use_cython = False
+    
+    if use_cython:
+        # Use Cython fused kernel for single-pass aggregation + margins
+        all_values = np.column_stack(
+            [data[v]._values.astype(np.float64, copy=False) for v in values_list]
+        )
+        
+        if aggfunc == "sum":
+            result_3d, row_margins_2d, col_margins_2d, grand_margin_1d = (
+                pivot_fused.pivot_fused_sum(
+                    all_values, [row_codes, col_codes],
+                    n_row_total, n_col_total, True
+                )
+            )
+        elif aggfunc == "mean":
+            result_3d, row_margins_2d, col_margins_2d, grand_margin_1d = (
+                pivot_fused.pivot_fused_mean(
+                    all_values, row_codes, col_codes,
+                    n_row_total, n_col_total, True
+                )
+            )
+        elif aggfunc == "count":
+            result_3d, row_margins_2d, col_margins_2d, grand_margin_1d = (
+                pivot_fused.pivot_fused_count(
+                    row_codes, col_codes,
+                    n_row_total, n_col_total, len(values_list), True
+                )
+            )
+        
+        result_blocks = {}
+        margin_col_blocks = {}
+        margin_row_blocks = {}
+        grand_margin_vals = {}
+        
+        for vi, v in enumerate(values_list):
+            result_mat = result_3d[vi]
+            row_margin = row_margins_2d[vi]
+            col_margin = col_margins_2d[vi]
+            
+            result_blocks[v] = result_mat
+            # row_margins_2d has shape (n_values, n_row_total) - one value per row
+            # This becomes the "All" column (margin_col_blocks)
+            margin_col_blocks[v] = row_margin
+            # col_margins_2d has shape (n_values, n_col_total) - one value per column
+            # This becomes the "All" row (margin_row_blocks)
+            margin_row_blocks[v] = col_margin
+            # Compute grand margin using NumPy for exact numerical compatibility
+            if aggfunc == "mean":
+                grand_margin_vals[v] = np.nanmean(data[v]._values)
+            elif aggfunc == "sum":
+                grand_margin_vals[v] = np.nansum(data[v]._values)
+            else:  # count
+                grand_margin_vals[v] = np.sum(~np.isnan(data[v]._values))
+    else:
+        # Fallback to NumPy implementation
+        result_blocks = {}
+        for v in values_list:
+            val_arr = data[v]._values
+            orig_dtype = val_arr.dtype
+
+            if aggfunc == "sum":
+                if np.issubdtype(orig_dtype, np.integer):
+                    val_i64 = val_arr.astype(np.int64, copy=False)
+                    agg_result = np.bincount(flat_codes, weights=val_i64, minlength=n_groups)
+                    count_result = np.bincount(flat_codes, minlength=n_groups)
+                    has_missing = count_result.min() == 0
+                    if has_missing and fill_value is None:
+                        agg_result = agg_result.astype(np.float64)
+                        agg_result[count_result == 0] = np.nan
+                    elif has_missing and fill_value is not None:
+                        agg_result = agg_result.astype(np.int64)
+                        agg_result[count_result == 0] = fill_value
+                    else:
+                        agg_result = agg_result.astype(np.int64)
+                else:
+                    val_f64 = val_arr.astype(np.float64, copy=False)
+                    agg_result = np.bincount(
+                        flat_codes, weights=val_f64, minlength=n_groups
+                    )
+                    count_result = np.bincount(flat_codes, minlength=n_groups)
+                    has_missing = count_result.min() == 0
+                    if has_missing and fill_value is None:
+                        agg_result[count_result == 0] = np.nan
+                    elif has_missing and fill_value is not None:
+                        agg_result[count_result == 0] = fill_value
+            elif aggfunc == "count":
+                agg_result = np.bincount(flat_codes, minlength=n_groups).astype(np.float64)
+                agg_result[agg_result == 0] = np.nan
+            else:
+                val_f64 = val_arr.astype(np.float64, copy=False)
+                sum_result = np.bincount(flat_codes, weights=val_f64, minlength=n_groups)
+                valid_mask = ~np.isnan(val_f64)
+                count_result = np.bincount(flat_codes[valid_mask], minlength=n_groups).astype(np.float64)
+                with np.errstate(invalid="ignore"):
+                    agg_result = np.where(count_result > 0, sum_result / count_result, np.nan)
+
+            matrix = agg_result.reshape(n_row_total, n_col_total)
+            result_blocks[v] = matrix
+
+    if n_idx == 0:
+        # When n_idx == 0, we need to construct the result differently
+        # The result should have column combinations as index and value names as columns
+        # Then it will be transposed at the end
+        
+        # Create the "row" index (which will become columns after transpose)
+        # This is actually the column combinations
+        if n_col == 1:
+            row_idx = Index(idx_uniques_list[0], name=columns[0])
+        else:
+            row_arrays = []
+            for i in range(n_col):
+                stride = 1
+                for j in range(i + 1, n_col):
+                    stride *= col_sizes[j]
+                level_codes = np.arange(col_sizes[i])
+                repeats = 1
+                for j in range(i):
+                    repeats *= col_sizes[j]
+                level_codes = np.tile(np.repeat(level_codes, stride), repeats)
+                row_arrays.append(idx_uniques_list[i].take(level_codes))
+            row_idx = MultiIndex.from_arrays(row_arrays, names=columns)
+        
+        # Create the "column" index (which will become index after transpose)
+        # This is the value names
+        col_idx = Index(values_list)
+        
+        # Construct the result table
+        # result_blocks[v] has shape (1, n_col_total), we need to transpose to (n_col_total, 1)
+        # and then concatenate horizontally
+        from pandas import DataFrame as _DF
+        pieces = []
+        for v in values_list:
+            # Transpose from (1, n_col_total) to (n_col_total, 1)
+            df_v = _DF(result_blocks[v].T, index=row_idx, columns=[v])
+            pieces.append(df_v)
+        table = concat(pieces, axis=1)
+        
+    elif n_idx == 1:
+        row_idx = Index(idx_uniques_list[0], name=index[0])
+        
+        if n_col == 1:
+            col_idx = Index(idx_uniques_list[n_idx], name=columns[0])
+        else:
+            col_arrays = []
+            for i in range(n_col):
+                stride = 1
+                for j in range(i + 1, n_col):
+                    stride *= col_sizes[j]
+                level_codes = np.arange(col_sizes[i])
+                repeats = 1
+                for j in range(i):
+                    repeats *= col_sizes[j]
+                level_codes = np.tile(np.repeat(level_codes, stride), repeats)
+                col_arrays.append(idx_uniques_list[n_idx + i].take(level_codes))
+            col_idx = MultiIndex.from_arrays(col_arrays, names=columns)
+        
+        if values_passed and not values_multi:
+            v = values_list[0]
+            from pandas import DataFrame as _DF
+            table = _DF(result_blocks[v], index=row_idx, columns=col_idx)
+        else:
+            from pandas import DataFrame as _DF
+            pieces = []
+            for v in values_list:
+                df_v = _DF(result_blocks[v], index=row_idx, columns=col_idx)
+                pieces.append(df_v)
+            table = concat(pieces, keys=values_list, axis=1)
+            table.columns.names = [None] + (col_idx.names if isinstance(col_idx, MultiIndex) else [col_idx.name])
+    else:
+        row_arrays = []
+        for i in range(n_idx):
+            stride = 1
+            for j in range(i + 1, n_idx):
+                stride *= row_sizes[j]
+            level_codes = np.arange(row_sizes[i])
+            repeats = 1
+            for j in range(i):
+                repeats *= row_sizes[j]
+            level_codes = np.tile(np.repeat(level_codes, stride), repeats)
+            row_arrays.append(idx_uniques_list[i].take(level_codes))
+        row_idx = MultiIndex.from_arrays(row_arrays, names=index)
+
+        if n_col == 1:
+            col_idx = Index(idx_uniques_list[n_idx], name=columns[0])
+        else:
+            col_arrays = []
+            for i in range(n_col):
+                stride = 1
+                for j in range(i + 1, n_col):
+                    stride *= col_sizes[j]
+                level_codes = np.arange(col_sizes[i])
+                repeats = 1
+                for j in range(i):
+                    repeats *= col_sizes[j]
+                level_codes = np.tile(np.repeat(level_codes, stride), repeats)
+                col_arrays.append(idx_uniques_list[n_idx + i].take(level_codes))
+            col_idx = MultiIndex.from_arrays(col_arrays, names=columns)
+
+        if values_passed and not values_multi:
+            v = values_list[0]
+            from pandas import DataFrame as _DF
+            table = _DF(result_blocks[v], index=row_idx, columns=col_idx)
+        else:
+            from pandas import DataFrame as _DF
+            pieces = []
+            for v in values_list:
+                df_v = _DF(result_blocks[v], index=row_idx, columns=col_idx)
+                pieces.append(df_v)
+            table = concat(pieces, keys=values_list, axis=1)
+            table.columns.names = [None] + (col_idx.names if isinstance(col_idx, MultiIndex) else [col_idx.name])
+
+    if fill_value is not None:
+        table = table.fillna(fill_value)
+
+    if isinstance(table, ABCDataFrame):
+        table = table.sort_index(axis=1)
+
+    if margins:
+        from pandas import DataFrame as _DF
+
+        if not isinstance(margins_name, str):
+            raise ValueError("margins_name argument must be a string")
+
+        msg = f'Conflicting name "{margins_name}" in margins'
+        # Skip row_idx check when n_idx == 0 because row_idx is artificially created
+        if n_idx > 0:
+            for level in row_idx.names:
+                if margins_name in row_idx.get_level_values(level):
+                    raise ValueError(msg)
+        if isinstance(col_idx, MultiIndex):
+            for level in col_idx.names:
+                if margins_name in col_idx.get_level_values(level):
+                    raise ValueError(msg)
+        elif margins_name in col_idx:
+            raise ValueError(msg)
+
+        # Skip margins computation if already done by Cython fused kernel
+        if not use_cython:
+            margin_col_blocks = {}
+            margin_row_blocks = {}
+            grand_margin_vals = {}
+            for v in values_list:
+                mat = result_blocks[v]
+                if aggfunc == "mean":
+                    val_f64 = data[v]._values.astype(np.float64, copy=False)
+                    valid = ~np.isnan(val_f64)
+                    row_sum = np.bincount(row_codes, weights=val_f64, minlength=n_row_total)
+                    row_cnt = np.bincount(row_codes[valid], minlength=n_row_total).astype(np.float64)
+                    with np.errstate(invalid="ignore"):
+                        col_vals = np.where(row_cnt > 0, row_sum / row_cnt, np.nan)
+
+                    col_sum = np.bincount(col_codes, weights=val_f64, minlength=n_col_total)
+                    col_cnt = np.bincount(col_codes[valid], minlength=n_col_total).astype(np.float64)
+                    with np.errstate(invalid="ignore"):
+                        row_vals = np.where(col_cnt > 0, col_sum / col_cnt, np.nan)
+
+                    grand = np.nanmean(val_f64)
+                    use_int = False
+                else:
+                    if fill_value is not None:
+                        mat_f = np.where(np.isnan(mat.astype(np.float64)), fill_value, mat)
+                    else:
+                        mat_f = mat.astype(np.float64)
+                    use_int = np.issubdtype(mat.dtype, np.integer) and fill_value is not None
+                    col_vals = np.sum(mat_f, axis=1)
+                    row_vals = np.sum(mat_f, axis=0)
+                    grand = np.sum(mat_f)
+                if use_int:
+                    col_vals = col_vals.astype(np.int64)
+                    row_vals = row_vals.astype(np.int64)
+                    grand = np.int64(grand)
+                margin_col_blocks[v] = col_vals
+                margin_row_blocks[v] = row_vals
+                grand_margin_vals[v] = grand
+
+        if n_idx > 1:
+            margin_row_key = (margins_name,) + ("",) * (n_idx - 1)
+        else:
+            margin_row_key = margins_name
+
+        if values_passed and not values_multi:
+            v = values_list[0]
+            if isinstance(col_idx, MultiIndex):
+                mc_key = (margins_name,) + ("",) * (n_col - 1)
+            else:
+                mc_key = margins_name
+
+            table[mc_key] = margin_col_blocks[v]
+
+            row_data = np.empty(len(table.columns), dtype=margin_col_blocks[v].dtype)
+            for i, col in enumerate(table.columns):
+                if col == mc_key:
+                    row_data[i] = grand_margin_vals[v]
+                else:
+                    col_pos = table.columns.get_loc(col)
+                    if isinstance(col_pos, (int, np.integer)):
+                        row_data[i] = margin_row_blocks[v][col_pos]
+                    else:
+                        row_data[i] = fill_value if fill_value is not None else np.nan
+            margin_row_df = _DF(
+                row_data.reshape(1, -1),
+                index=Index([margin_row_key], name=row_idx.name) if n_idx <= 1 else MultiIndex.from_tuples([margin_row_key], names=row_idx.names),
+                columns=table.columns,
+            )
+            table = concat([table, margin_row_df])
+        else:
+            for v in values_list:
+                if isinstance(col_idx, MultiIndex):
+                    mc_key = (v, margins_name) + ("",) * (n_col - 1)
+                else:
+                    mc_key = (v, margins_name)
+                table[mc_key] = margin_col_blocks[v]
+
+            row_data = np.empty(len(table.columns), dtype=np.float64)
+            for i, col in enumerate(table.columns):
+                if isinstance(col, tuple):
+                    v_name = col[0]
+                    col_rest = col[1:]
+                    if isinstance(col_idx, MultiIndex):
+                        margin_suffix = (margins_name,) + ("",) * (n_col - 1)
+                    else:
+                        margin_suffix = (margins_name,)
+                    if col_rest == margin_suffix:
+                        row_data[i] = grand_margin_vals.get(v_name, np.nan)
+                        continue
+                    try:
+                        orig_idx = col_idx.get_loc(col_rest[0] if len(col_rest) == 1 else col_rest)
+                        if isinstance(orig_idx, (int, np.integer)):
+                            row_data[i] = margin_row_blocks[v_name][orig_idx]
+                        else:
+                            row_data[i] = fill_value if fill_value is not None else np.nan
+                    except (KeyError, TypeError):
+                        row_data[i] = fill_value if fill_value is not None else np.nan
+                else:
+                    row_data[i] = fill_value if fill_value is not None else np.nan
+            margin_row_df = _DF(
+                row_data.reshape(1, -1),
+                index=Index([margin_row_key], name=row_idx.name) if n_idx <= 1 else MultiIndex.from_tuples([margin_row_key], names=row_idx.names),
+                columns=table.columns,
+            )
+            table = concat([table, margin_row_df])
+
+        if fill_value is not None:
+            table = table.fillna(fill_value)
+
+    # Transpose when n_idx == 0
+    # In the fast path with n_idx == 0, we construct the result with column combinations as index
+    # and value names as columns, so we need to transpose to get the final orientation
+    if len(index) == 0 and len(columns) > 0:
+        table = table.T
+
+    if isinstance(table, ABCDataFrame) and dropna:
+        table = table.dropna(how="all", axis=1)
+
+    return table
+
+
+def _try_fast_pivot_table_multi_agg(
+    data: DataFrame,
+    values,
+    index,
+    columns,
+    aggfunc_list,
+    fill_value,
+    margins: bool,
+    dropna: bool,
+    margins_name: Hashable,
+    observed: bool,
+    sort: bool,
+    kwargs,
+) -> DataFrame | None:
+    if kwargs:
+        return None
+    if not dropna:
+        return None
+    if not sort:
+        return None
+    if margins:
+        return None
+
+    for func in aggfunc_list:
+        if not isinstance(func, str):
+            return None
+        if func not in ("mean", "sum", "count"):
+            return None
+
+    n_idx = len(index)
+    n_col = len(columns)
+    if n_idx == 0 or n_col == 0:
+        return None
+
+    keys = index + columns
+    for key in keys:
+        if isinstance(key, Grouper):
+            return None
+        if not isinstance(key, str):
+            return None
+        if key not in data.columns:
+            return None
+
+    values_passed = values is not None
+    if values_passed:
+        if is_list_like(values):
+            values_multi = True
+            values_list = list(values)
+        else:
+            values_multi = False
+            values_list = [values]
+        for v in values_list:
+            if not isinstance(v, str) or v not in data.columns:
+                return None
+            if v in keys:
+                return None
+    else:
+        values_multi = True
+        values_list = []
+        for col in data.columns:
+            if col not in keys:
+                try:
+                    if np.issubdtype(data[col].dtype, np.number):
+                        values_list.append(col)
+                except TypeError:
+                    pass
+        if not values_list:
+            return None
+
+    for key in keys:
+        col_vals = data[key]._values
+        if isinstance(col_vals, ABCExtensionArray):
+            if isinstance(col_vals, PeriodArray):
+                return None
+            if hasattr(col_vals, "tz") and col_vals.tz is not None:
+                return None
+            if isinstance(col_vals.dtype, CategoricalDtype):
+                if not observed:
+                    return None
+            elif not hasattr(col_vals, "_ndarray"):
+                return None
+        try:
+            if isinstance(col_vals, ABCCategorical):
+                if col_vals.isna().any():
+                    return None
+            elif np.any(isna(col_vals)):
+                return None
+        except (TypeError, ValueError):
+            return None
+
+    for v in values_list:
+        val_arr = data[v]._values
+        if isinstance(val_arr, ABCExtensionArray):
+            return None
+        if not np.issubdtype(val_arr.dtype, np.number):
+            return None
+        try:
+            if np.any(isna(val_arr)):
+                return None
+        except (TypeError, ValueError):
+            return None
+
+    n_rows = len(data)
+    idx_codes_list = []
+    idx_uniques_list = []
+    for key in keys:
+        col_vals = data[key]._values
+        if isinstance(col_vals, ABCCategorical):
+            codes, uniques = factorize(col_vals, sort=True, use_na_sentinel=True)
+        elif isinstance(col_vals, ABCExtensionArray) and hasattr(col_vals, "_ndarray"):
+            codes, uniques = factorize(col_vals._ndarray, sort=True, use_na_sentinel=True)
+        else:
+            codes, uniques = factorize(col_vals, sort=True, use_na_sentinel=True)
+        idx_codes_list.append(codes)
+        idx_uniques_list.append(uniques)
+
+    if n_idx > 0:
+        row_sizes = [len(idx_uniques_list[i]) for i in range(n_idx)]
+        row_codes = idx_codes_list[0]
+        for i in range(1, n_idx):
+            row_codes = row_codes * row_sizes[i] + idx_codes_list[i]
+        n_row_total = 1
+        for s in row_sizes:
+            n_row_total *= s
+    else:
+        row_codes = np.zeros(n_rows, dtype=np.intp)
+        n_row_total = 1
+        row_sizes = []
+
+    col_sizes = [len(idx_uniques_list[n_idx + i]) for i in range(n_col)]
+    col_codes = idx_codes_list[n_idx]
+    for i in range(1, n_col):
+        col_codes = col_codes * col_sizes[i] + idx_codes_list[n_idx + i]
+    n_col_total = 1
+    for s in col_sizes:
+        n_col_total *= s
+
+    if n_row_total * n_col_total > 10_000_000:
+        return None
+
+    flat_codes = row_codes * n_col_total + col_codes
+    n_groups = n_row_total * n_col_total
+
+    from pandas import DataFrame as _DF
+
+    agg_tables = {}
+    for func in aggfunc_list:
+        func_blocks = {}
+        for v in values_list:
+            val_arr = data[v]._values
+            orig_dtype = val_arr.dtype
+
+            if func == "sum":
+                if np.issubdtype(orig_dtype, np.integer):
+                    agg_result = np.zeros(n_groups, dtype=np.int64)
+                    np.add.at(agg_result, flat_codes, val_arr.astype(np.int64, copy=False))
+                    count_result = np.bincount(flat_codes, minlength=n_groups)
+                    has_missing = count_result.min() == 0
+                    if has_missing and fill_value is None:
+                        agg_result = agg_result.astype(np.float64)
+                        agg_result[count_result == 0] = np.nan
+                    elif has_missing and fill_value is not None:
+                        agg_result[count_result == 0] = fill_value
+                else:
+                    agg_result = np.zeros(n_groups, dtype=np.float64)
+                    np.add.at(agg_result, flat_codes, val_arr.astype(np.float64, copy=False))
+                    count_result = np.bincount(flat_codes, minlength=n_groups)
+                    has_missing = count_result.min() == 0
+                    if has_missing and fill_value is None:
+                        agg_result[count_result == 0] = np.nan
+                    elif has_missing and fill_value is not None:
+                        agg_result[count_result == 0] = fill_value
+            elif func == "count":
+                agg_result = np.bincount(flat_codes, minlength=n_groups).astype(np.float64)
+                agg_result[agg_result == 0] = np.nan
+            else:
+                sum_result = np.zeros(n_groups, dtype=np.float64)
+                count_result = np.zeros(n_groups, dtype=np.float64)
+                np.add.at(sum_result, flat_codes, val_arr.astype(np.float64, copy=False))
+                np.add.at(count_result, flat_codes, 1.0)
+                with np.errstate(invalid="ignore"):
+                    agg_result = np.where(count_result > 0, sum_result / count_result, np.nan)
+
+            matrix = agg_result.reshape(n_row_total, n_col_total)
+            func_blocks[v] = matrix
+        agg_tables[func] = func_blocks
+
+    if n_idx == 0:
+        row_idx = Index([0])
+    elif n_idx == 1:
+        row_idx = Index(idx_uniques_list[0], name=index[0])
+    else:
+        row_arrays = []
+        for i in range(n_idx):
+            stride = 1
+            for j in range(i + 1, n_idx):
+                stride *= row_sizes[j]
+            level_codes = np.arange(row_sizes[i])
+            repeats = 1
+            for j in range(i):
+                repeats *= row_sizes[j]
+            level_codes = np.tile(np.repeat(level_codes, stride), repeats)
+            row_arrays.append(idx_uniques_list[i].take(level_codes))
+        row_idx = MultiIndex.from_arrays(row_arrays, names=index)
+
+    if n_col == 1:
+        col_idx = Index(idx_uniques_list[n_idx], name=columns[0])
+    else:
+        col_arrays = []
+        for i in range(n_col):
+            stride = 1
+            for j in range(i + 1, n_col):
+                stride *= col_sizes[j]
+            level_codes = np.arange(col_sizes[i])
+            repeats = 1
+            for j in range(i):
+                repeats *= col_sizes[j]
+            level_codes = np.tile(np.repeat(level_codes, stride), repeats)
+            col_arrays.append(idx_uniques_list[n_idx + i].take(level_codes))
+        col_idx = MultiIndex.from_arrays(col_arrays, names=columns)
+
+    pieces = []
+    func_keys = []
+    for func in aggfunc_list:
+        func_blocks = agg_tables[func]
+        if values_passed and not values_multi:
+            v = values_list[0]
+            df_func = _DF(func_blocks[v], index=row_idx, columns=col_idx)
+        else:
+            func_pieces = []
+            for v in values_list:
+                df_v = _DF(func_blocks[v], index=row_idx, columns=col_idx)
+                func_pieces.append(df_v)
+            df_func = concat(func_pieces, keys=values_list, axis=1)
+            df_func.columns.names = [None] + (col_idx.names if isinstance(col_idx, MultiIndex) else [col_idx.name])
+        pieces.append(df_func)
+        func_keys.append(func)
+
+    table = concat(pieces, keys=func_keys, axis=1)
+
+    if fill_value is not None:
+        table = table.fillna(fill_value)
+
+    if len(index) == 0 and len(columns) > 0:
+        table = table.T
+
+    if isinstance(table, ABCDataFrame) and dropna:
+        table = table.dropna(how="all", axis=1)
+
+    return table
+
+
 def __internal_pivot_table(
     data: DataFrame,
     values,
@@ -298,6 +1083,14 @@ def __internal_pivot_table(
     """
     Helper of :func:`pandas.pivot_table` for any non-list ``aggfunc``.
     """
+    if IS_ARM:
+        fast_result = _try_fast_pivot_table(
+            data, values, index, columns, aggfunc, fill_value, margins,
+            dropna, margins_name, observed, sort, kwargs,
+        )
+        if fast_result is not None:
+            return fast_result
+
     keys = index + columns
 
     values_passed = values is not None
@@ -852,6 +1645,125 @@ def pivot(
     """
     columns_listlike = com.convert_to_list_like(columns)
 
+    use_fast_path = IS_ARM and (
+        len(columns_listlike) == 1
+        and index is not lib.no_default
+        and values is not lib.no_default
+        and not (is_list_like(values) and not isinstance(values, tuple))
+    )
+
+    if use_fast_path:
+        index_col = com.convert_to_list_like(index)
+        if len(index_col) != 1:
+            use_fast_path = False
+        elif index_col[0] is None or columns_listlike[0] is None:
+            use_fast_path = False
+
+    if use_fast_path:
+        idx_name = index_col[0]
+        col_name = columns_listlike[0]
+        val_name = values
+
+        idx_series = data[idx_name]
+        col_series = data[col_name]
+        val_series = data[val_name]
+
+        if len(idx_series) == 0:
+            use_fast_path = False
+
+    if use_fast_path:
+        idx_vals = idx_series._values
+        col_vals = col_series._values
+        val_vals = val_series._values
+
+        if isinstance(idx_vals, ABCExtensionArray):
+            if isinstance(idx_vals, PeriodArray):
+                use_fast_path = False
+            elif hasattr(idx_vals, "_ndarray"):
+                if hasattr(idx_vals, "tz") and idx_vals.tz is not None:
+                    use_fast_path = False
+                elif isinstance(idx_vals.dtype, CategoricalDtype):
+                    use_fast_path = False
+                else:
+                    idx_arr = idx_vals._ndarray
+            else:
+                use_fast_path = False
+        else:
+            idx_arr = idx_vals
+
+        if isinstance(col_vals, ABCExtensionArray):
+            if isinstance(col_vals, PeriodArray):
+                use_fast_path = False
+            elif hasattr(col_vals, "_ndarray"):
+                if hasattr(col_vals, "tz") and col_vals.tz is not None:
+                    use_fast_path = False
+                elif isinstance(col_vals.dtype, CategoricalDtype):
+                    use_fast_path = False
+                else:
+                    col_arr = col_vals._ndarray
+            else:
+                use_fast_path = False
+        else:
+            col_arr = col_vals
+
+        if isinstance(val_vals, ABCExtensionArray):
+            if hasattr(val_vals, "_ndarray"):
+                val_arr = val_vals._ndarray
+            else:
+                use_fast_path = False
+        else:
+            val_arr = val_vals
+
+    if use_fast_path:
+        try:
+            has_nan = bool(np.any(isna(idx_arr)) or np.any(isna(col_arr)))
+        except (TypeError, ValueError):
+            has_nan = True
+
+        if has_nan:
+            use_fast_path = False
+
+    if use_fast_path:
+        row_codes, row_uniques = factorize(idx_arr, sort=True, use_na_sentinel=True)
+        col_codes, col_uniques = factorize(col_arr, sort=True, use_na_sentinel=True)
+
+        n_row = len(row_uniques)
+        n_col = len(col_uniques)
+
+        flat_idx = row_codes * n_col + col_codes
+        if len(flat_idx) > 0:
+            counts = np.bincount(flat_idx, minlength=n_row * n_col)
+            if counts.max() > 1:
+                raise ValueError("Index contains duplicate entries, cannot reshape")
+            has_missing = counts.min() == 0
+        else:
+            has_missing = False
+
+        if np.issubdtype(val_arr.dtype, np.floating):
+            result_data = np.full((n_row, n_col), np.nan, dtype=val_arr.dtype)
+        elif np.issubdtype(val_arr.dtype, np.integer):
+            if has_missing:
+                result_data = np.full((n_row, n_col), np.nan, dtype=np.float64)
+                val_arr = val_arr.astype(np.float64, copy=False)
+            else:
+                result_data = np.full((n_row, n_col), -1, dtype=val_arr.dtype)
+        else:
+            result_data = np.full((n_row, n_col), None, dtype=object)
+
+        result_data[row_codes, col_codes] = val_arr
+
+        row_idx = Index(row_uniques, name=idx_name)
+        if row_idx.dtype != idx_series.dtype:
+            row_idx = row_idx.astype(idx_series.dtype)
+
+        col_idx = Index(col_uniques, name=col_name)
+        if col_idx.dtype != col_series.dtype:
+            col_idx = col_idx.astype(col_series.dtype)
+
+        result = data._constructor(result_data, index=row_idx, columns=col_idx)
+
+        return result
+
     # If columns is None we will create a MultiIndex level with None as name
     # which might cause duplicated names because None is the default for
     # level names
@@ -1082,7 +1994,6 @@ def crosstab(
     rownames = _get_names(index, rownames, prefix="row")
     colnames = _get_names(columns, colnames, prefix="col")
 
-    # duplicate names mapped to unique names for pivot op
     (
         rownames_mapper,
         unique_rownames,
@@ -1092,31 +2003,134 @@ def crosstab(
 
     from pandas import DataFrame
 
-    data = {
-        **dict(zip(unique_rownames, index, strict=True)),
-        **dict(zip(unique_colnames, columns, strict=True)),
-    }
-    df = DataFrame(data, index=common_idx)
-
-    if values is None:
-        df["__dummy__"] = 0
-        kwargs = {"aggfunc": len, "fill_value": 0}
-    else:
-        df["__dummy__"] = values
-        kwargs = {"aggfunc": aggfunc}
-
-    # error: Argument 7 to "pivot_table" of "DataFrame" has incompatible type
-    # "**Dict[str, object]"; expected "Union[...]"
-    table = df.pivot_table(
-        "__dummy__",
-        index=unique_rownames,
-        columns=unique_colnames,
-        margins=margins,
-        margins_name=margins_name,
-        dropna=dropna,
-        observed=dropna,
-        **kwargs,  # type: ignore[arg-type]
+    use_fast_path = IS_ARM and (
+        len(index) == 1
+        and len(columns) == 1
+        and not isinstance(index[0], ABCCategorical)
+        and not isinstance(columns[0], ABCCategorical)
     )
+
+    if use_fast_path:
+        idx_dtype = getattr(index[0], "dtype", None)
+        col_dtype = getattr(columns[0], "dtype", None)
+        if isinstance(idx_dtype, CategoricalDtype) or isinstance(
+            col_dtype, CategoricalDtype
+        ):
+            use_fast_path = False
+
+    if use_fast_path and values is not None:
+        if isinstance(values, ABCSeries):
+            if isinstance(values.dtype, ExtensionDtype):
+                use_fast_path = False
+        elif isinstance(values, ABCExtensionArray):
+            use_fast_path = False
+
+    if use_fast_path:
+        raw_index = index[0]
+        raw_columns = columns[0]
+
+        try:
+                has_nan = bool(
+                    np.any(isna(raw_index)) or np.any(isna(raw_columns))
+                )
+                if not has_nan and values is not None:
+                    has_nan = bool(np.any(isna(values)))
+        except (TypeError, ValueError):
+            has_nan = True
+
+        if has_nan:
+            use_fast_path = False
+
+    if use_fast_path:
+        raw_index = index[0]
+        raw_columns = columns[0]
+
+        if common_idx is not None:
+            if isinstance(raw_index, ABCSeries):
+                raw_index = raw_index.reindex(common_idx)
+            if isinstance(raw_columns, ABCSeries):
+                raw_columns = raw_columns.reindex(common_idx)
+
+        if not isinstance(
+            raw_index, (Index, ABCSeries, ABCExtensionArray, np.ndarray)
+        ):
+            raw_index = np.asarray(raw_index)
+        if not isinstance(
+            raw_columns, (Index, ABCSeries, ABCExtensionArray, np.ndarray)
+        ):
+            raw_columns = np.asarray(raw_columns)
+
+        row_codes, row_uniques = factorize(raw_index, sort=True, use_na_sentinel=True)
+        col_codes, col_uniques = factorize(raw_columns, sort=True, use_na_sentinel=True)
+
+        n_row = len(row_uniques)
+        n_col = len(col_uniques)
+
+        if values is None:
+            flat = row_codes * n_col + col_codes
+            counts = np.bincount(flat, minlength=n_row * n_col)
+            table_data = counts.reshape(n_row, n_col).astype(np.int64)
+        elif aggfunc == "sum":
+            values_arr = np.asarray(values)
+            if np.issubdtype(values_arr.dtype, np.integer):
+                acc_dtype = np.int64
+            else:
+                acc_dtype = values_arr.dtype
+            table_data = np.zeros((n_row, n_col), dtype=acc_dtype)
+            np.add.at(
+                table_data, (row_codes, col_codes), values_arr.astype(acc_dtype, copy=False)
+            )
+        else:
+            use_fast_path = False
+
+    if use_fast_path:
+        row_idx = Index(row_uniques, name=unique_rownames[0])
+        col_idx = Index(col_uniques, name=unique_colnames[0])
+        table = DataFrame(table_data, index=row_idx, columns=col_idx)
+
+        if margins:
+            row_margin = table_data.sum(axis=1)
+            col_margin = table_data.sum(axis=0)
+            grand_total = row_margin.sum()
+
+            if values is None:
+                row_margin = row_margin.astype(np.int64)
+                col_margin = col_margin.astype(np.int64)
+                grand_total = np.int64(grand_total)
+
+            col_with_margin = col_idx.append(Index([margins_name]))
+            col_with_margin.name = col_idx.name
+            new_data = np.column_stack([table_data, row_margin])
+            bottom_row = np.append(col_margin, grand_total)
+            new_data = np.vstack([new_data, bottom_row])
+
+            row_with_margin = row_idx.append(Index([margins_name]))
+            row_with_margin.name = row_idx.name
+            table = DataFrame(new_data, index=row_with_margin, columns=col_with_margin)
+    else:
+        data = {
+            **dict(zip(unique_rownames, index, strict=True)),
+            **dict(zip(unique_colnames, columns, strict=True)),
+        }
+        df = DataFrame(data, index=common_idx)
+
+        if values is None:
+            df["__dummy__"] = 0
+            kwargs = {"aggfunc": len, "fill_value": 0}
+        else:
+            df["__dummy__"] = values
+            kwargs = {"aggfunc": aggfunc}
+
+        table = df.pivot_table(
+            "__dummy__",
+            index=unique_rownames,
+            columns=unique_colnames,
+            margins=margins,
+            margins_name=margins_name,
+            dropna=dropna,
+            observed=dropna,
+            **kwargs,
+        )
 
     # Post-process
     if normalize is not False:

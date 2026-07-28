@@ -52,6 +52,34 @@ import pandas.core.common as com
 
 
 class TestFactorize:
+    def test_unique_large_array_uses_legacy_hashtable(self, monkeypatch):
+        class FailSwissTable:
+            def __init__(self, *args, **kwargs):
+                pytest.fail("large low-cardinality unique regresses with SwissTable")
+
+        monkeypatch.setitem(algos._swisstables, "float64", FailSwissTable)
+        values = np.zeros(1_000_001, dtype=np.float64)
+
+        with pd.option_context("compute.use_swisstable", True):
+            result = algos.unique(values)
+
+        tm.assert_numpy_array_equal(result, np.array([0.0]))
+
+    def test_factorize_array_mask_uses_legacy_hashtable(self, monkeypatch):
+        class FailSwissTable:
+            def __init__(self, *args, **kwargs):
+                pytest.fail("masked arrays regress on the SwissTable path")
+
+        monkeypatch.setitem(algos._swisstables, "int64", FailSwissTable)
+        values = np.array([1, 2, 1], dtype=np.int64)
+        mask = np.array([False, False, False])
+
+        with pd.option_context("compute.use_swisstable", True):
+            codes, uniques = algos.factorize_array(values, mask=mask)
+
+        tm.assert_numpy_array_equal(codes, np.array([0, 1, 0], dtype=np.intp))
+        tm.assert_numpy_array_equal(uniques, np.array([1, 2], dtype=np.int64))
+
     def test_factorize_complex(self):
         # GH#17927
         array = np.array([1, 2, 2 + 1j], dtype=complex)
@@ -339,6 +367,62 @@ class TestFactorize:
         tm.assert_numpy_array_equal(codes, expected_codes)
         tm.assert_numpy_array_equal(uniques, expected_uniques)
 
+    def test_object_int_factorize(self, writable):
+        data = np.array([2, -1, 2, 0], dtype=object)
+        data.setflags(write=writable)
+        expected_codes = np.array([2, 0, 2, 1], dtype=np.intp)
+        expected_uniques = np.array([-1, 0, 2], dtype=object)
+
+        codes, uniques = algos.factorize(data, sort=True)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
+    def test_object_int_factorize_sort_false(self, writable):
+        data = np.array([2, -1, 2, 0], dtype=object)
+        data.setflags(write=writable)
+        expected_codes = np.array([0, 1, 0, 2], dtype=np.intp)
+        expected_uniques = np.array([2, -1, 0], dtype=object)
+
+        codes, uniques = algos.factorize(data, sort=False)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
+    def test_object_int_factorize_fallback_semantics(self, writable):
+        data = np.array([True, 1, np.int64(1), None, 2**80, 2**80], dtype=object)
+        data.setflags(write=writable)
+        expected_codes = np.array([0, 0, 0, -1, 1, 1], dtype=np.intp)
+        expected_uniques = np.array([True, 2**80], dtype=object)
+
+        codes, uniques = algos.factorize(data)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
+    def test_object_int_factorize_overflow_fallback(self, writable):
+        data = np.array([1, 2**80], dtype=object)
+        data.setflags(write=writable)
+        expected_codes = np.array([0, 1], dtype=np.intp)
+        expected_uniques = np.array([1, 2**80], dtype=object)
+
+        codes, uniques = algos.factorize(data)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
+    def test_object_int_factorize_int64_bounds(self, writable):
+        info = np.iinfo(np.int64)
+        data = np.array(
+            [info.max, info.min, info.max, info.max + 1, info.min - 1],
+            dtype=object,
+        )
+        data.setflags(write=writable)
+        expected_codes = np.array([0, 1, 0, 2, 3], dtype=np.intp)
+        expected_uniques = np.array(
+            [info.max, info.min, info.max + 1, info.min - 1], dtype=object
+        )
+
+        codes, uniques = algos.factorize(data)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
     def test_datetime64_factorize(self, writable):
         # GH35650 Verify whether read-only datetime64 array can be factorized
         data = np.array([np.datetime64("2020-01-01T00:00:00.000")], dtype="M8[ns]")
@@ -424,6 +508,32 @@ class TestFactorize:
         codes, uniques = algos.factorize_array(data, na_value=na_value)
         expected_uniques = data[[1, 3]]
         expected_codes = np.array([-1, 0, -1, 1], dtype=np.intp)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
+    @pytest.mark.parametrize("na_value", [np.nan, pd.NA, NaT])
+    def test_string_factorize_null_na_value(self, na_value):
+        data = np.array(["a", na_value, "b", None, "a"], dtype=object)
+
+        codes, uniques = algos.factorize_array(data, na_value=na_value)
+
+        expected_codes = np.array([0, -1, 1, -1, 0], dtype=np.intp)
+        expected_uniques = np.array(["a", "b"], dtype=object)
+        tm.assert_numpy_array_equal(codes, expected_codes)
+        tm.assert_numpy_array_equal(uniques, expected_uniques)
+
+    def test_string_factorize_custom_na_value(self):
+        class EqualToA:
+            def __eq__(self, other):
+                return other == "a"
+
+        na_value = EqualToA()
+        data = np.array(["a", "b", "a", "c"], dtype=object)
+
+        codes, uniques = algos.factorize_array(data, na_value=na_value)
+
+        expected_codes = np.array([-1, 0, -1, 1], dtype=np.intp)
+        expected_uniques = np.array(["b", "c"], dtype=object)
         tm.assert_numpy_array_equal(codes, expected_codes)
         tm.assert_numpy_array_equal(uniques, expected_uniques)
 

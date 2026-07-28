@@ -53,9 +53,74 @@ SIZE_HINT_LIMIT = (1 << 20) + 7
 
 
 cdef Py_ssize_t _INIT_VEC_CAP = 128
+cdef bint _use_boostkit_fastpaths = False
+
+
+def set_use_boostkit_fastpaths(bint value):
+    global _use_boostkit_fastpaths
+    _use_boostkit_fastpaths = value
+
 
 include "hashtable_class_helper.pxi"
 include "hashtable_func_helper.pxi"
+
+
+def duplicated_int64_small_range(
+    const int64_t[:] values, int64_t vmin, int64_t vmax, object keep="first"
+):
+    """
+    Fast path for duplicated detection on int64 arrays with small value range.
+
+    Uses direct array lookup instead of hash table for O(n) performance
+    with very low constant factor.
+
+    Parameters
+    ----------
+    values : int64 array
+    vmin : minimum value in array
+    vmax : maximum value in array
+    keep : {'first', 'last'}
+
+    Returns
+    -------
+    ndarray[bool]
+    """
+    cdef:
+        Py_ssize_t i, n = len(values)
+        int64_t vrange
+        int64_t idx
+        ndarray[uint8_t, ndim=1, cast=True] seen
+        ndarray[uint8_t, ndim=1, cast=True] out
+
+    vrange_py = int(vmax) - int(vmin)
+    if vrange_py < 0 or vrange_py > 10 ** 8:
+        raise ValueError(
+            "Value range too large or vmin/vmax overflow detected. "
+            "Ensure vmin <= vmax and the range fits in a reasonable array."
+        )
+    vrange = <int64_t>vrange_py
+
+    seen = np.zeros(vrange + 1, dtype=np.uint8)
+    out = np.ones(n, dtype=np.uint8)
+
+    if keep == "first":
+        with nogil:
+            for i in range(n):
+                idx = values[i] - vmin
+                if not seen[idx]:
+                    seen[idx] = 1
+                    out[i] = 0
+    elif keep == "last":
+        with nogil:
+            for i in range(n - 1, -1, -1):
+                idx = values[i] - vmin
+                if not seen[idx]:
+                    seen[idx] = 1
+                    out[i] = 0
+    else:
+        raise ValueError('keep must be "first" or "last"')
+
+    return out.view(np.bool_)
 
 
 # map derived hash-map types onto basic hash-map types:

@@ -410,6 +410,155 @@ def test_apply_mixed_dtype_corner_indexing():
     tm.assert_series_equal(result, expected)
 
 
+def test_apply_axis1_label_lookup_uses_row_values_cache():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    result = df.apply(lambda row: row["A"] + row["B"], axis=1)
+
+    expected = Series([11, 22])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_string_label_lookup_bypasses_apply_if_callable(monkeypatch):
+    def raise_if_called(key, obj):
+        raise AssertionError("cached string labels should avoid apply_if_callable")
+
+    df = DataFrame({"a": [1, 2], "b": [10, 20]})
+    monkeypatch.setattr("pandas.core.series.com.apply_if_callable", raise_if_called)
+
+    result = df.apply(lambda row: row["a"] + row["b"], axis=1)
+
+    expected = Series([11, 22])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_callable_key_still_respected():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    result = df.apply(lambda row: row[lambda obj: "A"], axis=1)
+
+    expected = Series([1, 2])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_duplicate_columns_keep_series_lookup_semantics():
+    df = DataFrame([[1, 10], [2, 20]], columns=["A", "A"])
+
+    result = df.apply(lambda row: row["A"].sum(), axis=1)
+
+    expected = Series([11, 22])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_replaced_index_invalidates_label_cache():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    def replace_index(row):
+        row.index = ["X", "Y"]
+        return row["X"] + row["Y"]
+
+    result = df.apply(replace_index, axis=1)
+
+    expected = Series([11, 22])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_mutation_visible_to_later_cached_lookup():
+    df = DataFrame({"A": [1, 2], "B": ["x", "y"]})
+
+    def mutate_then_read(row):
+        row["A"] = row["A"] + 100
+        return row["A"]
+
+    result = df.apply(mutate_then_read, axis=1)
+
+    expected = Series([101, 102])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_homogeneous_mutation_exception_preserved():
+    df = DataFrame({"A": [1.0, 2.0], "B": [10.0, 20.0]})
+
+    def mutate_then_read(row):
+        row["A"] = row["A"] + 100
+        return row["A"]
+
+    msg = "assignment destination is read-only"
+    with pytest.raises(ValueError, match=msg):
+        df.apply(mutate_then_read, axis=1)
+
+
+@pytest.mark.parametrize("setter", ["bracket", "loc", "iloc", "at", "iat"])
+def test_apply_axis1_single_row_homogeneous_mutation_visible(setter):
+    df = DataFrame({"A": [1.0], "B": [10.0]})
+
+    def mutate_then_read(row):
+        value = row["A"] + 100
+        if setter == "bracket":
+            row["A"] = value
+        elif setter in ("loc", "at"):
+            getattr(row, setter)["A"] = value
+        else:
+            getattr(row, setter)[0] = value
+        return row["A"]
+
+    result = df.apply(mutate_then_read, axis=1)
+
+    expected = Series([101.0])
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("share_kind", ["shallow_copy", "to_frame"])
+def test_apply_axis1_cow_mutation_visible_after_sharing(share_kind):
+    df = DataFrame({"A": [1.0, 2.0], "B": [10.0, 20.0]})
+
+    def share_mutate_then_read(row):
+        if share_kind == "shallow_copy":
+            _shared = row.copy(deep=False)
+        else:
+            _shared = row.to_frame()
+        row["A"] = row["A"] * 2
+        return row["A"]
+
+    result = df.apply(share_mutate_then_read, axis=1)
+
+    expected = Series([2.0, 4.0])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_missing_label_raises_key_error():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    with pytest.raises(KeyError, match="C"):
+        df.apply(lambda row: row["C"], axis=1)
+
+
+def test_apply_axis1_listlike_key_uses_series_lookup_semantics():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    result = df.apply(lambda row: row[["A"]], axis=1)
+
+    expected = df[["A"]]
+    tm.assert_frame_equal(result, expected)
+
+
+def test_apply_axis1_integer_key_does_not_fall_back_to_position():
+    df = DataFrame({"A": [1, 2], "B": [10, 20]})
+
+    with pytest.raises(KeyError, match="0"):
+        df.apply(lambda row: row[0], axis=1)
+
+
+def test_apply_axis1_tuple_label_uses_series_lookup_semantics():
+    columns = pd.Index([("A",), ("B",)], tupleize_cols=False)
+    df = DataFrame([[1, 10], [2, 20]], columns=columns)
+
+    result = df.apply(lambda row: row[("A",)], axis=1)
+
+    expected = Series([1, 2])
+    tm.assert_series_equal(result, expected)
+
+
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
 @pytest.mark.parametrize("ax", ["index", "columns"])
 @pytest.mark.parametrize(

@@ -2,6 +2,7 @@ from datetime import datetime
 from itertools import permutations
 
 import numpy as np
+import pytest
 
 from pandas._libs import algos as libalgos
 
@@ -53,6 +54,36 @@ def test_groupsort_indexer():
     expected = expected.astype(np.intp)
 
     tm.assert_numpy_array_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "positions,start,step,expected",
+    [
+        ([0, 2, 4], 10, 3, [10, 16, 22]),
+        ([0, 2, 4], 10, -2, [10, 6, 2]),
+        ([], 5, 7, []),
+    ],
+)
+def test_range_positions_to_labels(positions, start, step, expected):
+    positions = np.array(positions, dtype=np.intp)
+
+    result = libalgos.range_positions_to_labels(positions, start, step)
+
+    expected = np.array(expected, dtype=np.intp)
+    tm.assert_numpy_array_equal(result, expected)
+
+
+def test_count_categorical_codes():
+    for dtype in ["int8", "int16", "int32", "int64"]:
+        codes = np.array([0, 1, 1, -1, 2], dtype=dtype)
+
+        result = libalgos.count_categorical_codes(codes, 4, dropna=True)
+        expected = np.array([1, 2, 1, 0], dtype=np.int64)
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = libalgos.count_categorical_codes(codes, 4, dropna=False)
+        expected = np.array([1, 2, 1, 0, 1], dtype=np.int64)
+        tm.assert_numpy_array_equal(result, expected)
 
 
 class TestPadBackfill:
@@ -160,3 +191,148 @@ class TestInfinity:
         assert not NegInf <= np.nan
         assert not NegInf == np.nan
         assert NegInf != np.nan
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("axis", [0, 1])
+def test_nancount_2d(dtype, axis):
+    values = np.array([[1.0, np.nan, 3.0], [np.nan, 2.0, 4.0]], dtype=dtype)
+    result = libalgos.nancount_2d(values, axis)
+    expected = np.count_nonzero(~np.isnan(values), axis=1 if axis == 0 else 0)
+    tm.assert_numpy_array_equal(result, expected.astype(np.intp))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("all_valid", [False, True])
+def test_nanvalidity_2d(dtype, axis, all_valid):
+    values = np.array(
+        [[1.0, np.nan, 3.0], [np.nan, np.nan, 4.0]], dtype=dtype
+    )
+    result = libalgos.nanvalidity_2d(values, axis, all_valid)
+    valid = ~np.isnan(values)
+    op_axis = 1 if axis == 0 else 0
+    expected = valid.all(op_axis) if all_valid else valid.any(op_axis)
+    tm.assert_numpy_array_equal(result, expected)
+
+
+def test_nancount_2d_rejects_bad_axis():
+    values = np.ones((2, 2), dtype=np.float64)
+    with pytest.raises(ValueError, match="axis must be 0 or 1"):
+        libalgos.nancount_2d(values, 2)
+
+
+def test_nancount_2d_rejects_integer_dtype():
+    values = np.ones((2, 2), dtype=np.int64)
+    with pytest.raises(TypeError):
+        libalgos.nancount_2d(values, 0)
+
+
+def test_putmask_masked_float64():
+    values = np.array([1.0, 2.0, 3.0])
+    validity = np.array([False, True, True])
+    mask = np.array([False, True, False])
+
+    libalgos.putmask_masked_float64(values, validity, mask, 4.0)
+
+    expected_values = np.array([1.0, 4.0, 3.0])
+    expected_validity = np.array([False, False, True])
+    tm.assert_numpy_array_equal(values, expected_values)
+    tm.assert_numpy_array_equal(validity, expected_validity)
+
+
+class TestGetIndexerSortedUnique:
+    @pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int32, np.int64])
+    def test_basic(self, dtype):
+        values = np.array([0, 1, 2, 3, 4], dtype=dtype)
+        targets = np.array([1, 3, 4], dtype=dtype)
+        result = libalgos.get_indexer_sorted_unique(values, targets)
+        expected = np.array([1, 3, 4], dtype=np.intp)
+        tm.assert_numpy_array_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int32, np.int64])
+    def test_missing_targets(self, dtype):
+        values = np.array([0, 2, 4, 6], dtype=dtype)
+        targets = np.array([1, 5], dtype=dtype)
+        result = libalgos.get_indexer_sorted_unique(values, targets)
+        expected = np.array([-1, -1], dtype=np.intp)
+        tm.assert_numpy_array_equal(result, expected)
+
+    def test_empty_targets(self):
+        values = np.array([1, 2, 3], dtype=np.int64)
+        targets = np.array([], dtype=np.int64)
+        result = libalgos.get_indexer_sorted_unique(values, targets)
+        expected = np.array([], dtype=np.intp)
+        tm.assert_numpy_array_equal(result, expected)
+
+    def test_empty_values(self):
+        values = np.array([], dtype=np.int64)
+        targets = np.array([1, 2], dtype=np.int64)
+        result = libalgos.get_indexer_sorted_unique(values, targets)
+        expected = np.array([-1, -1], dtype=np.intp)
+        tm.assert_numpy_array_equal(result, expected)
+
+    def test_dtype_mismatch(self):
+        values = np.array([1, 2, 3], dtype=np.int32)
+        targets = np.array([1, 2], dtype=np.int64)
+        with pytest.raises(TypeError, match="matching integer dtypes"):
+            libalgos.get_indexer_sorted_unique(values, targets)
+
+    def test_non_integer_dtype(self):
+        values = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        targets = np.array([1.0], dtype=np.float64)
+        with pytest.raises(TypeError, match="requires integer arrays"):
+            libalgos.get_indexer_sorted_unique(values, targets)
+
+    @pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int32, np.int64])
+    def test_mixed_present_absent(self, dtype):
+        values = np.array([1, 3, 5, 7, 9], dtype=dtype)
+        targets = np.array([0, 1, 4, 5, 10], dtype=dtype)
+        result = libalgos.get_indexer_sorted_unique(values, targets)
+        expected = np.array([-1, 0, -1, 2, -1], dtype=np.intp)
+        tm.assert_numpy_array_equal(result, expected)
+
+
+class TestSearchsortedScalar:
+    def test_empty_array(self):
+        arr = np.array([], dtype=np.int64)
+        assert libalgos.searchsorted_scalar(arr, 5) == 0
+
+    @pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int32, np.int64])
+    def test_left_side(self, dtype):
+        arr = np.array([1, 3, 5, 7, 9], dtype=dtype)
+        assert libalgos.searchsorted_scalar(arr, 5, "left") == 2
+
+    @pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int32, np.int64])
+    def test_right_side(self, dtype):
+        arr = np.array([1, 3, 5, 5, 7, 9], dtype=dtype)
+        assert libalgos.searchsorted_scalar(arr, 5, "right") == 4
+
+    @pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int32, np.int64])
+    def test_not_found(self, dtype):
+        arr = np.array([1, 3, 5, 7], dtype=dtype)
+        assert libalgos.searchsorted_scalar(arr, 4, "left") == 2
+
+    def test_non_contiguous(self):
+        base = np.arange(20, dtype=np.int64)
+        arr = base[::2]
+        result = libalgos.searchsorted_scalar(arr, 5, "left")
+        expected = np.searchsorted(arr, np.int64(5), side="left")
+        assert result == expected
+
+    def test_non_integer_dtype(self):
+        arr = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+        with pytest.raises(TypeError, match="requires an integer array"):
+            libalgos.searchsorted_scalar(arr, 1, "left")
+
+    @pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int32, np.int64])
+    def test_boundary_values(self, dtype):
+        arr = np.array([1, 3, 5, 7], dtype=dtype)
+        assert libalgos.searchsorted_scalar(arr, 0, "left") == 0
+        assert libalgos.searchsorted_scalar(arr, 8, "left") == 4
+
+    @pytest.mark.parametrize("dtype", [np.int8, np.int16, np.int32, np.int64])
+    def test_left_vs_right(self, dtype):
+        arr = np.array([1, 3, 3, 3, 5], dtype=dtype)
+        left = libalgos.searchsorted_scalar(arr, 3, "left")
+        right = libalgos.searchsorted_scalar(arr, 3, "right")
+        assert left == 1
+        assert right == 4

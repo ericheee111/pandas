@@ -303,6 +303,21 @@ class TestGetIndexer:
         expected2 = np.array([0, -1, 1, 3], dtype=np.intp)
         tm.assert_numpy_array_equal(res2, expected2)
 
+    def test_get_indexer_numeric_categories_string_target(self):
+        ci = CategoricalIndex([1, 2, 3])
+        target = CategoricalIndex(["a", "b"])
+        result = ci.get_indexer(target)
+        expected = np.array([-1, -1], dtype=np.intp)
+        tm.assert_numpy_array_equal(result, expected)
+
+    def test_get_indexer_non_unique_numeric_cats_string_values(self):
+        ci = CategoricalIndex([1, 2, 3])
+        indexer, missing = ci.get_indexer_non_unique(["a", "b"])
+        expected_indexer = np.array([-1, -1], dtype=np.intp)
+        expected_missing = np.array([0, 1], dtype=np.intp)
+        tm.assert_numpy_array_equal(indexer, expected_indexer)
+        tm.assert_numpy_array_equal(missing, expected_missing)
+
 
 class TestWhere:
     def test_where(self, listlike_box):

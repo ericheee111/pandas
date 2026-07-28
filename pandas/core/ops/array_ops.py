@@ -8,9 +8,11 @@ from __future__ import annotations
 import datetime
 from functools import partial
 import operator
+import platform
 from typing import (
     TYPE_CHECKING,
     Any,
+    cast,
 )
 
 import numpy as np
@@ -28,6 +30,7 @@ from pandas._libs.tslibs import (
     is_supported_dtype,
     is_unitless,
 )
+from pandas.compat._arch import IS_ARM
 
 from pandas.core.dtypes.cast import (
     construct_1d_object_array_from_listlike,
@@ -69,6 +72,97 @@ if TYPE_CHECKING:
 
 # -----------------------------------------------------------------------------
 # Masking NA values and fallbacks for operations numpy does not support
+
+_USE_AARCH64_COMPARISON_FASTPATH = platform.machine() == "aarch64"
+_USE_AARCH64_FLOAT64_SCALAR_FASTPATH = platform.machine() == "aarch64"
+_USE_AARCH64_NUMEXPR_BYPASS = platform.machine() == "aarch64"
+
+
+def _maybe_cast_scalar_for_int64_comparison_aarch64(left: np.ndarray, right, op):
+    if (
+        not _USE_AARCH64_COMPARISON_FASTPATH
+        or (op is not operator.eq and op is not operator.ne)
+        or left.dtype != np.int64
+    ):
+        return right
+
+    if isinstance(right, (float, np.floating)) and np.isfinite(right):
+        int_right = int(right)
+        if (
+            right == int_right
+            and abs(int_right) < 2**53
+            and np.iinfo(np.int64).min <= int_right <= np.iinfo(np.int64).max
+        ):
+            return np.int64(int_right)
+    elif isinstance(right, np.integer) and not isinstance(right, np.int64):
+        int_right = int(right)
+        if np.iinfo(np.int64).min <= int_right <= np.iinfo(np.int64).max:
+            return np.int64(int_right)
+
+    return right
+
+
+def _maybe_cast_int_scalar_for_float64_op_aarch64(left: np.ndarray, right, op):
+    if (
+        not _USE_AARCH64_FLOAT64_SCALAR_FASTPATH
+        or op
+        not in {
+            operator.add,
+            operator.sub,
+            operator.mul,
+            operator.truediv,
+            operator.eq,
+            operator.ne,
+        }
+        or left.dtype != np.float64
+        or isinstance(right, (bool, np.bool_))
+        or not isinstance(right, (int, np.integer))
+    ):
+        return right
+
+    try:
+        float_right = np.float64(right)
+    except OverflowError:
+        return right
+
+    if np.isfinite(float_right) and int(float_right) == int(right):
+        return float_right
+
+    return right
+
+
+def _should_bypass_numexpr_aarch64(left: np.ndarray, right, op) -> bool:
+    if (
+        not _USE_AARCH64_NUMEXPR_BYPASS
+        or not is_scalar(right)
+        or isinstance(right, (bool, np.bool_))
+        or not isinstance(right, (int, float, np.integer, np.floating))
+    ):
+        return False
+
+    if left.dtype == np.float64:
+        return op in {
+            operator.add,
+            operator.sub,
+            operator.mul,
+            operator.truediv,
+            operator.eq,
+            operator.ne,
+        }
+
+    if left.dtype == np.int64:
+        if op in {
+            operator.add,
+            operator.sub,
+            operator.truediv,
+            operator.eq,
+            operator.ne,
+        }:
+            return True
+        # Numexpr is faster for integer scalar multiplication on AArch64.
+        return op is operator.mul and isinstance(right, (float, np.floating))
+
+    return False
 
 
 def fill_binop(left, right, fill_value):
@@ -210,11 +304,18 @@ def _na_arithmetic_op(left: np.ndarray, right, op, is_cmp: bool = False):
     ------
     TypeError : invalid operation
     """
+    if _USE_AARCH64_FLOAT64_SCALAR_FASTPATH and not is_cmp:
+        right = _maybe_cast_int_scalar_for_float64_op_aarch64(left, right, op)
+
     if isinstance(right, str):
         # can never use numexpr
         func = op
     else:
-        func = partial(expressions.evaluate, op)
+        func = partial(
+            expressions.evaluate,
+            op,
+            use_numexpr=not _should_bypass_numexpr_aarch64(left, right, op),
+        )
 
     try:
         result = func(left, right)
@@ -280,13 +381,24 @@ def arithmetic_op(left: ArrayLike, right: Any, op):
     else:
         # TODO we should handle EAs consistently and move this check before the if/else
         # (https://github.com/pandas-dev/pandas/issues/41165)
-        # error: Argument 2 to "_bool_arith_check" has incompatible type
-        # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
-        _bool_arith_check(op, left, right)  # type: ignore[arg-type]
+        left_arr = cast(np.ndarray, left)
+        _bool_arith_check(op, left_arr, right)
 
-        # error: Argument 1 to "_na_arithmetic_op" has incompatible type
-        # "Union[ExtensionArray, ndarray[Any, Any]]"; expected "ndarray[Any, Any]"
-        res_values = _na_arithmetic_op(left, right, op)  # type: ignore[arg-type]
+        if (
+            IS_ARM
+            and op is operator.truediv
+            and isinstance(left_arr, np.ndarray)
+            and isinstance(right, np.ndarray)
+            and left_arr.dtype == np.dtype(np.int64)
+            and right.dtype == np.dtype(np.int64)
+            and left_arr.ndim == right.ndim == 1
+            and left_arr.shape == right.shape
+            and left_arr.flags.c_contiguous
+            and right.flags.c_contiguous
+        ):
+            return libops.int64_true_divide(left_arr, right)
+
+        res_values = _na_arithmetic_op(left_arr, right, op)
 
     return res_values
 
@@ -314,6 +426,10 @@ def comparison_op(left: ArrayLike, right: Any, op) -> ArrayLike:
     rvalues = ensure_wrapped_if_datetimelike(right)
 
     rvalues = lib.item_from_zerodim(rvalues)
+    if _USE_AARCH64_COMPARISON_FASTPATH:
+        rvalues = _maybe_cast_scalar_for_int64_comparison_aarch64(lvalues, rvalues, op)
+    if _USE_AARCH64_FLOAT64_SCALAR_FASTPATH:
+        rvalues = _maybe_cast_int_scalar_for_float64_op_aarch64(lvalues, rvalues, op)
 
     # Special handling needed if rvalues is a zerodim np.ndarray subclass, see GH#63205
     rvalues_is_zerodim: bool = getattr(rvalues, "ndim", None) == 0

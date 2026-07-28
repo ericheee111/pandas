@@ -12,6 +12,10 @@ import warnings
 
 import numpy as np
 
+from pandas.compat import is_platform_arm
+
+_IS_ARM = is_platform_arm()
+
 from pandas._config import using_string_dtype
 
 from pandas._libs import lib
@@ -625,12 +629,20 @@ class StringMethods(NoNewAttributesMixin):
             # "ndarray", variable has type "Series")
             data = ensure_object(data)  # type: ignore[assignment]
             na_mask = isna(data)
-            if na_rep is None and na_mask.any():
-                return sep.join(data[~na_mask])
-            elif na_rep is not None and na_mask.any():
-                return sep.join(np.where(na_mask, na_rep, data))
+            if _IS_ARM:
+                if na_rep is None and na_mask.any():
+                    return lib.cat_join(data[~na_mask], sep)
+                elif na_rep is not None and na_mask.any():
+                    return lib.cat_join(np.where(na_mask, na_rep, data), sep)
+                else:
+                    return lib.cat_join(data, sep)
             else:
-                return sep.join(data)
+                if na_rep is None and na_mask.any():
+                    return sep.join(data[~na_mask])
+                elif na_rep is not None and na_mask.any():
+                    return sep.join(np.where(na_mask, na_rep, data))
+                else:
+                    return sep.join(data)
 
         try:
             # turn anything in "others" into lists of Series
@@ -4758,19 +4770,31 @@ def cat_safe(list_of_columns: list[npt.NDArray[np.object_]], sep: str):
     nd.array
         The concatenation of list_of_columns with sep.
     """
+    # Validate all columns contain only strings (or empty) before
+    # concatenation; both cat_join_multi and cat_core reject non-string
+    # elements, but cat_core (np.sum) may silently return numeric results
+    # for same-type non-string columns with sep=''. Pre-check ensures
+    # cross-platform consistency: both platforms raise TypeError for
+    # non-string content.
+    for column in list_of_columns:
+        dtype = lib.infer_dtype(column, skipna=True)
+        if dtype not in ["string", "empty"]:
+            raise TypeError(
+                "Concatenation requires list-likes containing only "
+                "strings (or missing values). Offending values found in "
+                f"column {dtype}"
+            ) from None
+
     try:
-        result = cat_core(list_of_columns, sep)
+        if _IS_ARM:
+            result = lib.cat_join_multi(list_of_columns, sep)
+        else:
+            result = cat_core(list_of_columns, sep)
     except TypeError:
-        # if there are any non-string values (wrong dtype or hidden behind
-        # object dtype), np.sum will fail; catch and return with better message
-        for column in list_of_columns:
-            dtype = lib.infer_dtype(column, skipna=True)
-            if dtype not in ["string", "empty"]:
-                raise TypeError(
-                    "Concatenation requires list-likes containing only "
-                    "strings (or missing values). Offending values found in "
-                    f"column {dtype}"
-                ) from None
+        raise TypeError(
+            "Concatenation requires list-likes containing only "
+            "strings (or missing values)"
+        ) from None
     return result
 
 

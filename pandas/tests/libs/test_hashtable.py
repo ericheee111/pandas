@@ -774,6 +774,109 @@ def test_ismember_tuple_with_nans():
     tm.assert_numpy_array_equal(result, expected)
 
 
+def test_ismember_float64_zero_range():
+    arr = np.array(
+        [
+            -np.inf,
+            -1.0,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            4.0,
+            np.nextafter(5.0, 0.0),
+            5.0,
+            np.nan,
+            np.inf,
+        ]
+    )
+    result = ht.ismember_float64_zero_range(arr, 5)
+    expected = np.array(
+        [False, False, True, True, False, True, True, False, False, False, False]
+    )
+    tm.assert_numpy_array_equal(result, expected)
+
+
+def test_unique_float64_monotonic():
+    values = np.array([-np.inf, -np.inf, -0.0, 0.0, 1.0, 1.0, np.inf])
+    result = ht.unique_float64_monotonic(values)
+    expected = np.array([-np.inf, -0.0, 1.0, np.inf])
+    assert result is not None
+    tm.assert_numpy_array_equal(result, expected)
+    assert np.signbit(result[1])
+
+    assert ht.unique_float64_monotonic(np.array([0.0, 2.0, 1.0])) is None
+    assert ht.unique_float64_monotonic(np.array([0.0, np.nan])) is None
+
+
+def test_factorize_float64_monotonic():
+    values = np.array([-np.inf, -np.inf, -0.0, 0.0, 1.0, 1.0, np.inf])
+    result = ht.factorize_float64_monotonic(values)
+    assert result is not None
+    labels, uniques = result
+    expected_labels = np.array([0, 0, 1, 1, 2, 2, 3], dtype=np.intp)
+    expected_uniques = np.array([-np.inf, -0.0, 1.0, np.inf])
+    tm.assert_numpy_array_equal(labels, expected_labels)
+    tm.assert_numpy_array_equal(uniques, expected_uniques)
+    assert np.signbit(uniques[1])
+
+    assert ht.factorize_float64_monotonic(np.array([0.0, 2.0, 1.0])) is None
+    assert ht.factorize_float64_monotonic(np.array([0.0, np.nan])) is None
+
+
+@pytest.mark.parametrize(
+    "dtype, func_name",
+    [
+        (np.dtype("int64"), "unique_int64_masked_monotonic_tail"),
+        (np.dtype("float64"), "unique_float64_masked_monotonic_tail"),
+    ],
+)
+def test_unique_masked_monotonic_tail(dtype, func_name):
+    values = np.array([5, 99, 2, 0, 1, 2, 3, 4, 5, 6], dtype=dtype)
+    mask = np.array([False, True, False, False, False] + [False] * 5)
+
+    result = getattr(ht, func_name)(values, mask.view("uint8"))
+
+    assert result is not None
+    uniques, unique_mask = result
+    expected = np.array([5, 99, 2, 0, 1, 3, 4, 6], dtype=dtype)
+    expected_mask = np.array(
+        [False, True, False, False, False, False, False, False]
+    )
+    tm.assert_numpy_array_equal(uniques, expected)
+    tm.assert_numpy_array_equal(unique_mask, expected_mask)
+
+
+def test_unique_float64_masked_monotonic_tail_signed_zero():
+    values = np.array([-0.0, 42.0, 2.0, 0.0, 0.0, 1.0, 2.0, 3.0])
+    mask = np.array([False, True, False, False, False, False, False, False])
+
+    result = ht.unique_float64_masked_monotonic_tail(
+        values, mask.view("uint8")
+    )
+
+    assert result is not None
+    uniques, unique_mask = result
+    expected = np.array([-0.0, 42.0, 2.0, 1.0, 3.0])
+    expected_mask = np.array([False, True, False, False, False])
+    tm.assert_numpy_array_equal(uniques, expected)
+    tm.assert_numpy_array_equal(unique_mask, expected_mask)
+    assert np.signbit(uniques[0])
+
+
+def test_unique_masked_monotonic_tail_fallbacks():
+    mask = np.zeros(100, dtype="uint8")
+    values = np.arange(100, dtype="int64")
+    values[-2] = 200
+    assert ht.unique_int64_masked_monotonic_tail(values, mask) is None
+
+    float_values = np.arange(10, dtype="float64")
+    float_values[5] = np.nan
+    assert ht.unique_float64_masked_monotonic_tail(
+        float_values, mask[:10]
+    ) is None
+
+
 def test_float_complex_int_are_equal_as_objects():
     values = ["a", 5, 5.0, 5.0 + 0j]
     comps = list(range(129))

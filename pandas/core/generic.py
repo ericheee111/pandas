@@ -83,6 +83,7 @@ from pandas._typing import (
     npt,
 )
 from pandas.compat import CHAINED_WARNING_DISABLED
+from pandas.compat._arch import IS_ARM
 from pandas.compat._constants import (
     REF_COUNT_METHOD,
 )
@@ -4008,7 +4009,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
     # Indexing Methods
 
     @final
-    def take(self, indices, axis: Axis = 0, **kwargs) -> Self:
+    def take(self, indices, axis: Axis = 0, verify: bool = True, **kwargs) -> Self:
         """
         Return the elements in the given *positional* indices along an axis.
 
@@ -4024,6 +4025,11 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
             The axis on which to select elements. ``0`` means that we are
             selecting rows, ``1`` means that we are selecting columns.
             For `Series` this parameter is unused and defaults to 0.
+        verify : bool, default True
+            Check that the indices are within bounds. If ``False``, skip
+            bounds checking for performance. Intended for internal use only;
+            external callers should leave this as ``True`` to avoid
+            out-of-bounds access.
         **kwargs
             For compatibility with :meth:`numpy.take`. Has no effect on the
             output.
@@ -4101,7 +4107,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
         new_data = self._mgr.take(
             indices,
             axis=self._get_block_manager_axis(axis),
-            verify=True,
+            verify=verify,
         )
         return self._constructor_from_mgr(new_data, axes=new_data.axes).__finalize__(
             self, method="take"
@@ -6533,11 +6539,51 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
             ):
                 return self.copy(deep=False)
             # GH 18099/22869: columnwise conversion to extension dtype
+            if IS_ARM:
+                # Build directly from the converted arrays.  Going through Series
+                # objects and concat adds substantial per-column overhead and is
+                # unnecessary because the arrays already share our index.
+                from pandas.core.dtypes.astype import astype_array_safe
+
+                from pandas.core.internals.managers import (
+                    create_block_manager_from_column_arrays,
+                )
+
+                arrays = []
+                refs = []
+                for i in range(len(self.columns)):
+                    block = self._mgr.blocks[self._mgr.blknos[i]]
+                    values = block.iget(self._mgr.blklocs[i])
+                    new_values = astype_array_safe(values, dtype, errors=errors)
+                    arrays.append(new_values)
+                    refs.append(
+                        block.refs
+                        if astype_is_view(values.dtype, new_values.dtype)
+                        else None
+                    )
+
+                new_data = create_block_manager_from_column_arrays(
+                    arrays,
+                    [self.columns, self.index],
+                    consolidate=False,
+                    refs=refs,
+                )
+                result = self._constructor_from_mgr(new_data, axes=new_data.axes)
+                return result.__finalize__(self, method="astype")
+
             # GH 24704: self.items handles duplicate column names
             results = [ser.astype(dtype, errors=errors) for _, ser in self.items()]
 
         else:
             # else, only a single dtype is given
+            if IS_ARM:
+                if isinstance(dtype, type) and issubclass(dtype, ExtensionDtype):
+                    raise TypeError(
+                        f"Expected an instance of {dtype.__name__}, "
+                        "but got the class instead. Try instantiating 'dtype'."
+                    )
+
+                dtype = pandas_dtype(dtype)
             new_data = self._mgr.astype(dtype=dtype, errors=errors)
             res = self._constructor_from_mgr(new_data, axes=new_data.axes)
             return res.__finalize__(self, method="astype")
@@ -7086,6 +7132,58 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
             new_data = self._mgr.fillna(value=value, limit=limit, inplace=inplace)
 
         elif isinstance(value, (dict, ABCSeries)):
+            blocks = self._mgr.blocks
+            if (
+                axis == 0
+                and self.columns.is_unique
+                and len(blocks) == 1
+                and isinstance(blocks[0].values, np.ndarray)
+                and blocks[0].values.ndim == 2
+                and all(column in value for column in self.columns)
+            ):
+                dict_values = [value[column] for column in self.columns]
+                if all(
+                    is_scalar(fill_value)
+                    and can_hold_element(blocks[0].values, fill_value)
+                    for fill_value in dict_values
+                ):
+                    fill_values = np.asarray(
+                        dict_values, dtype=blocks[0].values.dtype
+                    ).reshape(1, -1)
+                    new_data = self._mgr.fillna(
+                        value=fill_values, limit=limit, inplace=inplace
+                    )
+                    result = self._constructor_from_mgr(new_data, axes=new_data.axes)
+                    if inplace:
+                        self._update_inplace(result)
+                        return self
+                    return result.__finalize__(self, method="fillna")
+
+            if (
+                IS_ARM
+                and axis == 0
+                and self.columns.is_unique
+                and len(blocks) > 1
+                and all(len(block.mgr_locs) == 1 for block in blocks)
+                and all(column in value for column in self.columns)
+            ):
+                dict_values = [value[column] for column in self.columns]
+                if all(
+                    is_scalar(dict_values[block.mgr_locs.as_array[0]])
+                    and can_hold_element(
+                        block.values, dict_values[block.mgr_locs.as_array[0]]
+                    )
+                    for block in blocks
+                ):
+                    new_data = self._mgr.fillna_by_column(
+                        dict_values, limit=limit, inplace=inplace
+                    )
+                    result = self._constructor_from_mgr(new_data, axes=new_data.axes)
+                    if inplace:
+                        self._update_inplace(result)
+                        return self
+                    return result.__finalize__(self, method="fillna")
+
             result = self if inplace else self.copy(deep=False)
             if axis == 1:
                 # Check that all columns in result have the same dtype

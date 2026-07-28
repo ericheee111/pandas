@@ -47,8 +47,12 @@ from pandas._libs import (
     lib,
     properties,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.hashtable import duplicated
-from pandas._libs.lib import is_range_indexer
+from pandas._libs.lib import (
+    bool_list_to_indexer,
+    is_range_indexer,
+)
 from pandas.compat import CHAINED_WARNING_DISABLED
 from pandas.compat._constants import (
     REF_COUNT,
@@ -187,6 +191,7 @@ from pandas.core.series import Series
 from pandas.core.shared_docs import _shared_docs
 from pandas.core.sorting import (
     get_group_index,
+    is_int64_overflow_possible,
     lexsort_indexer,
     nargsort,
 )
@@ -4365,6 +4370,23 @@ class DataFrame(NDFrame, OpsMixin):
             return self.where(key)
 
         # Do we have a (boolean) 1d indexer?
+        if IS_ARM and isinstance(key, list):
+            # ARM-only fast path for a python list of bools: validate and
+            # compute the positional indexer in a single pass (fusing the
+            # validation, conversion to a bool ndarray and ``nonzero``),
+            # detecting the common case where the True values are contiguous.
+            # On non-ARM (x86) we fall through to the generic bool-indexer
+            # path below, preserving the original behavior.
+            # GH#42461: Cython rejects list subclasses (e.g. FrozenList);
+            # convert to a plain list before calling bool_list_to_indexer.
+            valid, indexer = bool_list_to_indexer(list(key))
+            if valid:
+                if len(key) != len(self.index):
+                    raise ValueError(
+                        f"Item wrong length {len(key)} instead of {len(self.index)}."
+                    )
+                return self._getitem_bool_indexer(indexer)
+
         if com.is_bool_indexer(key):
             return self._getitem_bool_array(key)
 
@@ -4429,6 +4451,22 @@ class DataFrame(NDFrame, OpsMixin):
 
         indexer = key.nonzero()[0]
         return self.take(indexer, axis=0)
+
+    def _getitem_bool_indexer(self, indexer):
+        # `indexer` is produced by ``bool_list_to_indexer`` and is either:
+        #   * a slice -> the True values form a single contiguous run, so we
+        #     can select via iloc and obtain a (copy-on-write) view instead of
+        #     gathering rows one-by-one;
+        #   * an intp ndarray -> the True positions, guaranteed to lie in
+        #     ``[0, len(self))`` because the boolean list was validated to have
+        #     the same length as the index, so we can skip the bounds check.
+        # Precondition: caller must ensure indexer values are in
+        # ``[0, len(self.index))``. The ARM fast path in ``__getitem__``
+        # guarantees this by checking ``len(key) == len(self.index)`` before
+        # calling this method.
+        if isinstance(indexer, slice):
+            return self.iloc[indexer]
+        return self.take(indexer, axis=0, verify=False)
 
     def _getitem_multilevel(self, key):
         # self.columns is a MultiIndex
@@ -4639,6 +4677,22 @@ class DataFrame(NDFrame, OpsMixin):
         y  2  20
         z  3  50
         """
+        # Fast path for common case: df[int_key] = scalar_value
+        if IS_ARM and (
+            isinstance(key, int)
+            and not isinstance(value, (DataFrame, Series, np.ndarray, list))
+            and self.columns.is_unique
+        ):
+            if not CHAINED_WARNING_DISABLED:
+                if sys.getrefcount(self) <= REF_COUNT and not com.is_local_in_caller_frame(
+                    self
+                ):
+                    warnings.warn(
+                        _chained_assignment_msg, ChainedAssignmentError, stacklevel=2
+                    )
+            self._set_item(key, value)
+            return
+
         if not CHAINED_WARNING_DISABLED:
             if sys.getrefcount(self) <= REF_COUNT and not com.is_local_in_caller_frame(
                 self
@@ -4701,8 +4755,11 @@ class DataFrame(NDFrame, OpsMixin):
                 self[k1] = value[k2]
 
         elif not is_list_like(value):
-            for col in key:
-                self[col] = value
+            if IS_ARM and getattr(key, "ndim", 1) <= 1:
+                self._batch_setitem(key, value)
+            else:
+                for col in key:
+                    self[col] = value
 
         elif isinstance(value, np.ndarray) and value.ndim == 2:
             self._iset_not_inplace(key, value)
@@ -4758,6 +4815,42 @@ class DataFrame(NDFrame, OpsMixin):
                     self[iloc] = igetitem(value, i)
             finally:
                 self.columns = orig_columns
+
+    def _batch_setitem(self, key, value) -> None:
+        """Set multiple columns to a single scalar value at once.
+
+        Optimized path for df[list_of_cols] = scalar that avoids the overhead
+        of iterating through each column and calling __setitem__ individually.
+        """
+        if not len(key):
+            return
+
+        existing_locs = []
+        new_cols = []
+
+        for col in key:
+            try:
+                loc = self._info_axis.get_loc(col)
+            except KeyError:
+                new_cols.append(col)
+                continue
+            if not isinstance(loc, int):
+                new_cols.append(col)
+                continue
+            existing_locs.append(loc)
+
+        if new_cols:
+            for col in new_cols:
+                self._set_item(col, value)
+
+        if existing_locs:
+            value_arr, refs = self._sanitize_column(value)
+            if len(existing_locs) == 1:
+                self._iset_item_mgr(existing_locs[0], value_arr, refs=refs)
+            else:
+                locs_arr = np.array(existing_locs, dtype=np.intp)
+                value_2d = np.broadcast_to(value_arr, (len(existing_locs), len(value_arr))).T
+                self._iset_item_mgr(locs_arr, value_2d, refs=refs)
 
     def _setitem_frame(self, key, value) -> None:
         # support boolean setting with DataFrame input, e.g.
@@ -4869,6 +4962,42 @@ class DataFrame(NDFrame, OpsMixin):
         Series/TimeSeries will be conformed to the DataFrames index to
         ensure homogeneity.
         """
+        # Fast path: for scalar values on existing single-column blocks,
+        # do in-place fill to avoid array allocation
+        if IS_ARM and isinstance(value, (int, float, complex, bool, np.integer, np.floating)):
+            try:
+                loc = self._info_axis.get_loc(key)
+            except KeyError:
+                pass
+            else:
+                if isinstance(loc, int):
+                    blkno = self._mgr.blknos[loc]
+                    blk = self._mgr.blocks[blkno]
+                    if (
+                        len(blk._mgr_locs) == 1
+                        and not isinstance(blk.dtype, ExtensionDtype)
+                        and self._mgr._has_no_reference_block(blkno)
+                    ):
+                        # Quick dtype compatibility check for common cases
+                        blk_kind = blk.dtype.kind
+                        val_is_float = isinstance(value, (float, np.floating))
+                        val_is_int = isinstance(value, (int, np.integer))
+                        val_is_bool = isinstance(value, (bool, np.bool_))
+                        
+                        can_hold = False
+                        if blk_kind == 'f':  # float block
+                            can_hold = val_is_float or val_is_int or val_is_bool
+                        elif blk_kind == 'i' or blk_kind == 'u':  # int/uint block
+                            can_hold = val_is_int or val_is_bool
+                        elif blk_kind == 'b':  # bool block
+                            can_hold = val_is_bool
+                        elif blk_kind == 'c':  # complex block
+                            can_hold = True
+                        
+                        if can_hold:
+                            blk.values[:] = value
+                            return
+
         value, refs = self._sanitize_column(value)
 
         if (
@@ -4876,12 +5005,25 @@ class DataFrame(NDFrame, OpsMixin):
             and value.ndim == 1
             and not isinstance(value.dtype, ExtensionDtype)
         ):
-            # broadcast across multiple columns if necessary
-            if not self.columns.is_unique or isinstance(self.columns, MultiIndex):
-                existing_piece = self[key]
-                if isinstance(existing_piece, DataFrame):
-                    value = np.tile(value, (len(existing_piece.columns), 1)).T
-                    refs = None
+            if IS_ARM:
+                try:
+                    loc = self._info_axis.get_loc(key)
+                except KeyError:
+                    loc = None
+                if loc is not None and not isinstance(loc, int):
+                    existing_piece = self[key]
+                    if isinstance(existing_piece, DataFrame):
+                        value = np.tile(value, (len(existing_piece.columns), 1)).T
+                        refs = None
+            else:
+                # broadcast across multiple columns if necessary
+                if key in self.columns and (
+                    not self.columns.is_unique or isinstance(self.columns, MultiIndex)
+                ):
+                    existing_piece = self[key]
+                    if isinstance(existing_piece, DataFrame):
+                        value = np.tile(value, (len(existing_piece.columns), 1)).T
+                        refs = None
 
         self._set_item_mgr(key, value, refs)
 
@@ -7789,15 +7931,55 @@ class DataFrame(NDFrame, OpsMixin):
                 raise KeyError(np.array(subset)[check].tolist())
             agg_obj = self.take(indices, axis=agg_axis)
 
+        if IS_ARM:
+            float_values = (
+                agg_obj._float_block_values()
+                if subset is None
+                else None
+            )
+            nancount = None
+        else:
+            float_values = None
+            nancount = (
+                agg_obj._nancount_float_block(agg_axis)
+                if subset is None and agg_axis == 0
+                else None
+            )
         if thresh is not lib.no_default:
-            count = agg_obj.count(axis=agg_axis)
+            if IS_ARM:
+                nancount = agg_obj._nancount_float_block(agg_axis)
+            count = (
+                agg_obj.count(axis=agg_axis) if nancount is None else nancount
+            )
             mask = count >= thresh
         elif how == "any":
             # faster equivalent to 'agg_obj.count(agg_axis) == self.shape[agg_axis]'
-            mask = notna(agg_obj).all(axis=agg_axis, bool_only=False)
+            if IS_ARM:
+                mask = (
+                    notna(agg_obj).all(axis=agg_axis, bool_only=False)
+                    if float_values is None
+                    else libalgos.nanvalidity_2d(float_values, agg_axis, True)
+                )
+            else:
+                mask = (
+                    notna(agg_obj).all(axis=agg_axis, bool_only=False)
+                    if nancount is None
+                    else nancount == agg_obj.shape[agg_axis]
+                )
         elif how == "all":
             # faster equivalent to 'agg_obj.count(agg_axis) > 0'
-            mask = notna(agg_obj).any(axis=agg_axis, bool_only=False)
+            if IS_ARM:
+                mask = (
+                    notna(agg_obj).any(axis=agg_axis, bool_only=False)
+                    if float_values is None
+                    else libalgos.nanvalidity_2d(float_values, agg_axis, False)
+                )
+            else:
+                mask = (
+                    notna(agg_obj).any(axis=agg_axis, bool_only=False)
+                    if nancount is None
+                    else nancount > 0
+                )
         else:
             raise ValueError(f"invalid how option: {how}")
 
@@ -8047,10 +8229,6 @@ class DataFrame(NDFrame, OpsMixin):
         if self.empty:
             return self._constructor_sliced(dtype=bool)
 
-        def f(vals) -> tuple[np.ndarray, int]:
-            labels, shape = algorithms.factorize(vals, size_hint=len(self))
-            return labels.astype("i8"), len(shape)
-
         if subset is None:
             subset = self.columns
         elif (
@@ -8072,9 +8250,154 @@ class DataFrame(NDFrame, OpsMixin):
 
         if len(subset) == 1 and self.columns.is_unique:
             # GH#45236 This is faster than get_group_index below
-            result = self[next(iter(subset))].duplicated(keep)
-            result.name = None
+            if IS_ARM:
+                col_name = next(iter(subset))
+                loc = self.columns.get_loc(col_name)
+                arr = self._get_column_array(loc)
+                if isinstance(arr, ExtensionArray):
+                    dup_result = arr.duplicated(keep=keep)
+                else:
+                    from pandas.core.algorithms import (
+                        duplicated as _alg_duplicated,
+                    )
+                    dup_result = _alg_duplicated(arr, keep=keep)
+                result = self._constructor_sliced(dup_result, index=self.index)
+                result.name = None
+            else:
+                result = self[next(iter(subset))].duplicated(keep)
+                result.name = None
+        elif IS_ARM and self.columns.is_unique:
+            n = len(self)
+            subset_list = list(subset)
+            ncols = len(subset_list)
+            if ncols == 0:
+                result = self._constructor_sliced(
+                    np.zeros(n, dtype=bool), index=self.index
+                )
+                return result.__finalize__(self, method="duplicated")
+
+            positions = self.columns.get_indexer(subset_list)
+            has_object = any(
+                blk.dtype == np.object_ for blk in self._mgr.blocks
+            )
+            def _is_float_dtype(arr_dtype) -> bool:
+                try:
+                    return np.issubdtype(arr_dtype, np.floating)
+                except TypeError:
+                    return False
+
+            has_float = any(
+                _is_float_dtype(self._get_column_array(positions[i]).dtype)
+                for i in range(ncols)
+            )
+
+            if not has_object and not has_float and ncols <= 10:
+                from pandas.core.util.hashing import (
+                    combine_hash_arrays,
+                    hash_array,
+                )
+
+                def _hash_gen():
+                    for i in range(ncols):
+                        arr = self._get_column_array(positions[i])
+                        yield hash_array(arr, categorize=True)
+
+                combined = combine_hash_arrays(_hash_gen(), ncols)
+                result = self._constructor_sliced(
+                    duplicated(combined, keep), index=self.index
+                )
+            else:
+                all_labels: list[np.ndarray] = []
+                all_shapes: list[int] = []
+
+                def _maybe_lift(lab, size: int):
+                    return (lab + 1, size + 1) if (lab == -1).any() else (lab, size)
+
+                if ncols > 10:
+                    batch_size = max(10, min(50, ncols // 5))
+
+                    for batch_start in range(0, ncols, batch_size):
+                        batch_end = min(batch_start + batch_size, ncols)
+                        for i in range(batch_start, batch_end):
+                            arr = self._get_column_array(positions[i])
+                            lab, shp = algorithms.factorize(arr, size_hint=n)
+                            lab = lab.astype("i8", copy=False)
+                            lab, lifted_size = _maybe_lift(lab, len(shp))
+                            all_labels.append(lab)
+                            all_shapes.append(lifted_size)
+
+                        cur_ncols = len(all_labels)
+                        cur_shape = np.array(all_shapes, dtype=np.int64)
+                        cur_overflow = is_int64_overflow_possible(cur_shape)
+                        if cur_overflow:
+                            break
+                        if cur_ncols > 1:
+                            cur_strides = np.ones(cur_ncols, dtype=np.int64)
+                            cur_strides[: cur_ncols - 1] = np.cumprod(
+                                cur_shape[1:][::-1]
+                            )[::-1]
+                        else:
+                            cur_strides = np.ones(1, dtype=np.int64)
+
+                        cur_ids = all_labels[0] * cur_strides[0]
+                        for j in range(1, cur_ncols):
+                            cur_ids = cur_ids + all_labels[j] * cur_strides[j]
+
+                        if batch_end < ncols and not duplicated(cur_ids, keep).any():
+                            result = self._constructor_sliced(
+                                np.zeros(n, dtype=bool), index=self.index
+                            )
+                            return result.__finalize__(self, method="duplicated")
+                else:
+                    for i in range(ncols):
+                        arr = self._get_column_array(positions[i])
+                        lab, shp = algorithms.factorize(arr, size_hint=n)
+                        lab = lab.astype("i8", copy=False)
+                        lab, lifted_size = _maybe_lift(lab, len(shp))
+                        all_labels.append(lab)
+                        all_shapes.append(lifted_size)
+
+                shape_arr = np.array(all_shapes, dtype=np.int64)
+                overflow = is_int64_overflow_possible(shape_arr)
+
+                if overflow:
+                    def f(vals) -> tuple[np.ndarray, int]:
+                        labels, shape = algorithms.factorize(
+                            vals, size_hint=len(self)
+                        )
+                        return labels.astype("i8"), len(shape)
+
+                    vals = (
+                        col.values for name, col in self.items() if name in subset
+                    )
+                    labels, shape = map(list, zip(*map(f, vals), strict=True))
+                    ids = get_group_index(
+                        labels, tuple(shape), sort=False, xnull=False
+                    )
+                else:
+                    if ncols > 1:
+                        strides = np.ones(ncols, dtype=np.int64)
+                        strides[: ncols - 1] = np.cumprod(
+                            shape_arr[1:][::-1]
+                        )[::-1]
+                    else:
+                        strides = np.ones(1, dtype=np.int64)
+
+                    if np.all(shape_arr <= 1):
+                        ids = np.zeros(n, dtype=np.int64)
+                    else:
+                        ids = all_labels[0] * strides[0]
+                        for j in range(1, ncols):
+                            ids = ids + all_labels[j] * strides[j]
+
+                result = self._constructor_sliced(
+                    duplicated(ids, keep), index=self.index
+                )
         else:
+            def f(vals) -> tuple[np.ndarray, int]:
+                labels, shape = algorithms.factorize(vals, size_hint=len(self))
+                return labels.astype("i8"), len(shape)
+
             vals = (col.values for name, col in self.items() if name in subset)
             labels, shape = map(list, zip(*map(f, vals), strict=True))
 
@@ -9488,6 +9811,16 @@ class DataFrame(NDFrame, OpsMixin):
     ):
         axis = self._get_axis_number(axis) if axis is not None else 1
 
+        if (
+            isinstance(other, DataFrame)
+            and axis == 1
+            and level is not None
+            and fill_value is None
+        ):
+            result = self._arith_method_with_multiindex_level(other, op, level)
+            if result is not None:
+                return result
+
         if self._should_reindex_frame_op(other, op, axis, fill_value, level):
             return self._arith_method_with_reindex(other, op)
 
@@ -9513,6 +9846,49 @@ class DataFrame(NDFrame, OpsMixin):
 
                 new_data = self._dispatch_frame_op(other, op)
 
+        return self._construct_result(new_data, other=other)
+
+    def _arith_method_with_multiindex_level(
+        self, other: DataFrame, op, level
+    ) -> DataFrame | None:
+        """
+        Fast path for DataFrame arithmetic broadcasting over a MultiIndex level.
+        """
+        if (
+            not isinstance(self.index, MultiIndex)
+            or isinstance(other.index, MultiIndex)
+            or not self.columns.equals(other.columns)
+            or not other.index.is_unique
+        ):
+            return None
+
+        try:
+            level_number = self.index._get_level_number(level)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+
+        level_index = self.index.levels[level_number]
+        if len(level_index) != len(other.index):
+            return None
+
+        level_to_other = other.index.get_indexer(level_index)
+        if (level_to_other == -1).any():
+            return None
+
+        taker = self.index.codes[level_number]
+        if (taker == -1).any():
+            return None
+
+        if not np.bincount(taker, minlength=len(level_index)).all():
+            return None
+
+        taker = level_to_other.take(taker)
+        right = other._reindex_with_indexers(
+            {0: [self.index, taker], 1: [None, None]}, allow_dups=True
+        )
+
+        with np.errstate(all="ignore"):
+            new_data = self._combine_frame(right, op, fill_value=None)
         return self._construct_result(new_data, other=other)
 
     def _construct_result(self, result, other) -> DataFrame:
@@ -13437,6 +13813,28 @@ class DataFrame(NDFrame, OpsMixin):
     # ----------------------------------------------------------------------
     # ndarray-like stats methods
 
+    def _float_block_values(self) -> np.ndarray | None:
+        """Count non-NA values in a homogeneous NumPy float block."""
+        if len(self._mgr.blocks) != 1:
+            return None
+
+        values = self._mgr.blocks[0].values
+        if (
+            not isinstance(values, np.ndarray)
+            or values.ndim != 2
+            or values.dtype not in (np.dtype("float32"), np.dtype("float64"))
+        ):
+            return None
+
+        return values
+
+    def _nancount_float_block(self, axis: AxisInt) -> np.ndarray | None:
+        values = self._float_block_values()
+        if values is None:
+            return None
+
+        return libalgos.nancount_2d(values, axis)
+
     def count(self, axis: Axis = 0, numeric_only: bool = False) -> Series:
         """
         Count non-NA cells for each column or row.
@@ -13512,6 +13910,10 @@ class DataFrame(NDFrame, OpsMixin):
         # GH #423
         if len(frame._get_axis(axis)) == 0:
             result = self._constructor_sliced(0, index=frame._get_agg_axis(axis))
+        elif (counts := frame._nancount_float_block(axis)) is not None:
+            result = frame._constructor_sliced(
+                counts, index=frame._get_agg_axis(axis), copy=False
+            )
         else:
             result = notna(frame).sum(axis=axis)
 

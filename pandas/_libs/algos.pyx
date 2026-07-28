@@ -7,6 +7,7 @@ from libc.stdlib cimport (
     free,
     malloc,
 )
+from libc.stdint cimport intptr_t
 from libc.string cimport memmove
 
 import numpy as np
@@ -36,6 +37,68 @@ from numpy cimport (
 
 cnp.import_array()
 
+cdef extern from *:
+    """
+    #include <stdint.h>
+    #if defined(__aarch64__)
+    #include <arm_neon.h>
+
+    static inline int64x2_t
+    pandas_vmulq_n_s64(int64x2_t values, int64_t scalar)
+    {
+        const uint64x2_t uvalues = vreinterpretq_u64_s64(values);
+        const uint32x2_t values_low = vmovn_u64(uvalues);
+        const uint32x2_t values_high = vmovn_u64(vshrq_n_u64(uvalues, 32));
+        const uint32x2_t scalar_low =
+            vdup_n_u32((uint32_t)(uint64_t)scalar);
+        const uint32x2_t scalar_high =
+            vdup_n_u32((uint32_t)((uint64_t)scalar >> 32));
+        uint64x2_t result = vmull_u32(values_low, scalar_low);
+        uint64x2_t cross = vaddq_u64(
+            vmull_u32(values_low, scalar_high),
+            vmull_u32(values_high, scalar_low)
+        );
+        result = vaddq_u64(result, vshlq_n_u64(cross, 32));
+        return vreinterpretq_s64_u64(result);
+    }
+    #endif
+
+    static inline void
+    pandas_range_positions_to_labels(
+        const intptr_t *positions,
+        intptr_t *labels,
+        Py_ssize_t n,
+        intptr_t start,
+        intptr_t step
+    ) {
+        Py_ssize_t i = 0;
+
+    #if defined(__aarch64__)
+        const int64x2_t vstart = vdupq_n_s64((int64_t)start);
+
+        for (; i + 2 <= n; i += 2) {
+            int64x2_t values = vld1q_s64((const int64_t *)(positions + i));
+            values = vaddq_s64(
+                pandas_vmulq_n_s64(values, (int64_t)step),
+                vstart
+            );
+            vst1q_s64((int64_t *)(labels + i), values);
+        }
+    #endif
+
+        for (; i < n; ++i) {
+            labels[i] = start + positions[i] * step;
+        }
+    }
+    """
+    void pandas_range_positions_to_labels(
+        const intptr_t* positions,
+        intptr_t* labels,
+        Py_ssize_t n,
+        intptr_t start,
+        intptr_t step,
+    ) noexcept nogil
+
 cimport pandas._libs.util as util
 from pandas._libs.dtypes cimport (
     numeric_object_t,
@@ -62,6 +125,153 @@ cdef:
     int64_t NPY_NAT = get_nat()
 
 
+ctypedef fused nancount_float_t:
+    float32_t
+    float64_t
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def range_positions_to_labels(
+    const intp_t[::1] positions,
+    intp_t start,
+    intp_t step,
+):
+    cdef:
+        Py_ssize_t n = len(positions)
+        ndarray[intp_t] labels = np.empty(n, dtype=np.intp)
+
+    if n:
+        with nogil:
+            pandas_range_positions_to_labels(
+                <const intptr_t*>&positions[0],
+                <intptr_t*>&labels[0],
+                n,
+                <intptr_t>start,
+                <intptr_t>step,
+            )
+
+    return labels
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def nancount_2d(const nancount_float_t[:, :] values, int axis):
+    cdef:
+        Py_ssize_t i, j
+        ndarray[intp_t] out
+
+    if axis == 0:
+        out = np.zeros(values.shape[0], dtype=np.intp)
+        for i in range(values.shape[0]):
+            for j in range(values.shape[1]):
+                out[i] += values[i, j] == values[i, j]
+    elif axis == 1:
+        out = np.zeros(values.shape[1], dtype=np.intp)
+        for i in range(values.shape[0]):
+            for j in range(values.shape[1]):
+                out[j] += values[i, j] == values[i, j]
+    else:
+        raise ValueError("axis must be 0 or 1")
+
+    return out
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def putmask_masked_float64(
+    float64_t[:] values,
+    cnp.npy_bool[:] validity,
+    const cnp.npy_bool[:] mask,
+    float64_t value,
+):
+    cdef Py_ssize_t i
+    for i in range(values.shape[0]):
+        if mask[i]:
+            values[i] = value
+            validity[i] = False
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def factorize_bool_masked(
+    const cnp.npy_bool[:] values,
+    const cnp.npy_bool[:] mask,
+    bint use_na_sentinel,
+):
+    cdef:
+        Py_ssize_t i, n = values.shape[0]
+        int false_code = -1
+        int true_code = -1
+        int na_code = -1
+        int nuniques = 0
+        ndarray[intp_t] codes = np.empty(n, dtype=np.intp)
+        ndarray[cnp.npy_bool] uniques = np.empty(3, dtype=np.bool_)
+        ndarray[cnp.npy_bool] uniques_mask = np.zeros(3, dtype=np.bool_)
+
+    for i in range(n):
+        if mask[i]:
+            if use_na_sentinel:
+                codes[i] = -1
+            else:
+                if na_code == -1:
+                    na_code = nuniques
+                    uniques[nuniques] = False
+                    uniques_mask[nuniques] = True
+                    nuniques += 1
+                codes[i] = na_code
+        elif values[i]:
+            if true_code == -1:
+                true_code = nuniques
+                uniques[nuniques] = True
+                nuniques += 1
+            codes[i] = true_code
+        else:
+            if false_code == -1:
+                false_code = nuniques
+                uniques[nuniques] = False
+                nuniques += 1
+            codes[i] = false_code
+
+    return (
+        codes,
+        uniques[:nuniques],
+        uniques_mask[:nuniques],
+    )
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def nanvalidity_2d(
+    const nancount_float_t[:, :] values, int axis, bint all_valid
+):
+    """Reduce the non-NA mask without materializing it."""
+    cdef:
+        Py_ssize_t i, j
+        ndarray[cnp.npy_bool] out
+
+    if axis == 0:
+        out = np.empty(values.shape[0], dtype=np.bool_)
+        for i in range(values.shape[0]):
+            out[i] = all_valid
+            for j in range(values.shape[1]):
+                if (values[i, j] == values[i, j]) != all_valid:
+                    out[i] = not all_valid
+                    break
+    elif axis == 1:
+        out = np.empty(values.shape[1], dtype=np.bool_)
+        for j in range(values.shape[1]):
+            out[j] = all_valid
+            for i in range(values.shape[0]):
+                if (values[i, j] == values[i, j]) != all_valid:
+                    out[j] = not all_valid
+                    break
+    else:
+        raise ValueError("axis must be 0 or 1")
+
+    return out
+
+
 tiebreakers = {
     "average": TIEBREAK_AVERAGE,
     "min": TIEBREAK_MIN,
@@ -69,6 +279,13 @@ tiebreakers = {
     "first": TIEBREAK_FIRST,
     "dense": TIEBREAK_DENSE,
 }
+
+
+ctypedef fused categorical_code_t:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
 
 
 class Infinity:
@@ -251,6 +468,62 @@ def groupsort_indexer(const intp_t[:] index, Py_ssize_t ngroups):
             where[label] += 1
 
     return indexer.base, counts.base
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def count_categorical_codes(
+    const categorical_code_t[:] codes,
+    Py_ssize_t ncategories,
+    bint dropna,
+):
+    cdef:
+        Py_ssize_t i, code, limit
+        Py_ssize_t n = len(codes)
+        Py_ssize_t nslots = ncategories if dropna else ncategories + 1
+        int64_t[::1] counts = np.zeros(nslots, dtype=np.int64)
+        int64_t[::1] counts1 = np.zeros(nslots, dtype=np.int64)
+        int64_t[::1] counts2 = np.zeros(nslots, dtype=np.int64)
+        int64_t[::1] counts3 = np.zeros(nslots, dtype=np.int64)
+
+    with nogil:
+        limit = n - n % 4
+        for i in range(0, limit, 4):
+            code = codes[i]
+            if code >= 0:
+                counts[code] += 1
+            elif not dropna:
+                counts[ncategories] += 1
+
+            code = codes[i + 1]
+            if code >= 0:
+                counts1[code] += 1
+            elif not dropna:
+                counts1[ncategories] += 1
+
+            code = codes[i + 2]
+            if code >= 0:
+                counts2[code] += 1
+            elif not dropna:
+                counts2[ncategories] += 1
+
+            code = codes[i + 3]
+            if code >= 0:
+                counts3[code] += 1
+            elif not dropna:
+                counts3[ncategories] += 1
+
+        for i in range(limit, n):
+            code = codes[i]
+            if code >= 0:
+                counts[code] += 1
+            elif not dropna:
+                counts[ncategories] += 1
+
+        for i in range(nslots):
+            counts[i] += counts1[i] + counts2[i] + counts3[i]
+
+    return counts.base
 
 
 cdef Py_ssize_t swap(numeric_t *a, numeric_t *b) noexcept nogil:
@@ -843,6 +1116,215 @@ def is_monotonic(const numeric_object_t[:] arr, bint timelike):
 
     is_strict_monotonic = is_unique and (is_monotonic_inc or is_monotonic_dec)
     return is_monotonic_inc, is_monotonic_dec, is_strict_monotonic
+
+
+ctypedef fused _int_codes_t:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void _binsearch_sorted_unique(
+    const _int_codes_t[:] values, const _int_codes_t[:] targets, intp_t[:] result
+) noexcept nogil:
+    # ``values`` is a strictly-increasing, unique integer array with no -1
+    # (NaN) sentinel (caller-enforced). For each target, binary-search its
+    # position in values; -1 if absent. Single tight C loop, no per-element
+    # Python/numpy overhead -- faster than cached hash-table lookups for
+    # small targets and avoids the hash-table build entirely.
+    cdef:
+        Py_ssize_t n = values.shape[0]
+        Py_ssize_t m = targets.shape[0]
+        Py_ssize_t i, lo, hi, mid
+        _int_codes_t key
+    for i in range(m):
+        key = targets[i]
+        lo = 0
+        hi = n
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if values[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < n and values[lo] == key:
+            result[i] = lo
+        else:
+            result[i] = -1
+
+
+def get_indexer_sorted_unique(values, targets):
+    """
+    Return an intp indexer of ``targets`` into strictly-increasing unique
+    integer ``values`` (e.g. the codes of a monotonic, NaN-free, unique
+    CategoricalIndex). -1 for targets not present.
+
+    This is a single vectorized binary search; it avoids the per-call
+    overhead of ``numpy.searchsorted`` (which is slow for small targets on
+    large arrays) and the hash-table build/lookup of the IndexEngine.
+    """
+    cdef:
+        ndarray varr = np.ascontiguousarray(values)
+        ndarray tarr = np.ascontiguousarray(targets)
+        Py_ssize_t n = varr.shape[0]
+        Py_ssize_t m = tarr.shape[0]
+        ndarray result = np.empty(m, dtype=np.intp)
+        intp_t[:] r = result
+
+    if m == 0:
+        return result
+    if n == 0:
+        r[:] = -1
+        return result
+    if varr.dtype != tarr.dtype:
+        raise TypeError(
+            "get_indexer_sorted_unique requires matching integer dtypes, "
+            f"got {varr.dtype} and {tarr.dtype}"
+        )
+    if varr.dtype == np.int8:
+        _binsearch_sorted_unique[int8_t](varr, tarr, r)
+    elif varr.dtype == np.int16:
+        _binsearch_sorted_unique[int16_t](varr, tarr, r)
+    elif varr.dtype == np.int32:
+        _binsearch_sorted_unique[int32_t](varr, tarr, r)
+    elif varr.dtype == np.int64:
+        _binsearch_sorted_unique[int64_t](varr, tarr, r)
+    else:
+        raise TypeError(
+            "get_indexer_sorted_unique requires integer arrays, "
+            f"got {varr.dtype}"
+        )
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef Py_ssize_t _bsearch_i32(
+    int32_t* v, Py_ssize_t n, int32_t key, bint right
+) noexcept:
+    cdef:
+        Py_ssize_t lo = 0
+        Py_ssize_t hi = n
+        Py_ssize_t mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if right:
+            if v[mid] <= key:
+                lo = mid + 1
+            else:
+                hi = mid
+        else:
+            if v[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef Py_ssize_t _bsearch_i64(
+    int64_t* v, Py_ssize_t n, int64_t key, bint right
+) noexcept:
+    cdef:
+        Py_ssize_t lo = 0
+        Py_ssize_t hi = n
+        Py_ssize_t mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if right:
+            if v[mid] <= key:
+                lo = mid + 1
+            else:
+                hi = mid
+        else:
+            if v[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef Py_ssize_t _bsearch_i8(
+    int8_t* v, Py_ssize_t n, int8_t key, bint right
+) noexcept:
+    cdef:
+        Py_ssize_t lo = 0
+        Py_ssize_t hi = n
+        Py_ssize_t mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if right:
+            if v[mid] <= key:
+                lo = mid + 1
+            else:
+                hi = mid
+        else:
+            if v[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef Py_ssize_t _bsearch_i16(
+    int16_t* v, Py_ssize_t n, int16_t key, bint right
+) noexcept:
+    cdef:
+        Py_ssize_t lo = 0
+        Py_ssize_t hi = n
+        Py_ssize_t mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if right:
+            if v[mid] <= key:
+                lo = mid + 1
+            else:
+                hi = mid
+        else:
+            if v[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+
+
+def searchsorted_scalar(values, key, side="left"):
+    """
+    Binary-search a single scalar ``key`` in a sorted integer ``values``
+    array, returning the insertion position (left/right). Avoids
+    ``numpy.searchsorted``'s per-call overhead and the O(n) array cast numpy
+    performs when the key's dtype does not match ``values.dtype``.
+
+    Operates on the raw data pointer (no memoryview/buffer-protocol overhead)
+    when ``values`` is C-contiguous; falls back to ``numpy.searchsorted``
+    otherwise.
+    """
+    cdef:
+        cnp.ndarray arr = values
+        bint right = side == "right"
+        Py_ssize_t n = arr.shape[0]
+
+    if n == 0:
+        return 0
+    if not arr.flags.c_contiguous:
+        return np.searchsorted(arr, arr.dtype.type(key), side=side)
+    if arr.dtype == np.int32:
+        return _bsearch_i32(<int32_t*>cnp.PyArray_DATA(arr), n, <int32_t>key, right)
+    elif arr.dtype == np.int64:
+        return _bsearch_i64(<int64_t*>cnp.PyArray_DATA(arr), n, <int64_t>key, right)
+    elif arr.dtype == np.int8:
+        return _bsearch_i8(<int8_t*>cnp.PyArray_DATA(arr), n, <int8_t>key, right)
+    elif arr.dtype == np.int16:
+        return _bsearch_i16(<int16_t*>cnp.PyArray_DATA(arr), n, <int16_t>key, right)
+    raise TypeError(f"searchsorted_scalar requires an integer array, got {arr.dtype}")
 
 
 # ----------------------------------------------------------------------
