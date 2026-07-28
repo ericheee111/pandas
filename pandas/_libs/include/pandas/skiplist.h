@@ -16,9 +16,12 @@ Python recipe (https://rhettinger.wordpress.com/2010/02/06/lost-knowledge/)
 #pragma once
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "pandas/portable.h"
 
 static inline float __skiplist_nanf(void) {
   const union {
@@ -32,6 +35,271 @@ static inline float __skiplist_nanf(void) {
 static inline double Log2(double val) { return log(val) / log(2.); }
 
 typedef struct node_t node_t;
+
+static inline int int_min(int a, int b) { return a < b ? a : b; }
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+
+/*
+ * AArch64 optimized path
+ *
+ * - Single-allocation nodes (3 malloc -> 1)
+ * - Branchless _node_cmp
+ * - xorshift32 PRNG (per-instance, nogil-safe)
+ * - pandas_ctz level generation (single CTZ instruction)
+ * - Iterative node_destroy (no recursion)
+ * - Unlink-all-then-free in skiplist_remove (no ref_count)
+ */
+
+struct node_t {
+  node_t **next;
+  int *width;
+  double value;
+  int is_nil;
+  int levels;
+};
+
+typedef struct {
+  node_t *head;
+  node_t **tmp_chain;
+  int *tmp_steps;
+  int size;
+  int maxlevels;
+  uint32_t prng_state;
+} skiplist_t;
+
+static inline uint32_t xorshift32(uint32_t *state) {
+  uint32_t x = *state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  *state = x;
+  return x;
+}
+
+static inline node_t *node_init(double value, int levels) {
+  size_t next_size = (size_t)levels * sizeof(node_t *);
+  size_t width_size = (size_t)levels * sizeof(int);
+  node_t *result = (node_t *)malloc(sizeof(node_t) + next_size + width_size);
+  if (result) {
+    result->value = value;
+    result->levels = levels;
+    result->is_nil = 0;
+    result->next = (node_t **)((char *)result + sizeof(node_t));
+    result->width = (int *)((char *)result + sizeof(node_t) + next_size);
+  }
+  return result;
+}
+
+static void node_destroy(node_t *node) {
+  while (node) {
+    node_t *next = node->is_nil ? NULL : node->next[0];
+    free(node);
+    node = next;
+  }
+}
+
+static inline void skiplist_destroy(skiplist_t *skp) {
+  if (skp) {
+    node_destroy(skp->head);
+    free(skp->tmp_steps);
+    free(skp->tmp_chain);
+    free(skp);
+  }
+}
+
+static inline skiplist_t *skiplist_init(int expected_size) {
+  skiplist_t *result;
+  node_t *NIL, *head;
+  int maxlevels, i;
+
+  maxlevels = 1 + Log2((double)expected_size);
+  result = (skiplist_t *)malloc(sizeof(skiplist_t));
+  if (!result) {
+    return NULL;
+  }
+  result->tmp_chain = (node_t **)malloc(maxlevels * sizeof(node_t *));
+  result->tmp_steps = (int *)malloc(maxlevels * sizeof(int));
+  result->maxlevels = maxlevels;
+  result->size = 0;
+  result->prng_state = ((uint32_t)(uintptr_t)result) ^ 0x9E3779B9u;
+  if (result->prng_state == 0) {
+    result->prng_state = 1;
+  }
+
+  head = result->head = node_init(PANDAS_NAN, maxlevels);
+  NIL = node_init(0.0, 0);
+
+  if (!(result->tmp_chain && result->tmp_steps && result->head && NIL)) {
+    free(result->head);
+    free(NIL);
+    free(result->tmp_chain);
+    free(result->tmp_steps);
+    free(result);
+    return NULL;
+  }
+
+  NIL->is_nil = 1;
+
+  for (i = 0; i < maxlevels; ++i) {
+    head->next[i] = NIL;
+    head->width[i] = 1;
+  }
+
+  return result;
+}
+
+// 1 if left < right, 0 if left == right, -1 if left > right
+static inline int _node_cmp(node_t *node, double value) {
+  int gt = node->is_nil | (node->value > value);
+  int lt = (!node->is_nil) & (node->value < value);
+  return -gt | lt;
+}
+
+static inline double skiplist_get(skiplist_t *skp, int i, int *ret) {
+  node_t *node;
+  int level;
+
+  if (i < 0 || i >= skp->size) {
+    *ret = 0;
+    return 0;
+  }
+
+  node = skp->head;
+  ++i;
+  for (level = skp->maxlevels - 1; level >= 0; --level) {
+    while (node->width[level] <= i) {
+      i -= node->width[level];
+      node = node->next[level];
+    }
+  }
+
+  *ret = 1;
+  return node->value;
+}
+
+// Returns the lowest rank of all elements with value `value`, as opposed to the
+// highest rank returned by `skiplist_insert`.
+static inline int skiplist_min_rank(skiplist_t *skp, double value) {
+  node_t *node;
+  int level, rank = 0;
+
+  node = skp->head;
+  for (level = skp->maxlevels - 1; level >= 0; --level) {
+    while (_node_cmp(node->next[level], value) > 0) {
+      rank += node->width[level];
+      node = node->next[level];
+    }
+  }
+
+  return rank + 1;
+}
+
+// Returns the rank of the inserted element. When there are duplicates,
+// `rank` is the highest of the group, i.e. the 'max' method of
+// https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.rank.html
+static inline int skiplist_insert(skiplist_t *skp, double value) {
+  node_t *node, *prevnode, *newnode, *next_at_level;
+  int *steps_at_level;
+  int size, steps, level, rank = 0;
+  node_t **chain;
+
+  chain = skp->tmp_chain;
+
+  steps_at_level = skp->tmp_steps;
+  memset(steps_at_level, 0, skp->maxlevels * sizeof(int));
+
+  node = skp->head;
+
+  for (level = skp->maxlevels - 1; level >= 0; --level) {
+    next_at_level = node->next[level];
+    while (_node_cmp(next_at_level, value) >= 0) {
+      steps_at_level[level] += node->width[level];
+      rank += node->width[level];
+      node = next_at_level;
+      next_at_level = node->next[level];
+    }
+    chain[level] = node;
+  }
+
+  size = int_min(skp->maxlevels, pandas_ctz(xorshift32(&skp->prng_state)) + 1);
+
+  newnode = node_init(value, size);
+  if (!newnode) {
+    return -1;
+  }
+  steps = 0;
+
+  for (level = 0; level < size; ++level) {
+    prevnode = chain[level];
+    newnode->next[level] = prevnode->next[level];
+
+    prevnode->next[level] = newnode;
+
+    newnode->width[level] = prevnode->width[level] - steps;
+    prevnode->width[level] = steps + 1;
+
+    steps += steps_at_level[level];
+  }
+
+  for (level = size; level < skp->maxlevels; ++level) {
+    chain[level]->width[level] += 1;
+  }
+
+  ++(skp->size);
+
+  return rank + 1;
+}
+
+static inline int skiplist_remove(skiplist_t *skp, double value) {
+  int level, size;
+  node_t *node, *tmpnode, *next_at_level;
+  node_t **chain;
+
+  chain = skp->tmp_chain;
+  node = skp->head;
+
+  for (level = skp->maxlevels - 1; level >= 0; --level) {
+    next_at_level = node->next[level];
+    while (_node_cmp(next_at_level, value) > 0) {
+      node = next_at_level;
+      next_at_level = node->next[level];
+    }
+    chain[level] = node;
+  }
+
+  tmpnode = chain[0]->next[0];
+
+  if (tmpnode->is_nil || value != tmpnode->value) {
+    return 0;
+  }
+
+  size = tmpnode->levels;
+
+  for (level = 0; level < size; ++level) {
+    chain[level]->width[level] += tmpnode->width[level] - 1;
+    chain[level]->next[level] = tmpnode->next[level];
+  }
+
+  free(tmpnode);
+
+  for (level = size; level < skp->maxlevels; ++level) {
+    --(chain[level]->width[level]);
+  }
+
+  --(skp->size);
+  return 1;
+}
+
+#else
+
+/*
+ * Original path (x86, etc.)
+ *
+ * Preserves the original implementation with ref_count-based
+ * reference counting, recursive node_destroy, and urand/Log2
+ * for level generation.
+ */
 
 struct node_t {
   node_t **next;
@@ -53,8 +321,6 @@ typedef struct {
 static inline double urand(void) {
   return ((double)rand() + 1) / ((double)RAND_MAX + 2);
 }
-
-static inline int int_min(int a, int b) { return a < b ? a : b; }
 
 static inline node_t *node_init(double value, int levels) {
   node_t *result;
@@ -90,12 +356,10 @@ static void node_destroy(node_t *node) {
       }
       free(node->next);
       free(node->width);
-      // printf("Reference count was 1, freeing\n");
       free(node);
     } else {
       node_decref(node);
     }
-    // pretty sure that freeing the struct above will be enough
   }
 }
 
@@ -294,3 +558,5 @@ static inline int skiplist_remove(skiplist_t *skp, double value) {
   --(skp->size);
   return 1;
 }
+
+#endif
