@@ -31,6 +31,11 @@ def groupsort_indexer(
     np.ndarray,  # ndarray[int64_t, ndim=1]
     np.ndarray,  # ndarray[int64_t, ndim=1]
 ]: ...
+def range_positions_to_labels(
+    positions: npt.NDArray[np.intp],
+    start: int,
+    step: int,
+) -> npt.NDArray[np.intp]: ...
 def count_categorical_codes(
     codes: np.ndarray,
     ncategories: int,

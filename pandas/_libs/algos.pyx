@@ -7,6 +7,7 @@ from libc.stdlib cimport (
     free,
     malloc,
 )
+from libc.stdint cimport intptr_t
 from libc.string cimport memmove
 
 import numpy as np
@@ -35,6 +36,68 @@ from numpy cimport (
 )
 
 cnp.import_array()
+
+cdef extern from *:
+    """
+    #include <stdint.h>
+    #if defined(__aarch64__)
+    #include <arm_neon.h>
+
+    static inline int64x2_t
+    pandas_vmulq_n_s64(int64x2_t values, int64_t scalar)
+    {
+        const uint64x2_t uvalues = vreinterpretq_u64_s64(values);
+        const uint32x2_t values_low = vmovn_u64(uvalues);
+        const uint32x2_t values_high = vmovn_u64(vshrq_n_u64(uvalues, 32));
+        const uint32x2_t scalar_low =
+            vdup_n_u32((uint32_t)(uint64_t)scalar);
+        const uint32x2_t scalar_high =
+            vdup_n_u32((uint32_t)((uint64_t)scalar >> 32));
+        uint64x2_t result = vmull_u32(values_low, scalar_low);
+        uint64x2_t cross = vaddq_u64(
+            vmull_u32(values_low, scalar_high),
+            vmull_u32(values_high, scalar_low)
+        );
+        result = vaddq_u64(result, vshlq_n_u64(cross, 32));
+        return vreinterpretq_s64_u64(result);
+    }
+    #endif
+
+    static inline void
+    pandas_range_positions_to_labels(
+        const intptr_t *positions,
+        intptr_t *labels,
+        Py_ssize_t n,
+        intptr_t start,
+        intptr_t step
+    ) {
+        Py_ssize_t i = 0;
+
+    #if defined(__aarch64__)
+        const int64x2_t vstart = vdupq_n_s64((int64_t)start);
+
+        for (; i + 2 <= n; i += 2) {
+            int64x2_t values = vld1q_s64((const int64_t *)(positions + i));
+            values = vaddq_s64(
+                pandas_vmulq_n_s64(values, (int64_t)step),
+                vstart
+            );
+            vst1q_s64((int64_t *)(labels + i), values);
+        }
+    #endif
+
+        for (; i < n; ++i) {
+            labels[i] = start + positions[i] * step;
+        }
+    }
+    """
+    void pandas_range_positions_to_labels(
+        const intptr_t* positions,
+        intptr_t* labels,
+        Py_ssize_t n,
+        intptr_t start,
+        intptr_t step,
+    ) noexcept nogil
 
 cimport pandas._libs.util as util
 from pandas._libs.dtypes cimport (
@@ -65,6 +128,30 @@ cdef:
 ctypedef fused nancount_float_t:
     float32_t
     float64_t
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def range_positions_to_labels(
+    const intp_t[::1] positions,
+    intp_t start,
+    intp_t step,
+):
+    cdef:
+        Py_ssize_t n = len(positions)
+        ndarray[intp_t] labels = np.empty(n, dtype=np.intp)
+
+    if n:
+        with nogil:
+            pandas_range_positions_to_labels(
+                <const intptr_t*>&positions[0],
+                <intptr_t*>&labels[0],
+                n,
+                <intptr_t>start,
+                <intptr_t>step,
+            )
+
+    return labels
 
 
 @cython.boundscheck(False)
