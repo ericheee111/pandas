@@ -2102,6 +2102,63 @@ class SeriesGroupBy(GroupBy[Series]):
         dog    [Chihuahua, Beagle]
         Name: breed, dtype: object
         """
+        if IS_ARM:
+            ngroups = self._grouper.ngroups
+        else:
+            ngroups = 0
+
+        if IS_ARM and ngroups > 1:
+            values = self.obj._values
+            if not (
+                isinstance(values, np.ndarray)
+                and values.ndim == 1
+                and values.dtype.kind in "biu"
+            ):
+                result = self._op_via_apply("unique")
+                return result
+
+            ids = self._grouper.ids
+            result_values = np.empty(ngroups, dtype=object)
+            result_values[:] = [np.array([], dtype=values.dtype)]
+
+            valid = ids >= 0
+            counts = np.bincount(ids[valid], minlength=ngroups)
+            if counts.max(initial=0) > 100:
+                result = self._op_via_apply("unique")
+                return result
+
+            if counts.max(initial=0) <= 1:
+                for i, lab in enumerate(ids):
+                    if lab >= 0:
+                        result_values[lab] = np.array([values[i]], dtype=values.dtype)
+            else:
+                unique_values: list[list[Any] | None] = [None] * ngroups
+                seen_values: list[set[Any] | None] = [None] * ngroups
+                for i, lab in enumerate(ids):
+                    if lab < 0:
+                        continue
+                    val = values[i]
+                    seen = seen_values[lab]
+                    if seen is None:
+                        seen = set()
+                        seen_values[lab] = seen
+                        group_values = []
+                        unique_values[lab] = group_values
+                    else:
+                        group_values = unique_values[lab]
+                        assert group_values is not None
+                    if val not in seen:
+                        seen.add(val)
+                        group_values.append(val)
+
+                for lab, group_values in enumerate(unique_values):
+                    if group_values is not None:
+                        result_values[lab] = np.asarray(group_values, dtype=values.dtype)
+
+            return Series(
+                result_values, index=self._grouper.result_index, name=self.obj.name
+            )
+
         result = self._op_via_apply("unique")
         return result
 

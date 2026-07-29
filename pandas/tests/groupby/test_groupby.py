@@ -71,6 +71,44 @@ def test_groupby_nonobject_dtype_mixed():
     tm.assert_series_equal(result, expected)
 
 
+def test_series_groupby_unique_numeric_no_na_fastpath(monkeypatch):
+    from pandas.core.groupby import generic as groupby_generic
+
+    monkeypatch.setattr(groupby_generic, "IS_ARM", True)
+
+    ser = Series([3, 1, 3, 2, 1, 2, 4], name="values")
+    keys = Series(["b", "a", "b", "a", "a", "b", "c"], name="key")
+
+    result = ser.groupby(keys, sort=False).unique()
+    expected = Series(
+        [
+            np.array([3, 2], dtype=np.int64),
+            np.array([1, 2], dtype=np.int64),
+            np.array([4], dtype=np.int64),
+        ],
+        index=Index(["b", "a", "c"], name="key"),
+        name="values",
+    )
+    tm.assert_series_equal(result, expected)
+
+
+def test_series_groupby_unique_numeric_single_large_group_fallback(monkeypatch):
+    from pandas.core.groupby import generic as groupby_generic
+
+    monkeypatch.setattr(groupby_generic, "IS_ARM", True)
+
+    ser = Series(np.arange(101), name="values")
+    keys = Series(["key"] * 101, name="key")
+
+    result = ser.groupby(keys).unique()
+    expected = Series(
+        [np.arange(101)],
+        index=Index(["key"], name="key"),
+        name="values",
+    )
+    tm.assert_series_equal(result, expected)
+
+
 def test_pass_args_kwargs(ts):
     def f(x, q=None, axis=0):
         return np.percentile(x, q, axis=axis)
