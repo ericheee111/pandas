@@ -11,7 +11,10 @@ from pandas import (
     isna,
 )
 import pandas._testing as tm
-from pandas.core.groupby import indexing
+from pandas.core.groupby import (
+    groupby as groupby_module,
+    indexing,
+)
 from pandas.core.groupby.groupby import GroupBy
 
 
@@ -233,6 +236,34 @@ def test_nth_zero_arm_does_not_compute_cumcount(monkeypatch):
     result = grouped.nth(0)
     expected = df.iloc[[0, 2]]
     tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("dropna", ["any", "all"])
+@pytest.mark.parametrize("as_series", [False, True])
+def test_nth_zero_dropna_arm_does_not_regroup(monkeypatch, dropna, as_series):
+    df = DataFrame({"key": [1, 1, 2, 2], "value": [np.nan, 10.0, np.nan, np.nan]})
+    if as_series:
+        grouped = df["value"].groupby(df["key"])
+        expected = df["value"].iloc[[1]]
+    else:
+        grouped = df.groupby("key")
+        rows = [1] if dropna == "any" else [0, 2]
+        expected = df.iloc[rows]
+
+    monkeypatch.setattr(groupby_module, "IS_ARM", True, raising=False)
+
+    def fail_groupby(self, *args, **kwargs):
+        raise AssertionError("groupby should not be called recursively")
+
+    monkeypatch.setattr(DataFrame, "groupby", fail_groupby)
+    monkeypatch.setattr(Series, "groupby", fail_groupby)
+
+    result = grouped.nth(0, dropna=dropna)
+
+    if as_series:
+        tm.assert_series_equal(result, expected)
+    else:
+        tm.assert_frame_equal(result, expected)
 
 
 def test_nth2():
