@@ -169,7 +169,6 @@ class ObjectStringArrayMixin:
                 self.dtype == np.dtype(object)
                 or (
                     getattr(self.dtype, "storage", None) == "python"
-                    and self.dtype.na_value is np.nan
                 )
             ):
                 result = lib.fast_string_contains(
@@ -369,15 +368,22 @@ class ObjectStringArrayMixin:
         return self._str_map(lambda x: x.rpartition(sep), dtype="object")
 
     def _str_len(self):
-        if _IS_ARM and (
+        if _IS_ARM and len(self) > 0 and (
             self.dtype == np.dtype(object)
             or (
                 getattr(self.dtype, "storage", None) == "python"
-                and self.dtype.na_value is np.nan
             )
         ):
             result = lib.fast_string_len(np.asarray(self, dtype=object))
             if result is not None:
+                from pandas.core.arrays.string_ import BaseStringArray
+
+                if isinstance(self, BaseStringArray):
+                    from pandas.arrays import IntegerArray
+
+                    return IntegerArray(
+                        result, np.zeros(len(result), dtype=np.bool_)
+                    )
                 return result
         return self._str_map(len, dtype="int64")
 
@@ -487,14 +493,22 @@ class ObjectStringArrayMixin:
 
     def _str_upper(self):
         if _IS_ARM:
-            if self.dtype == np.dtype(object) or (
-                getattr(self.dtype, "storage", None) == "python"
-                and self.dtype.na_value is np.nan
+            if len(self) > 0 and (
+                self.dtype == np.dtype(object)
+                or (
+                    getattr(self.dtype, "storage", None) == "python"
+                )
             ):
                 result = lib.fast_string_upper(np.asarray(self, dtype=object))
                 if result is not None:
+                    from pandas.core.arrays.string_ import BaseStringArray
+
+                    if isinstance(self, BaseStringArray):
+                        return type(self)._from_sequence(
+                            result, dtype=self.dtype
+                        )
                     return result
-            return self._str_map(str.upper)
+            return self._str_map(lambda x: x.upper())
         return self._str_map(lambda x: x.upper())
 
     def _str_isalnum(self):
