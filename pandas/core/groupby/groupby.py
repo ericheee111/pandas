@@ -4796,16 +4796,22 @@ class GroupBy(BaseGroupBy[NDFrameT]):
         # old behaviour, but with all and any support for DataFrames.
         # modified in GH 7559 to have better perf
         n = cast(int, n)
-        dropped = self._selected_obj.dropna(how=dropna, axis=0)
-
         if IS_ARM and n == 0:
-            if len(dropped) == len(self._selected_obj):
-                labels = self._grouper.ids
+            obj = self._selected_obj
+            if isinstance(obj, Series):
+                valid = notna(obj._values)
+            elif dropna == "any":
+                valid = notna(obj).all(axis=1, bool_only=False).to_numpy()
             else:
-                axis = self._grouper.axis
-                labels = self._grouper.codes_info[axis.isin(dropped.index)]
-            mask = libgroupby.group_nth_zero_mask(labels, self._grouper.ngroups)
-            return dropped[mask]
+                valid = notna(obj).any(axis=1, bool_only=False).to_numpy()
+            mask = libgroupby.group_nth_zero_mask(
+                self._grouper.ids,
+                self._grouper.ngroups,
+                valid.view(np.uint8),
+            )
+            return obj[mask]
+
+        dropped = self._selected_obj.dropna(how=dropna, axis=0)
 
         # get a new grouper for our dropped obj
         grouper: np.ndarray | Index | ops.BaseGrouper

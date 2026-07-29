@@ -266,6 +266,34 @@ def test_nth_zero_dropna_arm_does_not_regroup(monkeypatch, dropna, as_series):
         tm.assert_frame_equal(result, expected)
 
 
+@pytest.mark.parametrize("dropna", ["any", "all"])
+@pytest.mark.parametrize("as_series", [False, True])
+def test_nth_zero_dropna_arm_does_not_call_dropna(monkeypatch, dropna, as_series):
+    df = DataFrame({"key": [1, 1, 2, 2], "value": [np.nan, 10.0, np.nan, np.nan]})
+    if as_series:
+        grouped = df["value"].groupby(df["key"])
+        expected = df["value"].iloc[[1]]
+    else:
+        grouped = df.groupby("key")
+        rows = [1] if dropna == "any" else [0, 2]
+        expected = df.iloc[rows]
+
+    monkeypatch.setattr(groupby_module, "IS_ARM", True, raising=False)
+
+    def fail_dropna(self, *args, **kwargs):
+        raise AssertionError("dropna should not be called")
+
+    monkeypatch.setattr(DataFrame, "dropna", fail_dropna)
+    monkeypatch.setattr(Series, "dropna", fail_dropna)
+
+    result = grouped.nth(0, dropna=dropna)
+
+    if as_series:
+        tm.assert_series_equal(result, expected)
+    else:
+        tm.assert_frame_equal(result, expected)
+
+
 def test_nth2():
     # out of bounds, regression from 0.13.1
     # GH 6621
