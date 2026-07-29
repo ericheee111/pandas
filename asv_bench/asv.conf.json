@@ -62,6 +62,7 @@
         "versioneer[toml]": [],
         "numpy": ["2.4.3"],
         "python-dateutil": [],
+        "patchelf": [],
     },
     "conda_channels": ["conda-forge"],
     // Combinations of libraries/python versions can be excluded/included

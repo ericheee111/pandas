@@ -2178,6 +2178,36 @@ class GroupBy(BaseGroupBy[NDFrameT]):
                         return counted[0]
                     return counted
 
+            # Fused single-column float64 count: skip NaN directly while
+            # accumulating per-group counts, avoiding the input-sized
+            # temporary ``mask & ~isna(bvalues)`` boolean array.  Only
+            # applies to a 1-D contiguous native float64 ndarray; other
+            # layouts fall through to the generic path below.
+            if (
+                _USE_NO_NA_COUNT_FASTPATH
+                and isinstance(bvalues, np.ndarray)
+                and bvalues.ndim == 1
+                and bvalues.dtype == np.dtype(np.float64)
+                and bvalues.dtype.isnative
+                and bvalues.flags.c_contiguous
+                # The Cython kernel dereferences the buffer via a typed
+                # memoryview under ``nogil``; require aligned memory so the
+                # access is safe on strict-alignment architectures.  Misaligned
+                # input falls back to ``count_level_2d`` below.
+                and bvalues.flags.aligned
+                # The kernel writes ``counts[0, lab]`` for every non-negative
+                # ``lab``; the grouper normally guarantees ``len(ids) ==
+                # len(bvalues)`` and ``ids in [-1, ngroups)``, but assert the
+                # length invariant here so a future caller cannot trigger an
+                # out-of-bounds read on ``values``.
+                and len(ids) == len(bvalues)
+            ):
+                counted = lib.count_level_2d_float64_skipna(
+                    bvalues, labels=ids, max_bin=ngroups
+                )
+                if counted is not None:
+                    return counted[0]
+
             # TODO(EA2D): reshape would not be necessary with 2D EAs
             if bvalues.ndim == 1:
                 # EA

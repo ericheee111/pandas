@@ -5,10 +5,23 @@ similar to how we have a Groupby object.
 
 from __future__ import annotations
 
+import builtins
 import copy
+
+# Capture the original ``builtins.sum`` at module load.  The rolling builtin-sum
+# fast path identifies the user's callable by identity (``function is ...``) and
+# then dispatches to a specialized Cython reduction that never calls the
+# callable.  ``builtins.sum`` is mutable at runtime, so a live lookup
+# (``function is builtins.sum``) would silently match a rebound ``sum`` passed
+# in by the user under ``monkeypatch.setattr(builtins, "sum", fake_sum)`` and
+# then skip calling ``fake_sum``.  Comparing against this immutable reference
+# keeps the specialization tied to the real builtin and lets the rebound case
+# fall through to the generic callback path.
+_ORIGINAL_BUILTIN_SUM = builtins.sum
 from datetime import timedelta
 from functools import partial
 import inspect
+import sys
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -47,6 +60,7 @@ from pandas.core.dtypes.generic import (
 )
 from pandas.core.dtypes.missing import notna
 
+from pandas.core import boostkit_fastpaths
 from pandas.core._numba import executor
 from pandas.core.algorithms import factorize
 from pandas.core.apply import (
@@ -1746,6 +1760,24 @@ class RollingAndExpandingMixin(BaseWindow):
     ) -> Callable[[np.ndarray, np.ndarray, np.ndarray, int], np.ndarray]:
         from pandas import Series
 
+        use_builtin_sum_fast_path = (
+            boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            and raw is True
+            and function is _ORIGINAL_BUILTIN_SUM
+            and builtins.sum is _ORIGINAL_BUILTIN_SUM
+            and args == ()
+            and not kwargs
+            and np.geterr()
+            == {
+                "divide": "warn",
+                "over": "warn",
+                "under": "ignore",
+                "invalid": "warn",
+            }
+            and sys.gettrace() is None
+            and sys.getprofile() is None
+        )
+
         window_func = partial(
             window_aggregations.roll_apply,
             args=args,
@@ -1755,6 +1787,12 @@ class RollingAndExpandingMixin(BaseWindow):
         )
 
         def apply_func(values, begin, end, min_periods, raw=raw):
+            if use_builtin_sum_fast_path:
+                result = window_aggregations.roll_apply_builtin_sum(
+                    values, begin, end, min_periods
+                )
+                if result is not None:
+                    return result
             if not raw:
                 # GH 45912
                 values = Series(values, index=self._on, copy=False)

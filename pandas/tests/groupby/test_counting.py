@@ -392,3 +392,29 @@ def test_count_arrow_string_array(any_string_dtype):
     result = df.groupby("a").count()
     expected = DataFrame({"b": 1}, index=Index([1, 2, 3], name="a"))
     tm.assert_frame_equal(result, expected)
+
+
+def test_count_float64_unaligned_falls_back():
+    # A C-contiguous-but-misaligned float64 column must produce the same
+    # per-group non-NaN count as an aligned one.  The AArch64 fused
+    # ``count_level_2d_float64_skipna`` fast path dereferences the buffer via
+    # a typed memoryview under ``nogil``; the dispatcher gates on
+    # ``flags.aligned`` and falls back to the generic ``count_level_2d`` path
+    # for misaligned input.  This test runs on every platform and verifies the
+    # fallback produces correct results (on non-AArch64 the fast path is
+    # already off, so this also guards the alignment gate itself).
+    n = 64
+    aligned = np.arange(n, dtype=np.float64)
+    aligned[n // 2 :] = np.nan  # introduce NaNs so skipna matters
+    # Build a C-contiguous, native, 1-D float64 array that is NOT aligned.
+    raw = np.empty(n * 8 + 1, dtype=np.uint8)
+    unaligned = np.ndarray(n, dtype=np.float64, buffer=raw, offset=1)
+    unaligned[:] = aligned
+    assert unaligned.flags.c_contiguous
+    assert unaligned.dtype.isnative
+    assert not unaligned.flags.aligned
+
+    key = np.tile(np.arange(8, dtype=np.int64), n // 8)
+    expected = Series(aligned).groupby(key).count()
+    result = Series(unaligned).groupby(key).count()
+    tm.assert_series_equal(result, expected)

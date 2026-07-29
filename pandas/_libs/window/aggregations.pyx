@@ -1,5 +1,6 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True
 
+from libc.float cimport DBL_MAX
 from libc.math cimport (
     fabs,
     isfinite,
@@ -2503,6 +2504,106 @@ def roll_nunique(const float64_t[:] values, ndarray[int64_t] start,
     return np.asarray(output)
 
 
+def roll_apply_builtin_sum(
+    object obj,
+    ndarray[int64_t] start,
+    ndarray[int64_t] end,
+    int64_t minp,
+):
+    """Ordered raw rolling sum for finite, overflow-safe float64 values."""
+    cdef:
+        ndarray arr = np.asarray(obj)
+        ndarray[float64_t] values
+        ndarray[float64_t] output
+        Py_ssize_t i, j, s, e
+        Py_ssize_t N = len(start), n
+        Py_ssize_t window_len, max_window_len = 0
+        float64_t value, max_abs = 0.0, total
+
+    if (
+        len(end) != N
+        or cnp.PyArray_NDIM(arr) != 1
+        or cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64
+        or not cnp.PyArray_ISNOTSWAPPED(arr)
+    ):
+        return None
+
+    n = len(arr)
+
+    # Match the existing raw=True contiguous handling in roll_apply.
+    if not arr.flags.c_contiguous:
+        arr = arr.copy("C")
+    values = arr
+
+    # The typed ``values[j]`` dereference below assumes aligned float64 access.
+    # ``np.copy("C")`` preserves a misaligned data offset, so a C-contiguous but
+    # unaligned source must fall back to the generic path rather than risk an
+    # unaligned load on strict-alignment architectures.
+    if not cnp.PyArray_ISALIGNED(arr):
+        return None
+
+    if n == 0:
+        return np.array([], dtype=np.float64)
+
+    for i in range(n):
+        value = values[i]
+        if not isfinite(value):
+            return None
+        value = fabs(value)
+        if value > max_abs:
+            max_abs = value
+
+    for i in range(N):
+        s = start[i]
+        e = end[i]
+        if s < 0 or e < s or e > n:
+            return None
+        window_len = e - s
+        if window_len > max_window_len:
+            max_window_len = window_len
+
+    # The triangle inequality guarantees that every ordered partial sum is
+    # finite when max_abs * max_window_len cannot exceed DBL_MAX.
+    if max_window_len != 0 and max_abs > DBL_MAX / max_window_len:
+        return None
+
+    output = np.empty(N, dtype=np.float64)
+    for i in range(N):
+        s = start[i]
+        e = end[i]
+        if e - s >= minp:
+            total = 0.0
+            for j in range(s, e):
+                total += values[j]
+            output[i] = total
+        else:
+            output[i] = NaN
+
+    return output
+
+
+cdef inline ndarray _create_raw_window_view(
+    ndarray arr, Py_ssize_t start, Py_ssize_t end
+):
+    cdef:
+        Py_ssize_t n = cnp.PyArray_DIM(arr, 0)
+        cnp.npy_intp length
+        ndarray window
+
+    if start < 0 or end < start or end > n:
+        return arr[start:end]
+
+    length = end - start
+    window = cnp.PyArray_SimpleNewFromData(
+        1, &length, cnp.NPY_FLOAT64, cnp.PyArray_GETPTR1(arr, start)
+    )
+
+    cnp.set_array_base(window, arr)
+    if not cnp.PyArray_ISWRITEABLE(arr):
+        cnp.PyArray_CLEARFLAGS(window, cnp.NPY_ARRAY_WRITEABLE)
+    return window
+
+
 def roll_apply(object obj,
                ndarray[int64_t] start, ndarray[int64_t] end,
                int64_t minp,
@@ -2511,7 +2612,10 @@ def roll_apply(object obj,
     cdef:
         ndarray[float64_t] output, counts
         ndarray[float64_t, cast=True] arr
+        ndarray window
         Py_ssize_t i, s, e, N = len(start), n = len(obj)
+        bint use_direct_call = raw and len(args) == 0 and len(kwargs) == 0
+        bint use_direct_view
 
     if n == 0:
         return np.array([], dtype=np.float64)
@@ -2521,6 +2625,21 @@ def roll_apply(object obj,
     # ndarray input
     if raw and not arr.flags.c_contiguous:
         arr = arr.copy("C")
+
+    use_direct_view = (
+        use_direct_call
+        and cnp.PyArray_TYPE(arr) == cnp.NPY_FLOAT64
+        and cnp.PyArray_ISNOTSWAPPED(arr)
+        # ``_create_raw_window_view`` wraps the source pointer with
+        # ``PyArray_SimpleNewFromData``, which defaults the new array's flags
+        # to ``C_CONTIGUOUS | ALIGNED | WRITEABLE`` without consulting the
+        # source's actual alignment.  Gate the direct-view path on the source
+        # being aligned so the window's ``ALIGNED`` flag is truthful and the
+        # typed pointer handed to the user callback is safe to dereference on
+        # strict-alignment architectures.  Misaligned input falls back to
+        # ``arr[s:e]``, whose flags NumPy computes from the real offset.
+        and cnp.PyArray_ISALIGNED(arr)
+    )
 
     counts = roll_sum(np.isfinite(arr).astype(float), start, end, minp)
 
@@ -2533,9 +2652,27 @@ def roll_apply(object obj,
 
         if counts[i] >= minp:
             if raw:
-                output[i] = function(arr[s:e], *args, **kwargs)
+                if use_direct_view:
+                    window = _create_raw_window_view(arr, s, e)
+                    output[i] = function(window)
+                elif use_direct_call:
+                    output[i] = function(arr[s:e])
+                else:
+                    output[i] = function(arr[s:e], *args, **kwargs)
             else:
-                output[i] = function(obj.iloc[s:e], *args, **kwargs)
+                # GH 45912: ``obj`` is a Series built once per column in
+                # ``_generate_cython_apply_func``.  ``start``/``end`` are
+                # clipped positional bounds produced by the window indexer,
+                # so ``slice(s, e)`` is always a valid positional slice.  Use
+                # the internal positional slicer directly instead of going
+                # through ``obj.iloc[s:e]``: ``iloc`` only forwards to
+                # ``_slice`` after a chain of validators
+                # (``check_dict_or_set_indexers``, ``apply_if_callable``,
+                # ``need_slice``, ``_validate_positional_slice``) that are
+                # no-ops for a slice with concrete integer bounds.  The
+                # returned Series has identical index, name, dtype, view/copy
+                # and Copy-on-Write refs as ``obj.iloc[s:e]``.
+                output[i] = function(obj._slice(slice(s, e)), *args, **kwargs)
         else:
             output[i] = NaN
 

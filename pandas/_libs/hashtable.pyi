@@ -291,6 +291,9 @@ def unique_float64_monotonic(
 def factorize_float64_monotonic(
     values: npt.NDArray[np.float64],
 ) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.float64]] | None: ...
+def factorize_int64_dense_range(
+    values: npt.NDArray[np.int64],
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.int64]] | None: ...
 def unique_int64_masked_monotonic_tail(
     values: npt.NDArray[np.int64], mask: npt.NDArray[np.uint8]
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.bool_]] | None: ...
