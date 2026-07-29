@@ -3437,6 +3437,33 @@ def fast_string_len(ndarray[object] arr):
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
+def first_appearance_order(ndarray[int64_t] values, int64_t vmax):
+    """
+    Return unique values of ``values`` in first-appearance order.
+
+    ``np.bincount`` returns counts indexed by value (ascending), but
+    ``value_counts`` requires first-appearance order to satisfy the 3.0
+    stable / preserve-data-order contract (matching khash's output). This
+    scans once with a direct-index ``seen`` bool array (no hashing),
+    recording each value's first appearance. Requires 0 <= values[i] <= vmax.
+    """
+    cdef:
+        Py_ssize_t n = values.shape[0], i, k = 0
+        ndarray[uint8_t] seen = np.zeros(<Py_ssize_t>vmax + 1, dtype=np.uint8)
+        ndarray[int64_t] order = np.empty(<Py_ssize_t>vmax + 1, dtype=np.int64)
+        int64_t v
+
+    for i in range(n):
+        v = values[i]
+        if not seen[v]:
+            seen[v] = 1
+            order[k] = v
+            k += 1
+    return order[:k]
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
 def map_infer(
     ndarray arr, object f, *, bint convert=True, bint ignore_na=False
 ) -> "ArrayLike":
