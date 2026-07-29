@@ -209,6 +209,11 @@ def indices_fast(
     keys: list,
     sorted_labels: list[npt.NDArray[np.int64]],
 ) -> dict[Hashable, npt.NDArray[np.intp]]: ...
+def indices_fast_single(
+    index: npt.NDArray[np.intp],
+    labels: np.ndarray,  # const int64_t[:]
+    keys: object,
+) -> dict[Hashable, npt.NDArray[np.intp]]: ...
 def generate_slices(
     labels: np.ndarray,
     ngroups: int,  # const intp_t[:]

@@ -15,6 +15,31 @@ from pandas import Index
 import pandas._testing as tm
 
 
+@pytest.mark.parametrize(
+    "sorter,group_index,keys,expected",
+    [
+        (
+            [2, 0, 3, 1, 4],
+            [-1, 0, 0, 1, 1],
+            Index(["a", "b"]),
+            {"a": [0, 3], "b": [1, 4]},
+        ),
+        ([], [], Index([], dtype=object), {}),
+        ([0, 1], [-1, -1], Index(["unused"]), {}),
+    ],
+)
+def test_indices_fast_single(sorter, group_index, keys, expected):
+    sorter = np.array(sorter, dtype=np.intp)
+    group_index = np.array(group_index, dtype=np.int64)
+
+    result = lib.indices_fast_single(sorter, group_index, keys)
+
+    assert list(result) == list(expected)
+    for key, positions in expected.items():
+        expected_positions = np.array(positions, dtype=np.intp)
+        tm.assert_numpy_array_equal(result[key], expected_positions)
+
+
 class TestMisc:
     def test_fast_string_kernels(self):
         values = np.array(["Sha", "SGP", "fra"], dtype=object)
