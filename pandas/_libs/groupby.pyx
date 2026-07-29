@@ -79,17 +79,22 @@ cdef enum InterpolationEnumType:
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-def group_nth_zero_mask(const intp_t[::1] labels, Py_ssize_t ngroups):
-    """Return a mask selecting the first non-null row from each group."""
+def group_nth_zero_mask(
+    const intp_t[::1] labels,
+    Py_ssize_t ngroups,
+    const uint8_t[::1] valid=None,
+):
+    """Return a mask selecting the first valid row from each group."""
     cdef:
         Py_ssize_t i, lab, n = len(labels)
+        bint check_valid = valid is not None
         uint8_t[::1] seen = np.zeros(ngroups, dtype=np.uint8)
         uint8_t[::1] result = np.zeros(n, dtype=np.uint8)
 
     with nogil:
         for i in range(n):
             lab = labels[i]
-            if lab >= 0 and seen[lab] == 0:
+            if (not check_valid or valid[i]) and lab >= 0 and seen[lab] == 0:
                 seen[lab] = 1
                 result[i] = 1
 
