@@ -1,4 +1,8 @@
 cimport cython
+from cpython.unicode cimport (
+    PyUnicode_Check,
+    PyUnicode_GET_LENGTH,
+)
 from cython cimport (
     Py_ssize_t,
     floating,
@@ -9,6 +13,7 @@ from libc.math cimport (
     sqrt,
 )
 from libc.stdlib cimport (
+    calloc,
     free,
     malloc,
 )
@@ -93,6 +98,41 @@ def group_nth_zero_mask(
                 result[i] = 1
 
     return result.base.view(np.bool_)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def string_array_to_bool(
+    ndarray[object, ndim=1] arr,
+    object na_value,
+) -> tuple:
+    """
+    Convert a StringArray's values to booleans and return its missing mask.
+
+    StringArray guarantees that each value is either a string or its dtype's
+    normalized missing-value sentinel.
+    """
+    cdef:
+        Py_ssize_t i, n = len(arr)
+        object val
+        ndarray[uint8_t, ndim=1] values = np.empty(n, dtype=np.uint8)
+        ndarray[uint8_t, ndim=1] mask
+        object result_mask = None
+
+    for i in range(n):
+        val = arr[i]
+        if val is na_value:
+            values[i] = 1
+            if result_mask is None:
+                mask = np.zeros(n, dtype=np.uint8)
+                result_mask = mask
+            mask[i] = 1
+        else:
+            if not PyUnicode_Check(val):
+                raise TypeError("StringArray values must be strings or missing")
+            values[i] = PyUnicode_GET_LENGTH(val) != 0
+
+    return values, result_mask
 
 
 cdef float64_t median_linear_mask(
@@ -684,6 +724,7 @@ def group_any_all(
     str val_test,
     bint skipna,
     uint8_t[:, ::1] result_mask,
+    bint use_any_short_circuit=False,
 ) -> None:
     """
     Aggregated boolean values to show truthfulness of group elements. If the
@@ -708,6 +749,8 @@ def group_any_all(
     result_mask : ndarray[bool, ndim=2], optional
         If not None, these specify locations in the output that are NA.
         Modified in-place.
+    use_any_short_circuit : bool, default False
+        Whether to enable the adaptive completed-group fast path for ``any``.
 
     Notes
     -----
@@ -716,9 +759,12 @@ def group_any_all(
     -1 to signify a masked position in the case of a nullable input.
     """
     cdef:
-        Py_ssize_t i, j, N = len(labels), K = out.shape[1]
+        Py_ssize_t i, j, N = len(labels), K = out.shape[1], sample_N = 0
+        Py_ssize_t decisive_values = 0
+        Py_ssize_t* ncompleted = NULL
         intp_t lab
         int8_t flag_val, val
+        bint has_mask = mask is not None
         bint uses_mask = result_mask is not None
 
     if val_test == "all":
@@ -736,32 +782,75 @@ def group_any_all(
 
     out[:] = 1 - flag_val
 
-    with nogil:
-        for i in range(N):
-            lab = labels[i]
-            if lab < 0:
-                continue
+    # Short-circuiting completed groups is beneficial when decisive values are
+    # common, but the extra per-group state is costly for e.g. any on all-False
+    # values.  Sample a small prefix before selecting the short-circuit path.
+    if use_any_short_circuit and flag_val == 1 and K > 1 and N > 0:
+        sample_N = min(N, 256)
+        with nogil:
+            for i in range(sample_N):
+                if labels[i] < 0:
+                    continue
+                for j in range(K):
+                    if skipna and has_mask and mask[i, j]:
+                        continue
+                    if uses_mask and mask[i, j]:
+                        continue
+                    if values[i, j] == flag_val:
+                        decisive_values += 1
 
-            for j in range(K):
-                if skipna and mask[i, j]:
+    if sample_N > 0 and decisive_values * 8 >= sample_N * K:
+        ncompleted = <Py_ssize_t*>calloc(out.shape[0], sizeof(Py_ssize_t))
+
+    if ncompleted == NULL:
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
                     continue
 
-                if uses_mask and mask[i, j]:
-                    # Set the position as masked if `out[lab] != flag_val`, which
-                    # would indicate True/False has not yet been seen for any/all,
-                    # so by Kleene logic the result is currently unknown
-                    if out[lab, j] != flag_val:
-                        result_mask[lab, j] = 1
+                for j in range(K):
+                    if skipna and has_mask and mask[i, j]:
+                        continue
+
+                    if uses_mask and mask[i, j]:
+                        if out[lab, j] != flag_val:
+                            result_mask[lab, j] = 1
+                        continue
+
+                    val = values[i, j]
+                    if val == flag_val:
+                        out[lab, j] = flag_val
+                        if uses_mask:
+                            result_mask[lab, j] = 0
+    else:
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
                     continue
 
-                val = values[i, j]
+                if ncompleted[lab] == K:
+                    continue
 
-                # If True and 'any' or False and 'all', the result is
-                # already determined
-                if val == flag_val:
-                    out[lab, j] = flag_val
-                    if uses_mask:
-                        result_mask[lab, j] = 0
+                for j in range(K):
+                    if skipna and has_mask and mask[i, j]:
+                        continue
+
+                    if uses_mask and mask[i, j]:
+                        if out[lab, j] != flag_val:
+                            result_mask[lab, j] = 1
+                        continue
+
+                    val = values[i, j]
+                    if val == flag_val:
+                        if out[lab, j] != flag_val:
+                            out[lab, j] = flag_val
+                            ncompleted[lab] += 1
+                        if uses_mask:
+                            result_mask[lab, j] = 0
+
+    free(ncompleted)
 
 
 # ----------------------------------------------------------------------

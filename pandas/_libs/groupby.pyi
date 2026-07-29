@@ -9,6 +9,9 @@ def group_nth_zero_mask(
     ngroups: int,
     valid: npt.NDArray[np.bool_] | None = ...,
 ) -> npt.NDArray[np.bool_]: ...
+def string_array_to_bool(
+    arr: npt.NDArray[np.object_], na_value: object
+) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]: ...
 def group_median_float64(
     out: np.ndarray,  # ndarray[float64_t, ndim=2]
     counts: npt.NDArray[np.int64],
@@ -62,6 +65,7 @@ def group_any_all(
     val_test: Literal["any", "all"],
     skipna: bool,
     result_mask: np.ndarray | None,
+    use_any_short_circuit: bool = ...,
 ) -> None: ...
 def group_sum(
     out: np.ndarray,  # complexfloatingintuint_t[:, ::1]

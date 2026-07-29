@@ -25,13 +25,13 @@ from pandas._libs import (
     missing as libmissing,
     ops as libops,
 )
-from pandas.compat._arch import IS_ARM
 from pandas._libs.arrays import NDArrayBacked
 from pandas._libs.lib import ensure_string_array
 from pandas.compat import (
     HAS_PYARROW,
     PYARROW_MIN_VERSION,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import Pandas4Warning
 from pandas.util._decorators import (
@@ -759,6 +759,44 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
                 f"string or missing value, got '{type(value).__name__}' instead."
             )
         return value
+
+    def _groupby_op(
+        self,
+        *,
+        how: str,
+        has_dropped_na: bool,
+        min_count: int,
+        ngroups: int,
+        ids: npt.NDArray[np.intp],
+        **kwargs,
+    ):
+        if IS_ARM and how in ["any", "all"]:
+            from pandas._libs import groupby as libgroupby
+
+            from pandas.core.groupby.ops import WrappedCythonOp
+
+            values, mask = libgroupby.string_array_to_bool(
+                self._ndarray, self.dtype.na_value
+            )
+            kind = WrappedCythonOp.get_kind_from_how(how)
+            op = WrappedCythonOp(how=how, kind=kind, has_dropped_na=has_dropped_na)
+            return op._cython_op_ndim_compat(
+                values,
+                min_count=min_count,
+                ngroups=ngroups,
+                comp_ids=ids,
+                mask=mask,
+                **kwargs,
+            )
+
+        return super()._groupby_op(
+            how=how,
+            has_dropped_na=has_dropped_na,
+            min_count=min_count,
+            ngroups=ngroups,
+            ids=ids,
+            **kwargs,
+        )
 
     @classmethod
     def _from_sequence(
