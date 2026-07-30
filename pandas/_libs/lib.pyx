@@ -1154,6 +1154,47 @@ def count_level_2d_no_na(
     return counts
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def count_level_2d_float64_skipna(
+    const float64_t[:] values,
+    const intp_t[:] labels,
+    Py_ssize_t max_bin,
+):
+    """Fused single-column float64 group count skipping NaN.
+
+    Equivalent to ``count_level_2d(mask & ~isna(values), labels, max_bin)``
+    for a 1-D float64 array, but avoids materializing the input-sized
+    temporary boolean mask: each element is tested for NaN directly while
+    accumulating per-group counts.  ``labels[j] < 0`` entries (rows outside
+    any group) are skipped, matching the ``mask = ids != -1`` conjunction.
+
+    Returns a ``(1, max_bin)`` int64 array to match the layout of
+    ``count_level_2d_no_na``.  Returns ``None`` on non-AArch64 so the caller
+    falls back to the generic ``count_level_2d`` path.
+    """
+    cdef:
+        Py_ssize_t j, k = labels.shape[0]
+        intp_t lab
+        float64_t val
+        ndarray[int64_t, ndim=2] counts
+
+    if not pandas_is_aarch64():
+        return None
+
+    counts = np.zeros((1, max_bin), dtype="i8")
+    with nogil:
+        for j in range(k):
+            lab = labels[j]
+            if lab < 0:
+                continue
+            val = values[j]
+            if val == val:
+                counts[0, lab] += 1
+
+    return counts
+
+
 @cython.wraparound(False)
 @cython.boundscheck(False)
 def generate_slices(const intp_t[:] labels, Py_ssize_t ngroups):
@@ -1241,6 +1282,42 @@ def indices_fast(ndarray[intp_t, ndim=1] index, const int64_t[:] labels, list ke
             Py_INCREF(val)
     result[tup] = index[start:]
 
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def indices_fast_single(
+    ndarray[intp_t, ndim=1] index,
+    const int64_t[:] labels,
+    object keys,
+) -> dict:
+    """
+    Construct indexers for a single grouping key.
+
+    Unlike ``indices_fast``, the sorted group codes identify the key directly,
+    so a separately sorted copy of the original codes is not required.
+    """
+    cdef:
+        Py_ssize_t i, j, lab, cur, start, n = len(labels)
+        dict result = {}
+
+    for j in range(n):
+        if labels[j] != -1:
+            break
+    else:
+        return result
+
+    cur = labels[j]
+    start = j
+    for i in range(j + 1, n):
+        lab = labels[i]
+        if lab != cur:
+            result[keys[cur]] = index[start:i]
+            start = i
+            cur = lab
+
+    result[keys[cur]] = index[start:]
     return result
 
 

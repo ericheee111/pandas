@@ -57,6 +57,7 @@ from pandas._typing import (
     RandomState,
     npt,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import (
     AbstractMethodError,
@@ -71,6 +72,7 @@ from pandas.core.dtypes.cast import (
     ensure_dtype_can_hold_na,
 )
 from pandas.core.dtypes.common import (
+    ensure_platform_int,
     is_bool,
     is_bool_dtype,
     is_float_dtype,
@@ -138,6 +140,7 @@ from pandas.core.util.numba_ import (
 )
 
 _USE_NO_NA_COUNT_FASTPATH = machine().lower() in ("aarch64", "arm64")
+_USE_FILLNA_LABEL_FASTPATH = _USE_NO_NA_COUNT_FASTPATH
 
 if TYPE_CHECKING:
     from pandas._libs.tslibs import BaseOffset
@@ -2177,6 +2180,36 @@ class GroupBy(BaseGroupBy[NDFrameT]):
                     if is_series:
                         return counted[0]
                     return counted
+
+            # Fused single-column float64 count: skip NaN directly while
+            # accumulating per-group counts, avoiding the input-sized
+            # temporary ``mask & ~isna(bvalues)`` boolean array.  Only
+            # applies to a 1-D contiguous native float64 ndarray; other
+            # layouts fall through to the generic path below.
+            if (
+                _USE_NO_NA_COUNT_FASTPATH
+                and isinstance(bvalues, np.ndarray)
+                and bvalues.ndim == 1
+                and bvalues.dtype == np.dtype(np.float64)
+                and bvalues.dtype.isnative
+                and bvalues.flags.c_contiguous
+                # The Cython kernel dereferences the buffer via a typed
+                # memoryview under ``nogil``; require aligned memory so the
+                # access is safe on strict-alignment architectures.  Misaligned
+                # input falls back to ``count_level_2d`` below.
+                and bvalues.flags.aligned
+                # The kernel writes ``counts[0, lab]`` for every non-negative
+                # ``lab``; the grouper normally guarantees ``len(ids) ==
+                # len(bvalues)`` and ``ids in [-1, ngroups)``, but assert the
+                # length invariant here so a future caller cannot trigger an
+                # out-of-bounds read on ``values``.
+                and len(ids) == len(bvalues)
+            ):
+                counted = lib.count_level_2d_float64_skipna(
+                    bvalues, labels=ids, max_bin=ngroups
+                )
+                if counted is not None:
+                    return counted[0]
 
             # TODO(EA2D): reshape would not be necessary with 2D EAs
             if bvalues.ndim == 1:
@@ -4428,8 +4461,19 @@ class GroupBy(BaseGroupBy[NDFrameT]):
         if limit is None:
             limit = -1
 
-        ids = self._grouper.ids
-        ngroups = self._grouper.ngroups
+        if _USE_FILLNA_LABEL_FASTPATH and not isinstance(self._grouper, ops.BinGrouper):
+            groupings = self._grouper.groupings
+        else:
+            groupings = None
+
+        if groupings is not None and len(groupings) == 1:
+            ids = ensure_platform_int(self._grouper.codes[0])
+            ngroups = groupings[0].ngroups
+            has_dropped_na = bool((ids < 0).any())
+        else:
+            ids = self._grouper.ids
+            ngroups = self._grouper.ngroups
+            has_dropped_na = None
 
         col_func = partial(
             libgroupby.group_fillna_indexer,
@@ -4451,7 +4495,10 @@ class GroupBy(BaseGroupBy[NDFrameT]):
                 #  np.take_along_axis
                 if isinstance(values, np.ndarray):
                     dtype = values.dtype
-                    if self._grouper.has_dropped_na:
+                    dropped_na = has_dropped_na
+                    if dropped_na is None:
+                        dropped_na = self._grouper.has_dropped_na
+                    if dropped_na:
                         # dropped null groups give rise to nan in the result
                         dtype = ensure_dtype_can_hold_na(values.dtype)
                     out = np.empty(values.shape, dtype=dtype)
@@ -4765,6 +4812,21 @@ class GroupBy(BaseGroupBy[NDFrameT]):
         # old behaviour, but with all and any support for DataFrames.
         # modified in GH 7559 to have better perf
         n = cast(int, n)
+        if IS_ARM and n == 0:
+            obj = self._selected_obj
+            if isinstance(obj, Series):
+                valid = notna(obj._values)
+            elif dropna == "any":
+                valid = notna(obj).all(axis=1, bool_only=False).to_numpy()
+            else:
+                valid = notna(obj).any(axis=1, bool_only=False).to_numpy()
+            mask = libgroupby.group_nth_zero_mask(
+                self._grouper.ids,
+                self._grouper.ngroups,
+                valid.view(np.uint8),
+            )
+            return obj[mask]
+
         dropped = self._selected_obj.dropna(how=dropna, axis=0)
 
         # get a new grouper for our dropped obj

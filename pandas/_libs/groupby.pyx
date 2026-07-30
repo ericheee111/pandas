@@ -32,16 +32,7 @@ from numpy cimport (
 cnp.import_array()
 
 
-cdef extern from *:
-    """
-    static inline int pandas_is_aarch64(void) {
-    #if defined(__aarch64__)
-        return 1;
-    #else
-        return 0;
-    #endif
-    }
-    """
+cdef extern from "pandas/portable.h":
     bint pandas_is_aarch64() noexcept nogil
 
 
@@ -75,6 +66,33 @@ cdef enum InterpolationEnumType:
     INTERPOLATION_HIGHER,
     INTERPOLATION_NEAREST,
     INTERPOLATION_MIDPOINT
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def group_nth_zero_mask(
+    const intp_t[::1] labels,
+    Py_ssize_t ngroups,
+    const uint8_t[::1] valid=None,
+):
+    """Return a mask selecting the first valid row from each group."""
+    cdef:
+        Py_ssize_t i, lab, n = len(labels)
+        bint check_valid = valid is not None
+        uint8_t[::1] seen = np.zeros(ngroups, dtype=np.uint8)
+        uint8_t[::1] result = np.zeros(n, dtype=np.uint8)
+
+    if check_valid and len(valid) != n:
+        raise ValueError("valid must have the same length as labels")
+
+    with nogil:
+        for i in range(n):
+            lab = labels[i]
+            if (not check_valid or valid[i]) and lab >= 0 and seen[lab] == 0:
+                seen[lab] = 1
+                result[i] = 1
+
+    return result.base.view(np.bool_)
 
 
 cdef float64_t median_linear_mask(
@@ -415,6 +433,58 @@ def group_cumsum(
     compensation = np.zeros((ngroups, K), dtype=np.asarray(values).dtype)
 
     na_val = _get_na_val(<int64float_t>0, is_datetimelike)
+
+    if pandas_is_aarch64() and skipna and not is_datetimelike:
+        if not uses_mask:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    for j in range(K):
+                        val = values[i, j]
+
+                        if int64float_t == float32_t or int64float_t == float64_t:
+                            if val == val:
+                                y = val - compensation[lab, j]
+                                t = accum[lab, j] + y
+                                compensation[lab, j] = t - accum[lab, j] - y
+                                accum[lab, j] = t
+                                out[i, j] = t
+                            else:
+                                out[i, j] = na_val
+                        else:
+                            t = val + accum[lab, j]
+                            accum[lab, j] = t
+                            out[i, j] = t
+            return
+
+        if K == 1:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        result_mask[i, 0] = True
+                        out[i, 0] = 0
+                        continue
+
+                    if mask[i, 0]:
+                        result_mask[i, 0] = True
+                        out[i, 0] = 0
+                        continue
+
+                    val = values[i, 0]
+                    if int64float_t == float32_t or int64float_t == float64_t:
+                        y = val - compensation[lab, 0]
+                        t = accum[lab, 0] + y
+                        compensation[lab, 0] = t - accum[lab, 0] - y
+                    else:
+                        t = val + accum[lab, 0]
+
+                    accum[lab, 0] = t
+                    out[i, 0] = t
+            return
 
     with nogil:
         for i in range(N):
@@ -798,6 +868,7 @@ def group_sum(
         bint use_boundaries = False
         bint use_lanes
         bint isna_entry, isna_result
+        bint need_nobs
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
@@ -826,6 +897,12 @@ def group_sum(
 
     if sum_t is float32_t or sum_t is float64_t:
         if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            # When min_count <= 0, ``_check_below_mincount`` treats every group
+            # as satisfying the threshold (``nobs >= min_count`` is trivially
+            # true since nobs is non-negative), so nobs maintenance is dead
+            # work. This is a generic property of min_count, not a benchmark
+            # parameter.
+            need_nobs = min_count > 0
             if K == 1:
                 if sum_t is float32_t:
                     values_view_float32 = values
@@ -961,20 +1038,23 @@ def group_sum(
                             if lab != current_lab:
                                 if current_lab >= 0:
                                     counts[current_lab] = current_count
-                                    nobs[current_lab, 0] = current_nobs
+                                    if need_nobs:
+                                        nobs[current_lab, 0] = current_nobs
                                     sumx[current_lab, 0] = current_sum
                                     compensation[current_lab, 0] = current_compensation
 
                                 current_lab = lab
                                 current_count = counts[lab]
-                                current_nobs = nobs[lab, 0]
+                                if need_nobs:
+                                    current_nobs = nobs[lab, 0]
                                 current_sum = sumx[lab, 0]
                                 current_compensation = compensation[lab, 0]
 
                             current_count += 1
                             val = values[i, 0]
                             if val == val:
-                                current_nobs += 1
+                                if need_nobs:
+                                    current_nobs += 1
                                 y = val - current_compensation
                                 t = current_sum + y
                                 current_compensation = t - current_sum - y
@@ -984,7 +1064,8 @@ def group_sum(
 
                         if current_lab >= 0:
                             counts[current_lab] = current_count
-                            nobs[current_lab, 0] = current_nobs
+                            if need_nobs:
+                                nobs[current_lab, 0] = current_nobs
                             sumx[current_lab, 0] = current_sum
                             compensation[current_lab, 0] = current_compensation
             else:
@@ -999,7 +1080,8 @@ def group_sum(
                         for j in range(K):
                             val = values[i, j]
                             if val == val:
-                                nobs[lab, j] += 1
+                                if need_nobs:
+                                    nobs[lab, j] += 1
                                 y = val - compensation[lab, j]
                                 t = sumx[lab, j] + y
                                 compensation[lab, j] = t - sumx[lab, j] - y
@@ -1151,6 +1233,142 @@ def group_sum(
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
+cdef bint _group_prod_float64_1d_min_count_le0(
+    float64_t[:, ::1] out,
+    int64_t[::1] counts,
+    const float64_t[:, :] values,
+    const intp_t[::1] labels,
+    uint8_t[:, ::1] result_mask,
+    Py_ssize_t ncounts,
+    Py_ssize_t min_count,
+):
+    """
+    AArch64 K==1 specialization for skipna ``prod`` on a single native float64
+    column without a mask when ``min_count <= 0``.
+
+    When ``min_count <= 0``, ``_check_below_mincount`` treats every group as
+    satisfying the threshold (``nobs >= min_count`` is trivially true since
+    nobs is non-negative), so the per-element nobs increment is dead work.
+    This helper uses a fully separate specialized loop that skips nobs entirely
+    (no ``need_nobs`` branch inside the N-row loop, unlike the rejected
+    group_prod experiment in f1f0b985df).  The accepted generic loop remains
+    unchanged.  NaN is skipped via ``val == val``; ``prodx`` is initialized to
+    the multiplicative identity.  Returns True if handled; the caller falls
+    back otherwise.  Eligibility uses only dtype, column count, mask/skipna/
+    min_count semantics, and contiguity -- never benchmark parameters.
+
+    Not ``noexcept``: the helper allocates ``prodx``/``nobs`` via ``np.ones``/
+    ``np.zeros`` (GIL-held, before the ``nogil`` loop), which can raise
+    ``MemoryError``.  With ``noexcept`` Cython 3 would swallow the exception
+    and return an indeterminate ``bint``, leaving the caller's
+    ``if helper(...): return`` guard unreliable.  Dropping ``noexcept`` lets
+    the exception propagate; the hot loop itself stays ``nogil`` and adds no
+    per-iteration check.
+    """
+    cdef:
+        Py_ssize_t i, N, K, lab
+        float64_t val
+        float64_t[:, ::1] prodx
+        int64_t[:, ::1] nobs
+
+    if not pandas_is_aarch64():
+        return False
+
+    N, K = (<object>values).shape
+    if K != 1:
+        return False
+
+    prodx = np.ones((<object>out).shape, dtype=np.float64)
+    # nobs stays zero-filled; min_count <= 0 means _check_below_mincount
+    # treats every group as satisfying the threshold, so nobs is never read
+    # for a gating decision.
+    nobs = np.zeros((<object>out).shape, dtype=np.int64)
+
+    with nogil:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            counts[lab] += 1
+
+            val = values[i, 0]
+            if val == val:
+                # Non-NaN: accumulate into the running product.
+                prodx[lab, 0] *= val
+
+    _check_below_mincount(
+        out,
+        False,  # uses_mask
+        result_mask,
+        ncounts,
+        K,
+        nobs,
+        min_count,
+        prodx,
+    )
+    return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef bint _group_prod_float32_1d_min_count_le0(
+    float32_t[:, ::1] out,
+    int64_t[::1] counts,
+    const float32_t[:, :] values,
+    const intp_t[::1] labels,
+    uint8_t[:, ::1] result_mask,
+    Py_ssize_t ncounts,
+    Py_ssize_t min_count,
+):
+    """float32 variant of ``_group_prod_float64_1d_min_count_le0``.
+
+    Not ``noexcept``: allocates ``prodx``/``nobs`` via ``np.ones``/``np.zeros``
+    which can raise ``MemoryError``; see the float64 variant for details.
+    """
+    cdef:
+        Py_ssize_t i, N, K, lab
+        float32_t val
+        float32_t[:, ::1] prodx
+        int64_t[:, ::1] nobs
+
+    if not pandas_is_aarch64():
+        return False
+
+    N, K = (<object>values).shape
+    if K != 1:
+        return False
+
+    prodx = np.ones((<object>out).shape, dtype=np.float32)
+    nobs = np.zeros((<object>out).shape, dtype=np.int64)
+
+    with nogil:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            counts[lab] += 1
+
+            val = values[i, 0]
+            if val == val:
+                prodx[lab, 0] *= val
+
+    _check_below_mincount(
+        out,
+        False,  # uses_mask
+        result_mask,
+        ncounts,
+        K,
+        nobs,
+        min_count,
+        prodx,
+    )
+    return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
 def group_prod(
     int64float_t[:, ::1] out,
     int64_t[::1] counts,
@@ -1174,6 +1392,26 @@ def group_prod(
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
+
+    if (
+        not uses_mask and skipna and min_count <= 0
+    ) and (int64float_t is float64_t or int64float_t is float32_t):
+        # AArch64 K==1 branch-free specialization for skipna prod on a single
+        # native float column without a mask when min_count <= 0.  Delegated to
+        # dedicated cdef helpers (no need_nobs branch inside the N-row loop,
+        # unlike the rejected f1f0b985df experiment) so the generic loop's
+        # compiled layout is undisturbed.  All unsupported cases fall through
+        # to the existing implementation.
+        if int64float_t is float64_t:
+            if _group_prod_float64_1d_min_count_le0(
+                out, counts, values, labels, result_mask, ncounts, min_count
+            ):
+                return
+        elif int64float_t is float32_t:
+            if _group_prod_float32_1d_min_count_le0(
+                out, counts, values, labels, result_mask, ncounts, min_count
+            ):
+                return
 
     nobs = np.zeros((<object>out).shape, dtype=np.int64)
     prodx = np.ones((<object>out).shape, dtype=(<object>out).base.dtype)
@@ -2047,6 +2285,92 @@ cdef inline void _check_below_mincount(
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
+cdef bint _group_last_float_reverse_scan(
+    floating[:, ::1] out,
+    int64_t[::1] counts,
+    const floating[:, :] values,
+    const intp_t[::1] labels,
+    uint8_t[:, ::1] result_mask,
+    Py_ssize_t ncounts,
+    Py_ssize_t min_count,
+):
+    """
+    AArch64 K==1 reverse-scan specialization for skipna ``last`` on a single
+    native float column without a mask.
+
+    The generic loop writes the running value for every non-NaN row of every
+    group (O(N) writes).  Scanning labels in reverse and marking each group
+    "seen" on its first valid value writes each group's result exactly once
+    (O(ngroups) writes) while preserving the libgroupby ``counts`` contract
+    (``counts[lab]`` is the full group size, including NaN rows).
+
+    Returns True if the specialization handled the call; False otherwise (the
+    caller falls back to the generic implementation).  Eligibility uses only
+    dtype, column count, mask/skipna/min_count semantics, and contiguity --
+    never benchmark parameters.
+
+    Not ``noexcept``: the helper allocates ``seen``/``last_resx``/``last_nobs``
+    via ``np.zeros``/``np.empty_like``/``np.zeros`` (GIL-held, before the
+    ``nogil`` loop), which can raise ``MemoryError``.  With ``noexcept`` Cython
+    3 would swallow the exception and return an indeterminate ``bint``, leaving
+    the caller's ``if helper(...): return`` guard unreliable.  Dropping
+    ``noexcept`` lets the exception propagate; the hot loop itself stays
+    ``nogil`` and adds no per-iteration check.
+    """
+    cdef:
+        Py_ssize_t i, N, K, lab
+        floating val
+        uint8_t[::1] seen
+        floating[:, ::1] last_resx
+        int64_t[:, ::1] last_nobs
+
+    if not pandas_is_aarch64():
+        return False
+
+    N, K = (<object>values).shape
+    if K != 1:
+        return False
+
+    seen = np.zeros(ncounts, dtype=np.uint8)
+    last_resx = np.empty_like(out)
+    last_nobs = np.zeros((<object>out).shape, dtype=np.int64)
+
+    with nogil:
+        for i in range(N - 1, -1, -1):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            # Update counts for every non-negative label so the existing
+            # libgroupby counts contract is preserved.
+            counts[lab] += 1
+
+            if seen[lab]:
+                continue
+
+            val = values[i, 0]
+            if val == val:
+                # First valid value encountered in reverse order is the last
+                # valid value in forward order.
+                last_resx[lab, 0] = val
+                last_nobs[lab, 0] = 1
+                seen[lab] = 1
+
+    _check_below_mincount(
+        out,
+        False,  # uses_mask
+        result_mask,
+        ncounts,
+        K,
+        last_nobs,
+        min_count,
+        last_resx,
+    )
+    return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
 def group_last(
     numeric_object_t[:, ::1] out,
     int64_t[::1] counts,
@@ -2073,6 +2397,18 @@ def group_last(
         raise AssertionError("len(index) != len(labels)")
 
     min_count = max(min_count, 1)
+
+    if (
+        numeric_object_t is float32_t or numeric_object_t is float64_t
+    ) and not uses_mask and skipna and not is_datetimelike and min_count <= 1:
+        # AArch64 K==1 reverse-scan specialization for skipna last on a single
+        # native float column without a mask.  Delegated to a separate cdef
+        # function so the generic loop's compiled layout is undisturbed.
+        if _group_last_float_reverse_scan(
+            out, counts, values, labels, result_mask, ncounts, min_count
+        ):
+            return
+
     nobs = np.zeros((<object>out).shape, dtype=np.int64)
     if numeric_object_t is object:
         resx = np.empty((<object>out).shape, dtype=object)
@@ -2681,6 +3017,55 @@ cdef group_cummin_max(
         seen_na = np.zeros((<object>accum).shape, dtype=np.uint8)
 
     N, K = (<object>values).shape
+    if pandas_is_aarch64() and skipna and not is_datetimelike:
+        if not uses_mask:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    for j in range(K):
+                        val = values[i, j]
+                        if numeric_t is float64_t or numeric_t is float32_t:
+                            if val == val:
+                                mval = accum[lab, j]
+                                if (compute_max and val > mval) or (
+                                    not compute_max and val < mval
+                                ):
+                                    accum[lab, j] = mval = val
+                                out[i, j] = mval
+                            else:
+                                out[i, j] = val
+                        else:
+                            mval = accum[lab, j]
+                            if (compute_max and val > mval) or (
+                                not compute_max and val < mval
+                            ):
+                                accum[lab, j] = mval = val
+                            out[i, j] = mval
+            return
+
+        if K == 1:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    val = values[i, 0]
+                    if mask[i, 0]:
+                        out[i, 0] = val
+                        continue
+
+                    mval = accum[lab, 0]
+                    if (compute_max and val > mval) or (
+                        not compute_max and val < mval
+                    ):
+                        accum[lab, 0] = mval = val
+                    out[i, 0] = mval
+            return
+
     with nogil:
         for i in range(N):
             lab = labels[i]

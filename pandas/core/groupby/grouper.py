@@ -16,6 +16,7 @@ from pandas._libs import (
     algos as libalgos,
 )
 from pandas._libs.tslibs import OutOfBoundsDatetime
+from pandas.compat._arch import IS_ARM
 from pandas.errors import InvalidIndexError
 from pandas.util._decorators import (
     cache_readonly,
@@ -42,6 +43,7 @@ from pandas.core.groupby.categorical import recode_for_groupby
 from pandas.core.indexes.api import (
     Index,
     MultiIndex,
+    RangeIndex,
     default_index,
 )
 from pandas.core.series import Series
@@ -64,6 +66,28 @@ if TYPE_CHECKING:
     )
 
     from pandas.core.generic import NDFrame
+
+
+def _groups_for_range_index(
+    codes: np.ndarray, uniques: Index, index: RangeIndex
+) -> PrettyDict:
+    sorter, counts = libalgos.groupsort_indexer(
+        ensure_platform_int(codes), len(uniques)
+    )
+    boundaries = ensure_int64(counts).cumsum()
+    na_count = boundaries[0]
+    labels = libalgos.range_positions_to_labels(
+        sorter[na_count:], index.start, index.step
+    )
+    boundaries -= na_count
+
+    result = {
+        key: Index._simple_new(labels[start:end], name=index.name)
+        for key, start, end in zip(
+            uniques, boundaries[:-1], boundaries[1:], strict=True
+        )
+    }
+    return PrettyDict(result)
 
 
 @set_module("pandas")
@@ -686,6 +710,13 @@ class Grouping:
     def groups(self) -> dict[Hashable, Index]:
         codes, uniques = self._codes_and_uniques
         uniques = Index._with_infer(uniques, name=self.name, copy=False)
+
+        if (
+            IS_ARM
+            and isinstance(self._index, RangeIndex)
+            and len(self._index) == len(codes)
+        ):
+            return _groups_for_range_index(codes, uniques, self._index)
 
         r, counts = libalgos.groupsort_indexer(ensure_platform_int(codes), len(uniques))
         counts = ensure_int64(counts).cumsum()

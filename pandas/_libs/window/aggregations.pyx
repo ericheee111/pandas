@@ -1,11 +1,13 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True
 
+from libc.float cimport DBL_MAX
 from libc.math cimport (
     fabs,
     isfinite,
     signbit,
     sqrt,
 )
+from libc.stddef cimport size_t
 from libcpp.deque cimport deque
 from libcpp.stack cimport stack
 from libcpp.unordered_map cimport unordered_map
@@ -29,6 +31,14 @@ import cython
 from pandas._libs.algos import is_monotonic
 
 
+cdef extern from "pandas/window_aggregations.h" namespace "pandas":
+    bint all_finite(
+        const float64_t* values,
+        size_t n,
+        Py_ssize_t stride,
+    ) noexcept nogil
+
+
 cdef extern from "pandas/skiplist.h":
     ctypedef struct node_t:
         node_t **next
@@ -36,7 +46,7 @@ cdef extern from "pandas/skiplist.h":
         double value
         int is_nil
         int levels
-        int ref_count
+        # ref_count: x86 only, not declared
 
     ctypedef struct skiplist_t:
         node_t *head
@@ -44,6 +54,7 @@ cdef extern from "pandas/skiplist.h":
         int *tmp_steps
         int size
         int maxlevels
+        # prng_state: AArch64 only, not declared
 
     skiplist_t* skiplist_init(int) nogil
     void skiplist_destroy(skiplist_t*) nogil
@@ -76,14 +87,16 @@ cdef bint is_monotonic_increasing_start_end_bounds(
 
 def roll_all_finite(const float64_t[:] values) -> bool:
     cdef:
-        Py_ssize_t i, N = len(values)
-        bint result = True
+        Py_ssize_t N = len(values)
+        Py_ssize_t stride
+        bint result
 
+    if N == 0:
+        return True
+
+    stride = values.strides[0] // sizeof(float64_t)
     with nogil:
-        for i in range(N):
-            if not isfinite(values[i]):
-                result = False
-                break
+        result = all_finite(&values[0], <size_t>N, stride)
     return result
 
 
@@ -412,14 +425,200 @@ def roll_var_fixed_no_nan(const float64_t[:] values,
                           int ddof) -> np.ndarray:
     cdef:
         Py_ssize_t i, j, N = len(values)
-        float64_t sum_x, sum_sq, val
-        float64_t comp_x_add, comp_x_remove
-        float64_t comp_sq_add, comp_sq_remove
-        float64_t y, t, mean_val, var_val
-        int64_t s, e, nobs
+        float64_t nobs, mean_x, ssqdm_x, compensation_add, compensation_remove
+        float64_t var_val
+        bint numerically_unstable
+        int64_t s
         ndarray[float64_t] output
 
     output = np.empty(N, dtype=np.float64)
+    minp = max(minp, 1)
+
+    with nogil:
+        nobs = 0.0
+        mean_x = 0.0
+        ssqdm_x = 0.0
+        compensation_add = 0.0
+        compensation_remove = 0.0
+        numerically_unstable = False
+
+        for i in range(N):
+            s = max(0, i + 1 - window_size)
+
+            if i > 0 and i >= window_size:
+                remove_var(values[i - window_size], &nobs, &mean_x,
+                           &ssqdm_x, &compensation_remove,
+                           &numerically_unstable)
+
+            add_var(values[i], &nobs, &mean_x, &ssqdm_x,
+                    &compensation_add, &numerically_unstable)
+
+            if i == 0 or numerically_unstable:
+                nobs = 0.0
+                mean_x = 0.0
+                ssqdm_x = 0.0
+                compensation_add = 0.0
+                compensation_remove = 0.0
+                for j in range(s, i + 1):
+                    add_var(values[j], &nobs, &mean_x, &ssqdm_x,
+                            &compensation_add, &numerically_unstable)
+                numerically_unstable = False
+
+            output[i] = calc_var(minp, ddof, nobs, ssqdm_x)
+
+    return output
+
+
+ctypedef fused fixed_std_t:
+    float64_t
+    int64_t
+
+
+cdef ndarray[float64_t] _roll_std_fixed_no_nan_stable(
+    const fixed_std_t[:] values,
+    int64_t window_size,
+    int64_t minp,
+    int ddof,
+):
+    cdef:
+        Py_ssize_t i, j, N = len(values)
+        float64_t reference, delta, sum_x, sum_sq, mean_x, var_val
+        float64_t y, t
+        float64_t comp_x_add, comp_x_remove
+        float64_t comp_sq_add, comp_sq_remove
+        int64_t s, e, nobs
+        bint requires_recompute
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+    minp = max(minp, 1)
+    if N == 0:
+        return output
+
+    with nogil:
+        reference = <float64_t>values[0]
+        sum_x = 0.0
+        sum_sq = 0.0
+        comp_x_add = 0.0
+        comp_x_remove = 0.0
+        comp_sq_add = 0.0
+        comp_sq_remove = 0.0
+        requires_recompute = False
+
+        for i in range(N):
+            s = max(0, i + 1 - window_size)
+            e = i + 1
+            nobs = e - s
+
+            if i >= window_size:
+                delta = <float64_t>values[i - window_size] - reference
+                y = -delta - comp_x_remove
+                t = sum_x + y
+                comp_x_remove = t - sum_x - y
+                sum_x = t
+                y = -(delta * delta) - comp_sq_remove
+                t = sum_sq + y
+                comp_sq_remove = t - sum_sq - y
+                sum_sq = t
+                if delta * delta * InvCondTol > fabs(sum_sq):
+                    requires_recompute = True
+
+            delta = <float64_t>values[i] - reference
+            y = delta - comp_x_add
+            t = sum_x + y
+            comp_x_add = t - sum_x - y
+            sum_x = t
+            y = delta * delta - comp_sq_add
+            t = sum_sq + y
+            comp_sq_add = t - sum_sq - y
+            sum_sq = t
+
+            if requires_recompute:
+                reference = <float64_t>values[s]
+                sum_x = 0.0
+                sum_sq = 0.0
+                comp_x_add = 0.0
+                comp_x_remove = 0.0
+                comp_sq_add = 0.0
+                comp_sq_remove = 0.0
+                for j in range(s, e):
+                    delta = <float64_t>values[j] - reference
+                    y = delta - comp_x_add
+                    t = sum_x + y
+                    comp_x_add = t - sum_x - y
+                    sum_x = t
+                    y = delta * delta - comp_sq_add
+                    t = sum_sq + y
+                    comp_sq_add = t - sum_sq - y
+                    sum_sq = t
+                requires_recompute = False
+
+            if nobs >= minp and nobs > ddof:
+                mean_x = sum_x / <float64_t>nobs
+                var_val = sum_sq - sum_x * mean_x
+
+                if var_val < fabs(sum_sq) * InvCondTol:
+                    # Rebase the moments when their shifted values still cause
+                    # catastrophic cancellation.
+                    reference = <float64_t>values[s]
+                    sum_x = 0.0
+                    sum_sq = 0.0
+                    comp_x_add = 0.0
+                    comp_x_remove = 0.0
+                    comp_sq_add = 0.0
+                    comp_sq_remove = 0.0
+                    for j in range(s, e):
+                        delta = <float64_t>values[j] - reference
+                        y = delta - comp_x_add
+                        t = sum_x + y
+                        comp_x_add = t - sum_x - y
+                        sum_x = t
+                        y = delta * delta - comp_sq_add
+                        t = sum_sq + y
+                        comp_sq_add = t - sum_sq - y
+                        sum_sq = t
+                    mean_x = sum_x / <float64_t>nobs
+                    var_val = sum_sq - sum_x * mean_x
+
+                if var_val < 0:
+                    var_val = 0
+                output[i] = sqrt(
+                    var_val / (<float64_t>nobs - <float64_t>ddof)
+                )
+            else:
+                output[i] = NaN
+
+    return output
+
+
+cdef ndarray[float64_t] _roll_std_fixed_no_nan(
+    const fixed_std_t[:] values,
+    int64_t window_size,
+    int64_t minp,
+    int ddof,
+):
+    cdef:
+        Py_ssize_t i, N = len(values), warmup_end
+        float64_t val, sum_x, sum_sq, mean_x, var_val
+        float64_t y, t
+        float64_t comp_x_add, comp_x_remove
+        float64_t comp_sq_add, comp_sq_remove
+        float64_t inv_window, inv_denom
+        int64_t nobs
+        bint numerically_unstable = False
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+    minp = max(minp, 1)
+    if window_size <= 0 or window_size < minp or window_size <= ddof:
+        with nogil:
+            for i in range(N):
+                output[i] = NaN
+        return output
+
+    warmup_end = min(window_size, N)
+    inv_window = 1.0 / <float64_t>window_size
+    inv_denom = 1.0 / (<float64_t>window_size - <float64_t>ddof)
 
     with nogil:
         sum_x = 0.0
@@ -429,131 +628,76 @@ def roll_var_fixed_no_nan(const float64_t[:] values,
         comp_sq_add = 0.0
         comp_sq_remove = 0.0
 
-        for i in range(N):
-            s = max(0, i + 1 - window_size)
-            e = i + 1
-            nobs = e - s
+        for i in range(warmup_end):
+            val = <float64_t>values[i]
+            y = val - comp_x_add
+            t = sum_x + y
+            comp_x_add = t - sum_x - y
+            sum_x = t
+            y = val * val - comp_sq_add
+            t = sum_sq + y
+            comp_sq_add = t - sum_sq - y
+            sum_sq = t
 
-            if i == 0:
-                for j in range(0, e):
-                    val = values[j]
-                    y = val - comp_x_add
-                    t = sum_x + y
-                    comp_x_add = t - sum_x - y
-                    sum_x = t
-                    y = val * val - comp_sq_add
-                    t = sum_sq + y
-                    comp_sq_add = t - sum_sq - y
-                    sum_sq = t
-            else:
-                if i >= window_size:
-                    val = values[i - window_size]
-                    y = -val - comp_x_remove
-                    t = sum_x + y
-                    comp_x_remove = t - sum_x - y
-                    sum_x = t
-                    y = -(val * val) - comp_sq_remove
-                    t = sum_sq + y
-                    comp_sq_remove = t - sum_sq - y
-                    sum_sq = t
-
-                val = values[i]
-                y = val - comp_x_add
-                t = sum_x + y
-                comp_x_add = t - sum_x - y
-                sum_x = t
-                y = val * val - comp_sq_add
-                t = sum_sq + y
-                comp_sq_add = t - sum_sq - y
-                sum_sq = t
-
+            nobs = i + 1
             if nobs >= minp and nobs > ddof:
-                mean_val = sum_x / <float64_t>nobs
-                var_val = sum_sq / <float64_t>nobs - mean_val * mean_val
+                mean_x = sum_x / <float64_t>nobs
+                var_val = sum_sq - sum_x * mean_x
+                numerically_unstable |= (
+                    var_val < fabs(sum_sq) * InvCondTol
+                )
                 if var_val < 0:
                     var_val = 0
-                output[i] = var_val * <float64_t>nobs / (
-                    <float64_t>nobs - <float64_t>ddof
+                output[i] = sqrt(
+                    var_val / (<float64_t>nobs - <float64_t>ddof)
                 )
             else:
                 output[i] = NaN
 
+        for i in range(window_size, N):
+            val = <float64_t>values[i - window_size]
+            y = -val - comp_x_remove
+            t = sum_x + y
+            comp_x_remove = t - sum_x - y
+            sum_x = t
+            y = -(val * val) - comp_sq_remove
+            t = sum_sq + y
+            comp_sq_remove = t - sum_sq - y
+            sum_sq = t
+            numerically_unstable |= (
+                val * val * InvCondTol > fabs(sum_sq)
+            )
+
+            val = <float64_t>values[i]
+            y = val - comp_x_add
+            t = sum_x + y
+            comp_x_add = t - sum_x - y
+            sum_x = t
+            y = val * val - comp_sq_add
+            t = sum_sq + y
+            comp_sq_add = t - sum_sq - y
+            sum_sq = t
+
+            mean_x = sum_x * inv_window
+            var_val = sum_sq - sum_x * mean_x
+            numerically_unstable |= (
+                var_val < fabs(sum_sq) * InvCondTol
+            )
+            if var_val < 0:
+                var_val = 0
+            output[i] = sqrt(var_val * inv_denom)
+
+    if numerically_unstable:
+        return _roll_std_fixed_no_nan_stable(
+            values, window_size, minp, ddof
+        )
     return output
 
 
 def roll_std_fixed_no_nan(const float64_t[:] values,
                           int64_t window_size, int64_t minp,
                           int ddof) -> np.ndarray:
-    cdef:
-        Py_ssize_t i, j, N = len(values)
-        float64_t sum_x, sum_sq, val, mean_val, var_val
-        float64_t y, t
-        float64_t comp_x_add, comp_x_remove, comp_sq_add, comp_sq_remove
-        int64_t s, e, nobs
-        ndarray[float64_t] output
-
-    output = np.empty(N, dtype=np.float64)
-
-    with nogil:
-        sum_x = 0.0
-        sum_sq = 0.0
-        comp_x_add = 0.0
-        comp_x_remove = 0.0
-        comp_sq_add = 0.0
-        comp_sq_remove = 0.0
-
-        for i in range(N):
-            s = max(0, i + 1 - window_size)
-            e = i + 1
-            nobs = e - s
-
-            if i == 0:
-                for j in range(0, e):
-                    val = values[j]
-                    y = val - comp_x_add
-                    t = sum_x + y
-                    comp_x_add = t - sum_x - y
-                    sum_x = t
-                    y = val * val - comp_sq_add
-                    t = sum_sq + y
-                    comp_sq_add = t - sum_sq - y
-                    sum_sq = t
-            else:
-                if i >= window_size:
-                    val = values[i - window_size]
-                    y = -val - comp_x_remove
-                    t = sum_x + y
-                    comp_x_remove = t - sum_x - y
-                    sum_x = t
-                    y = -(val * val) - comp_sq_remove
-                    t = sum_sq + y
-                    comp_sq_remove = t - sum_sq - y
-                    sum_sq = t
-
-                val = values[i]
-                y = val - comp_x_add
-                t = sum_x + y
-                comp_x_add = t - sum_x - y
-                sum_x = t
-                y = val * val - comp_sq_add
-                t = sum_sq + y
-                comp_sq_add = t - sum_sq - y
-                sum_sq = t
-
-            if nobs >= minp and nobs > ddof:
-                mean_val = sum_x / <float64_t>nobs
-                var_val = sum_sq / <float64_t>nobs - mean_val * mean_val
-                if var_val < 0:
-                    var_val = 0
-                output[i] = sqrt(
-                    var_val
-                    * <float64_t>nobs
-                    / (<float64_t>nobs - <float64_t>ddof)
-                )
-            else:
-                output[i] = NaN
-
-    return output
+    return _roll_std_fixed_no_nan(values, window_size, minp, ddof)
 
 
 # ----------------------------------------------------------------------
@@ -596,18 +740,30 @@ def roll_mean_fixed_no_nan_int64(const int64_t[:] values,
 def roll_std_fixed_no_nan_int64(const int64_t[:] values,
                                 int64_t window_size, int64_t minp,
                                 int ddof) -> np.ndarray:
+    return _roll_std_fixed_no_nan(values, window_size, minp, ddof)
+
+
+# ----------------------------------------------------------------------
+# Fixed-window rolling sum/max/min without NaN — optimized fast paths
+
+
+def roll_sum_fixed_no_nan(const float64_t[:] values,
+                          int64_t window_size, int64_t minp) -> np.ndarray:
     cdef:
         Py_ssize_t i, j, N = len(values)
-        float64_t sum_x, sum_sq, val_f
-        int64_t val, s, e, nobs
-        float64_t mean_val, var_val
+        float64_t sum_x, val, y, t, prev_value
+        float64_t compensation_add, compensation_remove
+        int64_t s, e, nobs, num_consecutive_same_value
         ndarray[float64_t] output
 
     output = np.empty(N, dtype=np.float64)
 
     with nogil:
         sum_x = 0.0
-        sum_sq = 0.0
+        compensation_add = 0.0
+        compensation_remove = 0.0
+        prev_value = 0.0
+        num_consecutive_same_value = 0
 
         for i in range(N):
             s = max(0, i + 1 - window_size)
@@ -617,33 +773,505 @@ def roll_std_fixed_no_nan_int64(const int64_t[:] values,
             if i == 0:
                 for j in range(0, e):
                     val = values[j]
-                    val_f = <float64_t>val
-                    sum_x += val_f
-                    sum_sq += val_f * val_f
+                    y = val - compensation_add
+                    t = sum_x + y
+                    compensation_add = t - sum_x - y
+                    sum_x = t
+                    if val == prev_value:
+                        num_consecutive_same_value += 1
+                    else:
+                        num_consecutive_same_value = 1
+                        prev_value = val
             else:
                 if i >= window_size:
                     val = values[i - window_size]
-                    val_f = <float64_t>val
-                    sum_x -= val_f
-                    sum_sq -= val_f * val_f
+                    y = -val - compensation_remove
+                    t = sum_x + y
+                    compensation_remove = t - sum_x - y
+                    sum_x = t
 
                 val = values[i]
-                val_f = <float64_t>val
-                sum_x += val_f
-                sum_sq += val_f * val_f
+                y = val - compensation_add
+                t = sum_x + y
+                compensation_add = t - sum_x - y
+                sum_x = t
+                if val == prev_value:
+                    num_consecutive_same_value += 1
+                else:
+                    num_consecutive_same_value = 1
+                    prev_value = val
 
-            if nobs >= minp and nobs > ddof:
-                mean_val = sum_x / <float64_t>nobs
-                var_val = sum_sq / <float64_t>nobs - mean_val * mean_val
-                if var_val < 0:
-                    var_val = 0
-                output[i] = sqrt(
-                    var_val
-                    * <float64_t>nobs
-                    / (<float64_t>nobs - <float64_t>ddof)
-                )
+            if nobs >= minp:
+                if num_consecutive_same_value >= nobs:
+                    output[i] = prev_value * <float64_t>nobs
+                else:
+                    output[i] = sum_x
+            elif nobs == 0 == minp:
+                output[i] = 0
             else:
                 output[i] = NaN
+
+    return output
+
+
+def roll_sum_fixed_no_nan_int64(const int64_t[:] values,
+                                int64_t window_size, int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, j, N = len(values)
+        float64_t sum_x
+        int64_t s, e, nobs
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        sum_x = 0.0
+
+        for i in range(N):
+            s = max(0, i + 1 - window_size)
+            e = i + 1
+            nobs = e - s
+
+            if i == 0:
+                for j in range(0, e):
+                    sum_x += <float64_t>values[j]
+            else:
+                if i >= window_size:
+                    sum_x -= <float64_t>values[i - window_size]
+                sum_x += <float64_t>values[i]
+
+            if nobs >= minp:
+                output[i] = sum_x
+            elif nobs == 0 == minp:
+                output[i] = 0
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_max_fixed_no_nan(const float64_t[:] values,
+                          int64_t window_size, int64_t minp) -> np.ndarray:
+    return _roll_min_max_fixed_no_nan_float64(
+        values, window_size, minp, is_max=1
+    )
+
+
+def roll_min_fixed_no_nan(const float64_t[:] values,
+                          int64_t window_size, int64_t minp) -> np.ndarray:
+    return _roll_min_max_fixed_no_nan_float64(
+        values, window_size, minp, is_max=0
+    )
+
+
+cdef _roll_min_max_fixed_no_nan_float64(
+    const float64_t[:] values,
+    int64_t window_size,
+    int64_t minp,
+    bint is_max,
+):
+    cdef:
+        Py_ssize_t i, N = len(values)
+        int64_t s, nobs
+        deque[int64_t] candidates
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+    candidates = deque[int64_t]()
+
+    with nogil:
+        for i in range(N):
+            s = max(0, i + 1 - window_size)
+            nobs = i + 1 - s
+
+            while not candidates.empty() and candidates.front() < s:
+                candidates.pop_front()
+
+            if is_max:
+                while (not candidates.empty()
+                        and values[i] >= values[candidates.back()]):
+                    candidates.pop_back()
+            else:
+                while (not candidates.empty()
+                        and values[i] <= values[candidates.back()]):
+                    candidates.pop_back()
+            candidates.push_back(i)
+
+            if nobs >= minp:
+                output[i] = values[candidates.front()]
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_max_fixed_no_nan_int64(const int64_t[:] values,
+                                int64_t window_size, int64_t minp) -> np.ndarray:
+    return _roll_min_max_fixed_no_nan_int64(
+        values, window_size, minp, is_max=1
+    )
+
+
+def roll_min_fixed_no_nan_int64(const int64_t[:] values,
+                                int64_t window_size, int64_t minp) -> np.ndarray:
+    return _roll_min_max_fixed_no_nan_int64(
+        values, window_size, minp, is_max=0
+    )
+
+
+cdef _roll_min_max_fixed_no_nan_int64(
+    const int64_t[:] values,
+    int64_t window_size,
+    int64_t minp,
+    bint is_max,
+):
+    cdef:
+        Py_ssize_t i, N = len(values)
+        int64_t s, nobs
+        deque[int64_t] candidates
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+    candidates = deque[int64_t]()
+
+    with nogil:
+        for i in range(N):
+            s = max(0, i + 1 - window_size)
+            nobs = i + 1 - s
+
+            while not candidates.empty() and candidates.front() < s:
+                candidates.pop_front()
+
+            if is_max:
+                while (not candidates.empty()
+                        and values[i] >= values[candidates.back()]):
+                    candidates.pop_back()
+            else:
+                while (not candidates.empty()
+                        and values[i] <= values[candidates.back()]):
+                    candidates.pop_back()
+            candidates.push_back(i)
+
+            if nobs >= minp:
+                output[i] = <float64_t>values[candidates.front()]
+            else:
+                output[i] = NaN
+
+    return output
+
+
+# ----------------------------------------------------------------------
+# Expanding window operations without NaN — optimized fast paths
+
+
+def roll_sum_expanding_no_nan(const float64_t[:] values,
+                              int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        float64_t sum_x, val, y, t, prev_value
+        float64_t compensation
+        int64_t nobs, num_consecutive_same_value
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        sum_x = 0.0
+        compensation = 0.0
+        prev_value = 0.0
+        num_consecutive_same_value = 0
+
+        for i in range(N):
+            val = values[i]
+            y = val - compensation
+            t = sum_x + y
+            compensation = t - sum_x - y
+            sum_x = t
+
+            if val == prev_value:
+                num_consecutive_same_value += 1
+            else:
+                num_consecutive_same_value = 1
+                prev_value = val
+
+            nobs = i + 1
+            if nobs >= minp:
+                if num_consecutive_same_value >= nobs:
+                    output[i] = prev_value * <float64_t>nobs
+                else:
+                    output[i] = sum_x
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_sum_expanding_no_nan_int64(const int64_t[:] values,
+                                    int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        float64_t sum_x
+        int64_t nobs
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        sum_x = 0.0
+
+        for i in range(N):
+            sum_x += <float64_t>values[i]
+            nobs = i + 1
+            if nobs >= minp:
+                output[i] = sum_x
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_max_expanding_no_nan(const float64_t[:] values,
+                              int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        float64_t max_val
+        int64_t nobs
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        max_val = values[0] if N > 0 else NaN
+
+        for i in range(N):
+            if values[i] > max_val:
+                max_val = values[i]
+            nobs = i + 1
+            if nobs >= minp:
+                output[i] = max_val
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_max_expanding_no_nan_int64(const int64_t[:] values,
+                                    int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        int64_t max_val
+        int64_t nobs
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        max_val = values[0] if N > 0 else 0
+
+        for i in range(N):
+            if values[i] > max_val:
+                max_val = values[i]
+            nobs = i + 1
+            if nobs >= minp:
+                output[i] = <float64_t>max_val
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_min_expanding_no_nan(const float64_t[:] values,
+                              int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        float64_t min_val
+        int64_t nobs
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        min_val = values[0] if N > 0 else NaN
+
+        for i in range(N):
+            if values[i] < min_val:
+                min_val = values[i]
+            nobs = i + 1
+            if nobs >= minp:
+                output[i] = min_val
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_min_expanding_no_nan_int64(const int64_t[:] values,
+                                    int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        int64_t min_val
+        int64_t nobs
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        min_val = values[0] if N > 0 else 0
+
+        for i in range(N):
+            if values[i] < min_val:
+                min_val = values[i]
+            nobs = i + 1
+            if nobs >= minp:
+                output[i] = <float64_t>min_val
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_mean_expanding_no_nan(const float64_t[:] values,
+                               int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        float64_t sum_x, val, y, t, prev_value
+        float64_t compensation
+        int64_t nobs, num_consecutive_same_value
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        sum_x = 0.0
+        compensation = 0.0
+        prev_value = 0.0
+        num_consecutive_same_value = 0
+
+        for i in range(N):
+            val = values[i]
+            y = val - compensation
+            t = sum_x + y
+            compensation = t - sum_x - y
+            sum_x = t
+
+            if val == prev_value:
+                num_consecutive_same_value += 1
+            else:
+                num_consecutive_same_value = 1
+                prev_value = val
+
+            nobs = i + 1
+            if nobs >= minp:
+                if num_consecutive_same_value >= nobs:
+                    output[i] = prev_value
+                else:
+                    output[i] = sum_x / <float64_t>nobs
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_mean_expanding_no_nan_int64(const int64_t[:] values,
+                                     int64_t minp) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, N = len(values)
+        float64_t sum_x
+        int64_t nobs
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+
+    with nogil:
+        sum_x = 0.0
+
+        for i in range(N):
+            sum_x += <float64_t>values[i]
+            nobs = i + 1
+            if nobs >= minp:
+                output[i] = sum_x / <float64_t>nobs
+            else:
+                output[i] = NaN
+
+    return output
+
+
+def roll_std_expanding_no_nan(const float64_t[:] values,
+                              int64_t minp, int ddof) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, j, N = len(values)
+        float64_t nobs, mean_x, ssqdm_x, compensation, var_val
+        bint numerically_unstable
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+    minp = max(minp, 1)
+
+    with nogil:
+        nobs = 0.0
+        mean_x = 0.0
+        ssqdm_x = 0.0
+        compensation = 0.0
+        numerically_unstable = False
+
+        for i in range(N):
+            add_var(values[i], &nobs, &mean_x, &ssqdm_x,
+                    &compensation, &numerically_unstable)
+
+            if i == 0 or numerically_unstable:
+                nobs = 0.0
+                mean_x = 0.0
+                ssqdm_x = 0.0
+                compensation = 0.0
+                for j in range(i + 1):
+                    add_var(values[j], &nobs, &mean_x, &ssqdm_x,
+                            &compensation, &numerically_unstable)
+                numerically_unstable = False
+
+            var_val = calc_var(minp, ddof, nobs, ssqdm_x)
+            if var_val < 0:
+                var_val = 0
+            output[i] = sqrt(var_val)
+
+    return output
+
+
+def roll_std_expanding_no_nan_int64(const int64_t[:] values,
+                                    int64_t minp, int ddof) -> np.ndarray:
+    cdef:
+        Py_ssize_t i, j, N = len(values)
+        float64_t nobs, mean_x, ssqdm_x, compensation, var_val
+        bint numerically_unstable
+        ndarray[float64_t] output
+
+    output = np.empty(N, dtype=np.float64)
+    minp = max(minp, 1)
+
+    with nogil:
+        nobs = 0.0
+        mean_x = 0.0
+        ssqdm_x = 0.0
+        compensation = 0.0
+        numerically_unstable = False
+
+        for i in range(N):
+            add_var(<float64_t>values[i], &nobs, &mean_x, &ssqdm_x,
+                    &compensation, &numerically_unstable)
+
+            if i == 0 or numerically_unstable:
+                nobs = 0.0
+                mean_x = 0.0
+                ssqdm_x = 0.0
+                compensation = 0.0
+                for j in range(i + 1):
+                    add_var(<float64_t>values[j], &nobs, &mean_x, &ssqdm_x,
+                            &compensation, &numerically_unstable)
+                numerically_unstable = False
+
+            var_val = calc_var(minp, ddof, nobs, ssqdm_x)
+            if var_val < 0:
+                var_val = 0
+            output[i] = sqrt(var_val)
 
     return output
 
@@ -1876,6 +2504,106 @@ def roll_nunique(const float64_t[:] values, ndarray[int64_t] start,
     return np.asarray(output)
 
 
+def roll_apply_builtin_sum(
+    object obj,
+    ndarray[int64_t] start,
+    ndarray[int64_t] end,
+    int64_t minp,
+):
+    """Ordered raw rolling sum for finite, overflow-safe float64 values."""
+    cdef:
+        ndarray arr = np.asarray(obj)
+        ndarray[float64_t] values
+        ndarray[float64_t] output
+        Py_ssize_t i, j, s, e
+        Py_ssize_t N = len(start), n
+        Py_ssize_t window_len, max_window_len = 0
+        float64_t value, max_abs = 0.0, total
+
+    if (
+        len(end) != N
+        or cnp.PyArray_NDIM(arr) != 1
+        or cnp.PyArray_TYPE(arr) != cnp.NPY_FLOAT64
+        or not cnp.PyArray_ISNOTSWAPPED(arr)
+    ):
+        return None
+
+    n = len(arr)
+
+    # Match the existing raw=True contiguous handling in roll_apply.
+    if not arr.flags.c_contiguous:
+        arr = arr.copy("C")
+    values = arr
+
+    # The typed ``values[j]`` dereference below assumes aligned float64 access.
+    # ``np.copy("C")`` preserves a misaligned data offset, so a C-contiguous but
+    # unaligned source must fall back to the generic path rather than risk an
+    # unaligned load on strict-alignment architectures.
+    if not cnp.PyArray_ISALIGNED(arr):
+        return None
+
+    if n == 0:
+        return np.array([], dtype=np.float64)
+
+    for i in range(n):
+        value = values[i]
+        if not isfinite(value):
+            return None
+        value = fabs(value)
+        if value > max_abs:
+            max_abs = value
+
+    for i in range(N):
+        s = start[i]
+        e = end[i]
+        if s < 0 or e < s or e > n:
+            return None
+        window_len = e - s
+        if window_len > max_window_len:
+            max_window_len = window_len
+
+    # The triangle inequality guarantees that every ordered partial sum is
+    # finite when max_abs * max_window_len cannot exceed DBL_MAX.
+    if max_window_len != 0 and max_abs > DBL_MAX / max_window_len:
+        return None
+
+    output = np.empty(N, dtype=np.float64)
+    for i in range(N):
+        s = start[i]
+        e = end[i]
+        if e - s >= minp:
+            total = 0.0
+            for j in range(s, e):
+                total += values[j]
+            output[i] = total
+        else:
+            output[i] = NaN
+
+    return output
+
+
+cdef inline ndarray _create_raw_window_view(
+    ndarray arr, Py_ssize_t start, Py_ssize_t end
+):
+    cdef:
+        Py_ssize_t n = cnp.PyArray_DIM(arr, 0)
+        cnp.npy_intp length
+        ndarray window
+
+    if start < 0 or end < start or end > n:
+        return arr[start:end]
+
+    length = end - start
+    window = cnp.PyArray_SimpleNewFromData(
+        1, &length, cnp.NPY_FLOAT64, cnp.PyArray_GETPTR1(arr, start)
+    )
+
+    cnp.set_array_base(window, arr)
+    if not cnp.PyArray_ISWRITEABLE(arr):
+        cnp.PyArray_CLEARFLAGS(window, cnp.NPY_ARRAY_WRITEABLE)
+    return window
+
+
 def roll_apply(object obj,
                ndarray[int64_t] start, ndarray[int64_t] end,
                int64_t minp,
@@ -1884,7 +2612,10 @@ def roll_apply(object obj,
     cdef:
         ndarray[float64_t] output, counts
         ndarray[float64_t, cast=True] arr
+        ndarray window
         Py_ssize_t i, s, e, N = len(start), n = len(obj)
+        bint use_direct_call = raw and len(args) == 0 and len(kwargs) == 0
+        bint use_direct_view
 
     if n == 0:
         return np.array([], dtype=np.float64)
@@ -1894,6 +2625,21 @@ def roll_apply(object obj,
     # ndarray input
     if raw and not arr.flags.c_contiguous:
         arr = arr.copy("C")
+
+    use_direct_view = (
+        use_direct_call
+        and cnp.PyArray_TYPE(arr) == cnp.NPY_FLOAT64
+        and cnp.PyArray_ISNOTSWAPPED(arr)
+        # ``_create_raw_window_view`` wraps the source pointer with
+        # ``PyArray_SimpleNewFromData``, which defaults the new array's flags
+        # to ``C_CONTIGUOUS | ALIGNED | WRITEABLE`` without consulting the
+        # source's actual alignment.  Gate the direct-view path on the source
+        # being aligned so the window's ``ALIGNED`` flag is truthful and the
+        # typed pointer handed to the user callback is safe to dereference on
+        # strict-alignment architectures.  Misaligned input falls back to
+        # ``arr[s:e]``, whose flags NumPy computes from the real offset.
+        and cnp.PyArray_ISALIGNED(arr)
+    )
 
     counts = roll_sum(np.isfinite(arr).astype(float), start, end, minp)
 
@@ -1906,9 +2652,27 @@ def roll_apply(object obj,
 
         if counts[i] >= minp:
             if raw:
-                output[i] = function(arr[s:e], *args, **kwargs)
+                if use_direct_view:
+                    window = _create_raw_window_view(arr, s, e)
+                    output[i] = function(window)
+                elif use_direct_call:
+                    output[i] = function(arr[s:e])
+                else:
+                    output[i] = function(arr[s:e], *args, **kwargs)
             else:
-                output[i] = function(obj.iloc[s:e], *args, **kwargs)
+                # GH 45912: ``obj`` is a Series built once per column in
+                # ``_generate_cython_apply_func``.  ``start``/``end`` are
+                # clipped positional bounds produced by the window indexer,
+                # so ``slice(s, e)`` is always a valid positional slice.  Use
+                # the internal positional slicer directly instead of going
+                # through ``obj.iloc[s:e]``: ``iloc`` only forwards to
+                # ``_slice`` after a chain of validators
+                # (``check_dict_or_set_indexers``, ``apply_if_callable``,
+                # ``need_slice``, ``_validate_positional_slice``) that are
+                # no-ops for a slice with concrete integer bounds.  The
+                # returned Series has identical index, name, dtype, view/copy
+                # and Copy-on-Write refs as ``obj.iloc[s:e]``.
+                output[i] = function(obj._slice(slice(s, e)), *args, **kwargs)
         else:
             output[i] = NaN
 

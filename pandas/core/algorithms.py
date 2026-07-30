@@ -28,6 +28,7 @@ from pandas._libs import (
     iNaT,
     lib,
     swisstable,
+    swisstable_ismember,
 )
 from pandas._libs.missing import NA
 from pandas._typing import (
@@ -493,6 +494,11 @@ def _is_float64_monotonic_runs_candidate(values: np.ndarray) -> bool:
         or values.dtype != np.dtype(np.float64)
         or values.ndim != 1
         or not values.flags.c_contiguous
+        # The Cython kernel dereferences the buffer via a typed memoryview
+        # under ``nogil``; require aligned memory so the access is safe on
+        # strict-alignment architectures.  Misaligned input falls back to
+        # the hashtable path, which handles it via the same buffer protocol.
+        or not values.flags.aligned
     ):
         return False
 
@@ -523,6 +529,55 @@ def _factorize_float64_monotonic_runs(
         return None
 
     return htable.factorize_float64_monotonic(values)
+
+
+# --- Dense-range int64 factorization fast path ---------------------------
+# Conservative thresholds mirroring the Cython kernel
+# ``factorize_int64_dense_range`` (the authoritative copy lives there; the
+# Cython kernel is the final arbiter and may still return ``None``).  These
+# are generic safety caps, not benchmark parameters: any native int64
+# C-contiguous 1-D array whose value span is small relative to its length
+# benefits, regardless of its origin.
+_MINIMUM_DENSE_INT64_LEN = 100_000
+
+
+def _is_int64_dense_range_candidate(values: np.ndarray) -> bool:
+    if (
+        not isinstance(values, np.ndarray)
+        or len(values) < _MINIMUM_DENSE_INT64_LEN
+        or values.dtype != np.dtype(np.int64)
+        or not values.dtype.isnative
+        or values.ndim != 1
+        or not values.flags.c_contiguous
+        # The Cython kernel dereferences the buffer via a typed memoryview
+        # under ``nogil``; require aligned memory so the access is safe on
+        # strict-alignment architectures.  Misaligned input falls back to
+        # the regular hashtable path.
+        or not values.flags.aligned
+    ):
+        return False
+    return True
+
+
+def _factorize_int64_dense_range(
+    values: np.ndarray,
+) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.int64]] | None:
+    """Dense-range int64 factorization fast path.
+
+    Only attempted when ``USE_BOOSTKIT_FASTPATHS`` is enabled and the input
+    is a native, C-contiguous 1-D int64 ndarray of sufficient length.
+
+    Returns ``(codes, uniques)`` with uniques sorted ascending (so the
+    caller can skip ``safe_sort`` for ``sort=True``), or ``None`` to fall
+    back to the regular hashtable path.
+    """
+    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        return None
+
+    if not _is_int64_dense_range_candidate(values):
+        return None
+
+    return htable.factorize_int64_dense_range(values)
 
 
 def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
@@ -724,12 +779,12 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
             common = np_find_common_type(values.dtype, comps_array.dtype)
             values = values.astype(common, copy=False)
             comps_array = comps_array.astype(common, copy=False)
-        f = _get_ismember_func(comps_array.dtype)
+        f = _get_ismember_func(comps_array.dtype, len(values))
 
     return f(comps_array, values)
 
 
-def _get_ismember_func(dtype: np.dtype):
+def _get_ismember_func(dtype: np.dtype, values_size: int = 0):
     from pandas.core.config_init import get_use_swisstable
 
     if get_use_swisstable() and dtype.kind in "iufc":
@@ -747,6 +802,16 @@ def _get_ismember_func(dtype: np.dtype):
             np.dtype("complex128"): swisstable.ismember_complex128,
             np.dtype("complex64"): swisstable.ismember_complex64,
         }
+        if values_size >= 65_536:
+            large_integer_funcs = {
+                np.dtype("int64"): swisstable_ismember.ismember_int64,
+                np.dtype("int32"): swisstable_ismember.ismember_int32,
+                np.dtype("uint64"): swisstable_ismember.ismember_uint64,
+                np.dtype("uint32"): swisstable_ismember.ismember_uint32,
+            }
+            func = large_integer_funcs.get(dtype)
+            if func is not None:
+                return func
         func = swisstable_funcs.get(dtype)
         if func is not None:
             return func
@@ -990,6 +1055,10 @@ def factorize(
     values = _ensure_arraylike(values, func_name="factorize")
     original = values
 
+    # Only set to True by the dense-range int64 fast path below; used to
+    # skip ``safe_sort`` when the kernel already produced sorted uniques.
+    dense_int64_sorted = False
+
     if (
         isinstance(values, (ABCDatetimeArray, ABCTimedeltaArray))
         and values.freq is not None
@@ -1017,13 +1086,35 @@ def factorize(
                 # Don't modify (potentially user-provided) array
                 values = np.where(null_mask, na_value, values)
 
-        codes, uniques = factorize_array(
-            values,
-            use_na_sentinel=use_na_sentinel,
-            size_hint=size_hint,
-        )
+        # Dense-range int64 fast path (BoostKit).  Only attempted for
+        # ``sort=True`` with ``use_na_sentinel=True``: the kernel produces
+        # already-sorted uniques, so ``safe_sort`` can be skipped below via
+        # the ``dense_int64_sorted`` flag.  All other cases fall through to
+        # the regular ``factorize_array`` → hashtable path unchanged.
+        if (
+            sort
+            and use_na_sentinel
+            and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            and values.dtype == np.dtype(np.int64)
+        ):
+            result = _factorize_int64_dense_range(values)
+            if result is not None:
+                codes, uniques = result
+                dense_int64_sorted = True
+            else:
+                codes, uniques = factorize_array(
+                    values,
+                    use_na_sentinel=use_na_sentinel,
+                    size_hint=size_hint,
+                )
+        else:
+            codes, uniques = factorize_array(
+                values,
+                use_na_sentinel=use_na_sentinel,
+                size_hint=size_hint,
+            )
 
-    if sort and len(uniques) > 0:
+    if sort and len(uniques) > 0 and not dense_int64_sorted:
         already_sorted = (
             boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
             and isinstance(uniques, np.ndarray)
@@ -1267,7 +1358,7 @@ def duplicated(
           occurrence.
         - ``last`` : Mark duplicates as ``True`` except for the last
           occurrence.
-        - False : Mark all duplicates as ``True``.
+        - ``False`` : Mark all duplicates as ``True``.
     mask : ndarray[bool], optional
         array indicating which elements to exclude from checking
 
@@ -1275,9 +1366,26 @@ def duplicated(
     -------
     duplicated : ndarray[bool]
     """
+    from pandas.compat._arch import IS_ARM
     from pandas.core.config_init import get_use_swisstable
 
     values = _ensure_data(values)
+
+    if IS_ARM and mask is None and isinstance(values, np.ndarray):
+        if values.dtype == np.int64 and keep in ("first", "last") and len(values) > 0:
+            vmin = values.min()
+            vmax = values.max()
+            # Check for overflow before computing range
+            if vmax >= 0 and vmin < 0:
+                # Potential overflow case: use Python int arithmetic
+                vrange = int(vmax) - int(vmin)
+            else:
+                vrange = vmax - vmin
+            if vrange < 100000:
+                return htable.duplicated_int64_small_range(
+                    values, vmin, vmax, keep=keep
+                )
+
     if get_use_swisstable():
         duplicated_funcs = {
             np.dtype("int64"): swisstable.duplicated_int64,

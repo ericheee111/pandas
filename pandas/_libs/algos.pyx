@@ -7,6 +7,7 @@ from libc.stdlib cimport (
     free,
     malloc,
 )
+from libc.stdint cimport intptr_t
 from libc.string cimport memmove
 
 import numpy as np
@@ -35,6 +36,68 @@ from numpy cimport (
 )
 
 cnp.import_array()
+
+cdef extern from *:
+    """
+    #include <stdint.h>
+    #if defined(__aarch64__)
+    #include <arm_neon.h>
+
+    static inline int64x2_t
+    pandas_vmulq_n_s64(int64x2_t values, int64_t scalar)
+    {
+        const uint64x2_t uvalues = vreinterpretq_u64_s64(values);
+        const uint32x2_t values_low = vmovn_u64(uvalues);
+        const uint32x2_t values_high = vmovn_u64(vshrq_n_u64(uvalues, 32));
+        const uint32x2_t scalar_low =
+            vdup_n_u32((uint32_t)(uint64_t)scalar);
+        const uint32x2_t scalar_high =
+            vdup_n_u32((uint32_t)((uint64_t)scalar >> 32));
+        uint64x2_t result = vmull_u32(values_low, scalar_low);
+        uint64x2_t cross = vaddq_u64(
+            vmull_u32(values_low, scalar_high),
+            vmull_u32(values_high, scalar_low)
+        );
+        result = vaddq_u64(result, vshlq_n_u64(cross, 32));
+        return vreinterpretq_s64_u64(result);
+    }
+    #endif
+
+    static inline void
+    pandas_range_positions_to_labels(
+        const intptr_t *positions,
+        intptr_t *labels,
+        Py_ssize_t n,
+        intptr_t start,
+        intptr_t step
+    ) {
+        Py_ssize_t i = 0;
+
+    #if defined(__aarch64__)
+        const int64x2_t vstart = vdupq_n_s64((int64_t)start);
+
+        for (; i + 2 <= n; i += 2) {
+            int64x2_t values = vld1q_s64((const int64_t *)(positions + i));
+            values = vaddq_s64(
+                pandas_vmulq_n_s64(values, (int64_t)step),
+                vstart
+            );
+            vst1q_s64((int64_t *)(labels + i), values);
+        }
+    #endif
+
+        for (; i < n; ++i) {
+            labels[i] = start + positions[i] * step;
+        }
+    }
+    """
+    void pandas_range_positions_to_labels(
+        const intptr_t* positions,
+        intptr_t* labels,
+        Py_ssize_t n,
+        intptr_t start,
+        intptr_t step,
+    ) noexcept nogil
 
 cimport pandas._libs.util as util
 from pandas._libs.dtypes cimport (
@@ -65,6 +128,30 @@ cdef:
 ctypedef fused nancount_float_t:
     float32_t
     float64_t
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def range_positions_to_labels(
+    const intp_t[::1] positions,
+    intp_t start,
+    intp_t step,
+):
+    cdef:
+        Py_ssize_t n = len(positions)
+        ndarray[intp_t] labels = np.empty(n, dtype=np.intp)
+
+    if n:
+        with nogil:
+            pandas_range_positions_to_labels(
+                <const intptr_t*>&positions[0],
+                <intptr_t*>&labels[0],
+                n,
+                <intptr_t>start,
+                <intptr_t>step,
+            )
+
+    return labels
 
 
 @cython.boundscheck(False)
@@ -1029,6 +1116,215 @@ def is_monotonic(const numeric_object_t[:] arr, bint timelike):
 
     is_strict_monotonic = is_unique and (is_monotonic_inc or is_monotonic_dec)
     return is_monotonic_inc, is_monotonic_dec, is_strict_monotonic
+
+
+ctypedef fused _int_codes_t:
+    int8_t
+    int16_t
+    int32_t
+    int64_t
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void _binsearch_sorted_unique(
+    const _int_codes_t[:] values, const _int_codes_t[:] targets, intp_t[:] result
+) noexcept nogil:
+    # ``values`` is a strictly-increasing, unique integer array with no -1
+    # (NaN) sentinel (caller-enforced). For each target, binary-search its
+    # position in values; -1 if absent. Single tight C loop, no per-element
+    # Python/numpy overhead -- faster than cached hash-table lookups for
+    # small targets and avoids the hash-table build entirely.
+    cdef:
+        Py_ssize_t n = values.shape[0]
+        Py_ssize_t m = targets.shape[0]
+        Py_ssize_t i, lo, hi, mid
+        _int_codes_t key
+    for i in range(m):
+        key = targets[i]
+        lo = 0
+        hi = n
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if values[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < n and values[lo] == key:
+            result[i] = lo
+        else:
+            result[i] = -1
+
+
+def get_indexer_sorted_unique(values, targets):
+    """
+    Return an intp indexer of ``targets`` into strictly-increasing unique
+    integer ``values`` (e.g. the codes of a monotonic, NaN-free, unique
+    CategoricalIndex). -1 for targets not present.
+
+    This is a single vectorized binary search; it avoids the per-call
+    overhead of ``numpy.searchsorted`` (which is slow for small targets on
+    large arrays) and the hash-table build/lookup of the IndexEngine.
+    """
+    cdef:
+        ndarray varr = np.ascontiguousarray(values)
+        ndarray tarr = np.ascontiguousarray(targets)
+        Py_ssize_t n = varr.shape[0]
+        Py_ssize_t m = tarr.shape[0]
+        ndarray result = np.empty(m, dtype=np.intp)
+        intp_t[:] r = result
+
+    if m == 0:
+        return result
+    if n == 0:
+        r[:] = -1
+        return result
+    if varr.dtype != tarr.dtype:
+        raise TypeError(
+            "get_indexer_sorted_unique requires matching integer dtypes, "
+            f"got {varr.dtype} and {tarr.dtype}"
+        )
+    if varr.dtype == np.int8:
+        _binsearch_sorted_unique[int8_t](varr, tarr, r)
+    elif varr.dtype == np.int16:
+        _binsearch_sorted_unique[int16_t](varr, tarr, r)
+    elif varr.dtype == np.int32:
+        _binsearch_sorted_unique[int32_t](varr, tarr, r)
+    elif varr.dtype == np.int64:
+        _binsearch_sorted_unique[int64_t](varr, tarr, r)
+    else:
+        raise TypeError(
+            "get_indexer_sorted_unique requires integer arrays, "
+            f"got {varr.dtype}"
+        )
+    return result
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef Py_ssize_t _bsearch_i32(
+    int32_t* v, Py_ssize_t n, int32_t key, bint right
+) noexcept:
+    cdef:
+        Py_ssize_t lo = 0
+        Py_ssize_t hi = n
+        Py_ssize_t mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if right:
+            if v[mid] <= key:
+                lo = mid + 1
+            else:
+                hi = mid
+        else:
+            if v[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef Py_ssize_t _bsearch_i64(
+    int64_t* v, Py_ssize_t n, int64_t key, bint right
+) noexcept:
+    cdef:
+        Py_ssize_t lo = 0
+        Py_ssize_t hi = n
+        Py_ssize_t mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if right:
+            if v[mid] <= key:
+                lo = mid + 1
+            else:
+                hi = mid
+        else:
+            if v[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef Py_ssize_t _bsearch_i8(
+    int8_t* v, Py_ssize_t n, int8_t key, bint right
+) noexcept:
+    cdef:
+        Py_ssize_t lo = 0
+        Py_ssize_t hi = n
+        Py_ssize_t mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if right:
+            if v[mid] <= key:
+                lo = mid + 1
+            else:
+                hi = mid
+        else:
+            if v[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef Py_ssize_t _bsearch_i16(
+    int16_t* v, Py_ssize_t n, int16_t key, bint right
+) noexcept:
+    cdef:
+        Py_ssize_t lo = 0
+        Py_ssize_t hi = n
+        Py_ssize_t mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if right:
+            if v[mid] <= key:
+                lo = mid + 1
+            else:
+                hi = mid
+        else:
+            if v[mid] < key:
+                lo = mid + 1
+            else:
+                hi = mid
+    return lo
+
+
+def searchsorted_scalar(values, key, side="left"):
+    """
+    Binary-search a single scalar ``key`` in a sorted integer ``values``
+    array, returning the insertion position (left/right). Avoids
+    ``numpy.searchsorted``'s per-call overhead and the O(n) array cast numpy
+    performs when the key's dtype does not match ``values.dtype``.
+
+    Operates on the raw data pointer (no memoryview/buffer-protocol overhead)
+    when ``values`` is C-contiguous; falls back to ``numpy.searchsorted``
+    otherwise.
+    """
+    cdef:
+        cnp.ndarray arr = values
+        bint right = side == "right"
+        Py_ssize_t n = arr.shape[0]
+
+    if n == 0:
+        return 0
+    if not arr.flags.c_contiguous:
+        return np.searchsorted(arr, arr.dtype.type(key), side=side)
+    if arr.dtype == np.int32:
+        return _bsearch_i32(<int32_t*>cnp.PyArray_DATA(arr), n, <int32_t>key, right)
+    elif arr.dtype == np.int64:
+        return _bsearch_i64(<int64_t*>cnp.PyArray_DATA(arr), n, <int64_t>key, right)
+    elif arr.dtype == np.int8:
+        return _bsearch_i8(<int8_t*>cnp.PyArray_DATA(arr), n, <int8_t>key, right)
+    elif arr.dtype == np.int16:
+        return _bsearch_i16(<int16_t*>cnp.PyArray_DATA(arr), n, <int16_t>key, right)
+    raise TypeError(f"searchsorted_scalar requires an integer array, got {arr.dtype}")
 
 
 # ----------------------------------------------------------------------

@@ -59,6 +59,78 @@ def roll_std_fixed_no_nan_int64(
     minp: int,  # int64_t
     ddof: int,  # int
 ) -> np.ndarray: ...  # np.ndarray[float]
+def roll_sum_fixed_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_sum_fixed_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_max_fixed_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_max_fixed_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_min_fixed_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_min_fixed_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    window_size: int,  # int64_t
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_sum_expanding_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_sum_expanding_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_max_expanding_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_max_expanding_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_min_expanding_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_min_expanding_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_mean_expanding_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_mean_expanding_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    minp: int,  # int64_t
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_std_expanding_no_nan(
+    values: np.ndarray,  # const float64_t[:]
+    minp: int,  # int64_t
+    ddof: int,  # int
+) -> np.ndarray: ...  # np.ndarray[float]
+def roll_std_expanding_no_nan_int64(
+    values: np.ndarray,  # const int64_t[:]
+    minp: int,  # int64_t
+    ddof: int,  # int
+) -> np.ndarray: ...  # np.ndarray[float]
 def roll_skew(
     values: np.ndarray,  # np.ndarray[np.float64]
     start: np.ndarray,  # np.ndarray[np.int64]
@@ -124,6 +196,12 @@ def roll_nunique(
     end: np.ndarray,  # np.ndarray[np.int64]
     minp: int,  # int64_t
 ) -> np.ndarray: ...  # np.ndarray[float]
+def roll_apply_builtin_sum(
+    obj: object,
+    start: np.ndarray,  # np.ndarray[np.int64]
+    end: np.ndarray,  # np.ndarray[np.int64]
+    minp: int,  # int64_t
+) -> npt.NDArray[np.float64] | None: ...
 def roll_apply(
     obj: object,
     start: np.ndarray,  # np.ndarray[np.int64]

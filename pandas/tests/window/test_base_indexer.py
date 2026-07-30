@@ -13,10 +13,13 @@ from pandas.api.indexers import (
     BaseIndexer,
     FixedForwardWindowIndexer,
 )
+import pandas.core.indexers.objects as indexers
 from pandas.core.indexers.objects import (
     ExpandingIndexer,
     FixedWindowIndexer,
+    GroupbyIndexer,
     VariableOffsetWindowIndexer,
+    VariableWindowIndexer,
 )
 
 from pandas.tseries.offsets import BusinessDay
@@ -38,6 +41,103 @@ def test_expanding_indexer():
     result = s.rolling(indexer).mean()
     expected = s.expanding().mean()
     tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "window_indexer,window_size",
+    [
+        (ExpandingIndexer, 0),
+        (FixedWindowIndexer, 3),
+        (VariableWindowIndexer, 3),
+    ],
+)
+@pytest.mark.parametrize("center", [False, True])
+@pytest.mark.parametrize("closed", [None, "left", "both", "neither"])
+def test_groupby_indexer_matches_individual_groups(
+    window_indexer, window_size, center, closed, monkeypatch
+):
+    monkeypatch.setattr(indexers, "IS_ARM", True)
+    # Adjacent groups are closer than window_size to verify that bounds never
+    # cross groups; group sizes also cover empty, unequal, and singleton groups.
+    index_array = np.array([0, 5, 2, 7, 4, 9, 11, 12], dtype=np.int64)
+    groupby_indices = {
+        "empty": np.array([], dtype=np.intp),
+        "a": np.array([0, 2, 4], dtype=np.intp),
+        "b": np.array([1, 3, 5, 6], dtype=np.intp),
+        "single": np.array([7], dtype=np.intp),
+    }
+    indexer = GroupbyIndexer(
+        index_array=index_array,
+        window_size=window_size,
+        groupby_indices=groupby_indices,
+        window_indexer=window_indexer,
+    )
+
+    result_start, result_end = indexer.get_window_bounds(
+        num_values=len(index_array),
+        min_periods=1,
+        center=center,
+        closed=closed,
+    )
+
+    expected_start = []
+    expected_end = []
+    offset = 0
+    for indices in groupby_indices.values():
+        group_indexer = window_indexer(
+            index_array=index_array.take(indices),
+            window_size=window_size,
+        )
+        start, end = group_indexer.get_window_bounds(
+            num_values=len(indices),
+            min_periods=1,
+            center=center,
+            closed=closed,
+        )
+        expected_start.append(start + offset)
+        expected_end.append(end + offset)
+        offset += len(indices)
+
+    tm.assert_numpy_array_equal(result_start, np.concatenate(expected_start))
+    tm.assert_numpy_array_equal(result_end, np.concatenate(expected_end))
+
+
+@pytest.mark.parametrize(
+    "window_indexer,window_size,expected_start",
+    [
+        (ExpandingIndexer, 0, [0, 0, 0, 0, 4, 4, 4, 4]),
+        (FixedWindowIndexer, 2, [0, 0, 1, 2, 4, 4, 5, 6]),
+        (VariableWindowIndexer, 3, [0, 0, 1, 3, 4, 4, 5, 7]),
+    ],
+)
+def test_groupby_indexer_non_arm_fallback(
+    window_indexer, window_size, expected_start, monkeypatch
+):
+    def fail(*args, **kwargs):
+        pytest.fail("used the ARM groupby bounds path")
+
+    monkeypatch.setattr(indexers, "IS_ARM", False)
+    if window_indexer is VariableWindowIndexer:
+        monkeypatch.setattr(
+            indexers, "calculate_variable_window_bounds_grouped", fail
+        )
+    else:
+        monkeypatch.setattr(indexers.np, "repeat", fail)
+
+    indexer = GroupbyIndexer(
+        index_array=np.array([0, 0, 1, 1, 3, 3, 6, 6], dtype=np.int64),
+        window_size=window_size,
+        groupby_indices={
+            "a": np.array([0, 2, 4, 6], dtype=np.intp),
+            "b": np.array([1, 3, 5, 7], dtype=np.intp),
+        },
+        window_indexer=window_indexer,
+    )
+
+    start, end = indexer.get_window_bounds(num_values=8, min_periods=1)
+
+    assert start.tolist() == expected_start
+    assert end.tolist() == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_indexer_constructor_arg():

@@ -5,8 +5,10 @@ import pandas as pd
 from pandas import (
     DataFrame,
     Index,
+    Series,
 )
 import pandas._testing as tm
+import pandas.core.groupby.groupby as groupby_mod
 
 
 @pytest.mark.parametrize("func", ["ffill", "bfill"])
@@ -66,6 +68,67 @@ def test_ffill_handles_nan_groups(dropna, method, has_nan_group):
     expected = df_without_nan_rows.reindex(ridx).reset_index(drop=True)
     # columns are a 'take' on df.columns, which are object dtype
     expected.columns = expected.columns.astype(object)
+
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["ffill", "bfill"])
+@pytest.mark.parametrize("limit", [None, 1])
+@pytest.mark.parametrize(
+    "obj, by",
+    [
+        (
+            DataFrame(
+                {
+                    "key": ["a", "a", "b", "b", "a", "b"],
+                    "val": [np.nan, 1.0, np.nan, 2.0, np.nan, np.nan],
+                }
+            ),
+            "key",
+        ),
+        (
+            Series([np.nan, 1.0, np.nan, 2.0, np.nan, np.nan], name="val"),
+            Series(["a", "a", "b", "b", "a", "b"], name="key"),
+        ),
+        (
+            DataFrame(
+                {"val": [np.nan, 1.0, np.nan, 2.0, np.nan, np.nan]},
+                index=pd.date_range("2020-01-01", periods=6),
+            ),
+            pd.Grouper(freq="2D"),
+        ),
+    ],
+)
+def test_fillna_label_fastpath_matches_base(monkeypatch, method, limit, obj, by):
+    monkeypatch.setattr(groupby_mod, "_USE_FILLNA_LABEL_FASTPATH", False)
+    expected = getattr(obj.groupby(by), method)(limit=limit)
+
+    monkeypatch.setattr(groupby_mod, "_USE_FILLNA_LABEL_FASTPATH", True)
+    result = getattr(obj.groupby(by), method)(limit=limit)
+
+    tm.assert_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["ffill", "bfill"])
+@pytest.mark.parametrize("observed", [True, False])
+@pytest.mark.parametrize("dropna", [True, False])
+def test_fillna_label_fastpath_matches_base_categorical(
+    monkeypatch, method, observed, dropna
+):
+    df = DataFrame(
+        {
+            "key": pd.Categorical(
+                ["a", "a", "b", "b", np.nan, "a"], categories=["a", "b", "c"]
+            ),
+            "val": [np.nan, 1.0, np.nan, 2.0, 3.0, np.nan],
+        }
+    )
+
+    monkeypatch.setattr(groupby_mod, "_USE_FILLNA_LABEL_FASTPATH", False)
+    expected = getattr(df.groupby("key", observed=observed, dropna=dropna), method)()
+
+    monkeypatch.setattr(groupby_mod, "_USE_FILLNA_LABEL_FASTPATH", True)
+    result = getattr(df.groupby("key", observed=observed, dropna=dropna), method)()
 
     tm.assert_frame_equal(result, expected)
 

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -54,6 +55,15 @@ using ctrl_t = int8_t;
 #define CTRL_EMPTY   ((ctrl_t)0x80)  // -128: Empty slot
 #define CTRL_DELETED ((ctrl_t)0xFE)  // -2: Deleted slot (tombstone)
 // 0x00-0x7F: Occupied slot, stores swiss_h2(hash)
+
+constexpr size_t PREFETCH_DISTANCE = 16;
+constexpr size_t PREFETCH_MIN_CAPACITY = 1 << 16;
+constexpr size_t DIRECT_SET_MIN_SIZE = 1 << 16;
+constexpr size_t DIRECT_SET_SAMPLE_SIZE = 1 << 10;
+constexpr size_t DIRECT_SET_VALUES_TO_KEYS_RATIO = 4;
+constexpr uint8_t DIRECT_SET_PRESENT = 1;
+constexpr uint8_t DIRECT_SET_BLOOM_LOW = 2;
+constexpr uint8_t DIRECT_SET_BLOOM_HIGH = 4;
 
 // Extract H2 (top 7 bits) from hash
 // Returns ctrl_t in range 0x00-0x7F (always non-negative)
@@ -642,6 +652,58 @@ public:
         }
     }
 
+    inline size_t find_with_hash(const Key &key, uint64_t hash) const noexcept
+    {
+        if (capacity_ == 0) {
+            return capacity_;
+        }
+
+        ctrl_t h2 = swiss_h2(hash);
+        size_t index = hash & mask_;
+        ctrl_t ctrl = ctrl_[index];
+
+        // Fast path: first slot is empty (key not in table) - COMMON in sparse tables
+        if (ctrl == CTRL_EMPTY) {
+            return capacity_;
+        }
+
+        // Fast path: first slot matches - COMMON in cache-friendly access
+        if (ctrl == h2 && EqualFn::equal(keys_[index], key)) {
+            return index;
+        }
+
+        // SIMD path: scan groups
+        ProbeSeq seq(hash, mask_);
+        bool first_group = true;
+
+        while (true) {
+            size_t offset = seq.offset;
+            Group g = Group::load(&ctrl_[offset]);
+            uint16_t match_mask = g.match(h2);
+
+            // Skip already-checked first slot (index) on first group
+            if (first_group) {
+                match_mask &= ~1;
+                first_group = false;
+            }
+
+            while (match_mask != 0) {
+                int bit = countr_zero(match_mask);
+                size_t idx = (offset + bit) & mask_;
+                if (EqualFn::equal(keys_[idx], key)) {
+                    return idx;
+                }
+                match_mask &= match_mask - 1;
+            }
+
+            if (g.match_any_empty() != 0) {
+                return capacity_;
+            }
+
+            seq.next();
+        }
+    }
+
     // =========================================================================
     // Insert or update key-value pair
     // Returns: 0 if key already existed (updated), 1 if newly inserted, -1 on error
@@ -789,6 +851,72 @@ public:
         }
     }
 
+private:
+    // The caller must reserve enough capacity for the whole batch first.
+    // Keeping this helper private avoids a growth check in the hot loop.
+    inline int insert_key_only_with_hash_unchecked(
+        const Key &key, uint64_t hash) noexcept
+    {
+        assert(growth_left_ > 0);
+
+        ctrl_t h2 = swiss_h2(hash);
+        size_t index = hash & mask_;
+        ctrl_t c0 = ctrl_[index];
+
+        // Fast path: check if first slot is empty
+        if (c0 == CTRL_EMPTY) {
+            set_ctrl(index, h2);
+            keys_[index] = key;
+            size_++;
+            growth_left_--;
+            return 1;
+        }
+
+        // Fast path: check if first slot has matching key
+        if (c0 == h2 && EqualFn::equal(keys_[index], key)) {
+            return 0;
+        }
+
+        // Slow path: SIMD group operations
+        ProbeSeq seq(hash, mask_);
+        bool first_group = true;
+
+        while (true) {
+            size_t offset = seq.offset;
+            Group g = Group::load(&ctrl_[offset]);
+            uint16_t match_mask = g.match(h2);
+
+            // Skip already-checked first slot (index) on first group
+            if (first_group) {
+                match_mask &= ~1;
+                first_group = false;
+            }
+
+            while (match_mask != 0) {
+                int bit = countr_zero(match_mask);
+                size_t idx = (offset + bit) & mask_;
+                if (EqualFn::equal(keys_[idx], key)) {
+                    return 0;
+                }
+                match_mask &= match_mask - 1;
+            }
+
+            uint16_t empty_mask = g.match_empty();
+            if (empty_mask != 0) {
+                int bit = countr_zero(empty_mask);
+                size_t idx = (offset + bit) & mask_;
+                set_ctrl(idx, h2);
+                keys_[idx] = key;
+                size_++;
+                growth_left_--;
+                return 1;
+            }
+
+            seq.next();
+        }
+    }
+
+public:
     // =========================================================================
     // Get value by key (returns true if found, false otherwise)
     // =========================================================================
@@ -1269,15 +1397,57 @@ public:
     // ------------------------------------------------------------------------
     int build_set(const Key *keys, size_t n) noexcept
     {
-        // Reserve capacity upfront
         if (!reserve(n)) {
             return -1;
         }
+
+#if defined(__GNUC__) || defined(__clang__)
+        if constexpr (std::is_integral_v<Key>) {
+            // Integer hashes are inexpensive; prefetch bookkeeping regresses
+            // the common integer membership workloads on aarch64.
+            for (size_t i = 0; i < n; i++) {
+                if (insert_key_only(keys[i]) == -1) {
+                    return -1;
+                }
+            }
+            return 0;
+        }
+
+        if (capacity_ < PREFETCH_MIN_CAPACITY) {
+            for (size_t i = 0; i < n; i++) {
+                if (insert_key_only(keys[i]) == -1) {
+                    return -1;
+                }
+            }
+            return 0;
+        }
+
+        uint64_t hashes[PREFETCH_DISTANCE];
+        size_t prefetched = n < PREFETCH_DISTANCE ? n : PREFETCH_DISTANCE;
+        for (size_t i = 0; i < prefetched; i++) {
+            hashes[i] = HashFn::hash(keys[i]);
+            prefetch_for_write(hashes[i]);
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            size_t slot = i % PREFETCH_DISTANCE;
+            uint64_t hash = hashes[slot];
+            size_t next = i + PREFETCH_DISTANCE;
+            if (next < n) {
+                hashes[slot] = HashFn::hash(keys[next]);
+                prefetch_for_write(hashes[slot]);
+            }
+            if (insert_key_only_with_hash_unchecked(keys[i], hash) == -1) {
+                return -1;
+            }
+        }
+#else
         for (size_t i = 0; i < n; i++) {
             if (insert_key_only(keys[i]) == -1) {
                 return -1;
             }
         }
+#endif
         return 0;
     }
 
@@ -1290,9 +1460,78 @@ public:
     // ------------------------------------------------------------------------
     void contains_batch(const Key *keys, size_t n, uint8_t *result) const noexcept
     {
+#if defined(__GNUC__) || defined(__clang__)
+        if constexpr (std::is_integral_v<Key>) {
+            // Integer hashes are inexpensive; prefetch bookkeeping regresses
+            // the common integer membership workloads on aarch64.
+            for (size_t i = 0; i < n; i++) {
+                result[i] = (find(keys[i]) != capacity_) ? 1 : 0;
+            }
+            return;
+        }
+
+        if (capacity_ < PREFETCH_MIN_CAPACITY) {
+            for (size_t i = 0; i < n; i++) {
+                result[i] = (find(keys[i]) != capacity_) ? 1 : 0;
+            }
+            return;
+        }
+
+        uint64_t hashes[PREFETCH_DISTANCE];
+        size_t prefetched = n < PREFETCH_DISTANCE ? n : PREFETCH_DISTANCE;
+        for (size_t i = 0; i < prefetched; i++) {
+            hashes[i] = HashFn::hash(keys[i]);
+            prefetch_for_read(hashes[i]);
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            size_t slot = i % PREFETCH_DISTANCE;
+            uint64_t hash = hashes[slot];
+            size_t next = i + PREFETCH_DISTANCE;
+            if (next < n) {
+                hashes[slot] = HashFn::hash(keys[next]);
+                prefetch_for_read(hashes[slot]);
+            }
+            result[i] = (find_with_hash(keys[i], hash) != capacity_) ? 1 : 0;
+        }
+#else
         for (size_t i = 0; i < n; i++) {
             result[i] = (find(keys[i]) != capacity_) ? 1 : 0;
         }
+#endif
+    }
+
+    // Returns 0 when the direct set handled the operation, 1 when the caller
+    // should use the standard SwissTable path, and -1 on an overflow-table
+    // allocation failure. Direct-set allocation failures return 1 because the
+    // standard path uses less memory and can still succeed.
+    int ismember_direct_batch(const Key *keys, size_t n, const Key *values,
+        size_t n_values,
+        uint8_t *result) noexcept
+    {
+        destroy();
+
+        if (n == 0) {
+            return 0;
+        }
+        if (n_values == 0) {
+            std::memset(result, 0, n);
+            return 0;
+        }
+
+        if constexpr (std::is_integral_v<Key> && sizeof(Key) >= sizeof(uint32_t)) {
+            bool values_dominate =
+                n_values / n >= DIRECT_SET_VALUES_TO_KEYS_RATIO;
+            if (n_values >= DIRECT_SET_MIN_SIZE
+                && (values_dominate
+                    || direct_set_sample_has_duplicates(values, n_values))) {
+                int ret = ismember_direct_set(keys, n, values, n_values, result);
+                if (ret <= 0) {
+                    return ret;
+                }
+            }
+        }
+        return 1;
     }
 
     int64_t unique_batch(const Key *keys, size_t n, Key *uniques_out) noexcept
@@ -1383,6 +1622,129 @@ private:
     // =========================================================================
     // Helper Functions
     // =========================================================================
+
+#if defined(__GNUC__) || defined(__clang__)
+    inline void prefetch_for_read(uint64_t hash) const noexcept
+    {
+        size_t index = hash & mask_;
+        __builtin_prefetch(ctrl_ + index, 0, 1);
+        __builtin_prefetch(keys_ + index, 0, 1);
+    }
+
+    inline void prefetch_for_write(uint64_t hash) const noexcept
+    {
+        size_t index = hash & mask_;
+        __builtin_prefetch(ctrl_ + index, 1, 1);
+        __builtin_prefetch(keys_ + index, 1, 1);
+    }
+#endif
+
+    static inline size_t direct_set_index(Key key, size_t mask) noexcept
+    {
+        static_assert(std::is_integral_v<Key>);
+        using UnsignedKey = std::make_unsigned_t<Key>;
+
+        uint64_t value = static_cast<uint64_t>(static_cast<UnsignedKey>(key));
+        if constexpr (sizeof(Key) > sizeof(uint32_t)) {
+            value ^= value >> 32;
+        }
+        value ^= value >> 16;
+        return static_cast<size_t>(value) & mask;
+    }
+
+    static bool direct_set_sample_has_duplicates(
+        const Key *values, size_t n_values) noexcept
+    {
+        size_t sample_size = std::min(n_values, DIRECT_SET_SAMPLE_SIZE);
+        SwissTable<Key, Value, HashFn, EqualFn> sample;
+        if (!sample.reserve(sample_size)) {
+            return false;
+        }
+
+        // Spread the sample over the input so clustered duplicates do not make
+        // the decision depend only on the beginning of a large array.
+        size_t stride = n_values / sample_size;
+        for (size_t i = 0; i < sample_size; i++) {
+            int ret = sample.insert_key_only(values[i * stride]);
+            if (ret == 0) {
+                return true;
+            }
+            if (ret == -1) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    int ismember_direct_set(const Key *keys, size_t n, const Key *values, size_t n_values,
+        uint8_t *result) noexcept
+    {
+        constexpr size_t max_size = std::numeric_limits<size_t>::max();
+        if (n_values > max_size / 2) {
+            return 1;
+        }
+
+        size_t wanted = n_values * 2;
+        size_t capacity = normalize_capacity(wanted);
+        if (capacity < wanted || capacity > max_size / sizeof(Key)) {
+            return 1;
+        }
+
+        auto *occupied = static_cast<uint8_t *>(SWISSTABLE_MALLOC(capacity));
+        if (occupied == nullptr) {
+            return 1;
+        }
+
+        auto *direct_keys =
+            static_cast<Key *>(SWISSTABLE_MALLOC(capacity * sizeof(Key)));
+        if (direct_keys == nullptr) {
+            SWISSTABLE_FREE(occupied);
+            return 1;
+        }
+        std::memset(occupied, 0, capacity);
+
+        size_t mask = capacity - 1;
+        for (size_t i = 0; i < n_values; i++) {
+            Key key = values[i];
+            size_t index = direct_set_index(key, mask);
+            if ((occupied[index] & DIRECT_SET_PRESENT) == 0) {
+                direct_keys[index] = key;
+                occupied[index] |= DIRECT_SET_PRESENT;
+            } else if (!EqualFn::equal(direct_keys[index], key)) {
+                uint64_t hash = HashFn::hash(key);
+                occupied[hash & mask] |= DIRECT_SET_BLOOM_LOW;
+                occupied[(hash >> 32) & mask] |= DIRECT_SET_BLOOM_HIGH;
+                if (insert_key_only(key) == -1) {
+                    SWISSTABLE_FREE(direct_keys);
+                    SWISSTABLE_FREE(occupied);
+                    return -1;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < n; i++) {
+            Key key = keys[i];
+            size_t index = direct_set_index(key, mask);
+            bool found = (occupied[index] & DIRECT_SET_PRESENT) != 0
+                && EqualFn::equal(direct_keys[index], key);
+            if (!found && capacity_ != 0) {
+                uint64_t hash = HashFn::hash(key);
+                bool maybe_in_overflow =
+                    (occupied[hash & mask] & DIRECT_SET_BLOOM_LOW) != 0
+                    && (occupied[(hash >> 32) & mask]
+                           & DIRECT_SET_BLOOM_HIGH)
+                        != 0;
+                if (maybe_in_overflow) {
+                    found = find_with_hash(key, hash) != capacity_;
+                }
+            }
+            result[i] = found;
+        }
+
+        SWISSTABLE_FREE(direct_keys);
+        SWISSTABLE_FREE(occupied);
+        return 0;
+    }
 
     bool resize(size_t new_capacity) noexcept
     {

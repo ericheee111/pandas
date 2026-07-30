@@ -11,12 +11,18 @@ from typing import (
 import numpy as np
 
 from pandas._libs import index as libindex
+from pandas.compat._arch import IS_ARM
 from pandas.util._decorators import (
     cache_readonly,
     set_module,
 )
 
-from pandas.core.dtypes.common import is_scalar
+from pandas.core.dtypes.common import (
+    is_numeric_dtype,
+    is_object_dtype,
+    is_scalar,
+    is_string_dtype,
+)
 from pandas.core.dtypes.dtypes import CategoricalDtype
 from pandas.core.dtypes.missing import (
     is_valid_na_for_dtype,
@@ -335,6 +341,14 @@ class CategoricalIndex(NDArrayBackedExtensionIndex):
         if not isinstance(other, Index):
             return False
 
+        # ARM-only: different lengths can never be equal; short-circuit
+        # before the (relatively expensive) _is_dtype_compat / _data.equals
+        # work below, which would otherwise recode + array_equal for nothing
+        # (e.g. when reindexing a small target against a large index). On
+        # non-ARM the original path is used.
+        if IS_ARM and len(self) != len(other):
+            return False
+
         try:
             other = self._is_dtype_compat(other)
         except (TypeError, ValueError):
@@ -445,6 +459,32 @@ class CategoricalIndex(NDArrayBackedExtensionIndex):
             )
         return super().reindex(target)
 
+    def intersection(self, other, sort: bool = False):
+        self._validate_sort_keyword(sort)
+        # Fast path: intersect two same-dtype, strictly-monotonic-unique
+        # CategoricalIndexes by running the libjoin inner-join directly on
+        # the integer codes and wrapping its (already unique, self-ordered)
+        # output Categorical. This skips the base implementation's
+        # equals / _should_compare / take / drop_duplicates machinery.
+        if (
+            IS_ARM
+            and not self._is_multi
+            and isinstance(other, CategoricalIndex)
+            and self.dtype == other.dtype
+            and self is not other
+            and self.is_monotonic_increasing
+            and other.is_monotonic_increasing
+            and self.is_unique
+            and other.is_unique
+        ):
+            _, result_name = self._convert_can_do_setop(other)
+            res_indexer, _, _ = self._inner_indexer(other)
+            result = type(self)._simple_new(res_indexer, name=result_name)
+            if sort is True:
+                result = result.sort_values()
+            return result
+        return super().intersection(other, sort=sort)
+
     # --------------------------------------------------------------------
     # Indexing Methods
 
@@ -459,6 +499,16 @@ class CategoricalIndex(NDArrayBackedExtensionIndex):
             raise
 
     def _maybe_cast_listlike_indexer(self, values) -> CategoricalIndex:
+        if (
+            IS_ARM
+            and isinstance(values, CategoricalIndex)
+            and values.dtype is self.dtype
+        ):
+            # Fast path: a CategoricalIndex sharing our exact dtype object
+            # already has codes in our category space -- skip recode and the
+            # Categorical/CategoricalIndex reconstruction (common when
+            # indexing/reindexing a slice of a same-dtype index).
+            return values
         if isinstance(values, CategoricalIndex):
             values = values._data
         if isinstance(values, Categorical):
@@ -468,8 +518,23 @@ class CategoricalIndex(NDArrayBackedExtensionIndex):
             cat = self._data._encode_with_my_categories(values)
             codes = cat._codes
         else:
-            codes = self.categories.get_indexer(values)
-            codes = codes.astype(self.codes.dtype, copy=False)
+            target_dtype = getattr(values, "dtype", None)
+            if (
+                IS_ARM
+                and target_dtype is not None
+                and is_numeric_dtype(self.categories.dtype)
+                and is_string_dtype(target_dtype)
+                and not is_object_dtype(target_dtype)
+            ):
+                # Numeric categories can never equal string values, so every
+                # target maps to a missing code (-1). This avoids materializing
+                # all categories into an object array and building a hash table
+                # over them (e.g. ``CategoricalIndex.reindex(["a", "b"])`` with
+                # integer categories).
+                codes = np.full(len(values), -1, dtype=self.codes.dtype)
+            else:
+                codes = self.categories.get_indexer(values)
+                codes = codes.astype(self.codes.dtype, copy=False)
             cat = self._data._from_backing_data(codes)
         return type(self)._simple_new(cat)
 

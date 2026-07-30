@@ -16,6 +16,7 @@ from pandas._libs import (
     lib,
 )
 from pandas._libs.hashtable import unique_label_indices
+from pandas.compat._arch import IS_ARM
 
 from pandas.core.dtypes.common import (
     ensure_int64,
@@ -619,9 +620,11 @@ def get_indexer_dict(
 
     sorter = get_group_index_sorter(group_index, ngroups)
 
-    sorted_labels = [lab.take(sorter) for lab in label_list]
     group_index = group_index.take(sorter)
+    if IS_ARM and len(label_list) == 1:
+        return lib.indices_fast_single(sorter, group_index, keys[0])
 
+    sorted_labels = [lab.take(sorter) for lab in label_list]
     return lib.indices_fast(sorter, group_index, keys, sorted_labels)
 
 

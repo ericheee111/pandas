@@ -209,6 +209,11 @@ def indices_fast(
     keys: list,
     sorted_labels: list[npt.NDArray[np.int64]],
 ) -> dict[Hashable, npt.NDArray[np.intp]]: ...
+def indices_fast_single(
+    index: npt.NDArray[np.intp],
+    labels: np.ndarray,  # const int64_t[:]
+    keys: object,
+) -> dict[Hashable, npt.NDArray[np.intp]]: ...
 def generate_slices(
     labels: np.ndarray,
     ngroups: int,  # const intp_t[:]
@@ -222,6 +227,11 @@ def count_level_2d_no_na(
     labels: np.ndarray,  # const intp_t[:]
     max_bin: int,
     n: int,
+) -> np.ndarray | None: ...  # np.ndarray[np.int64, ndim=2]
+def count_level_2d_float64_skipna(
+    values: np.ndarray,  # const float64_t[:]
+    labels: np.ndarray,  # const intp_t[:]
+    max_bin: int,
 ) -> np.ndarray | None: ...  # np.ndarray[np.int64, ndim=2]
 def get_level_sorter(
     codes: np.ndarray,  # const int64_t[:]

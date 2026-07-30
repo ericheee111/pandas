@@ -27,6 +27,7 @@ from pandas._typing import (
     NDFrameT,
     npt,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.compat._optional import import_optional_dependency
 from pandas.errors import SpecificationError
 from pandas.util._decorators import (
@@ -1183,14 +1184,20 @@ class FrameApply(NDFrameApply):
         args = self.args
         kwargs = self.kwargs
 
-        for i, v in enumerate(series_gen):
-            result = func(v, *args, **kwargs)
-            if isinstance(result, ABCSeries):
-                # If we have a view on v, we need to make a copy because
-                #  series_generator will swap out the underlying data
-                result = result.copy(deep=False)
-                object.__setattr__(v, "_row_apply_needs_ref_reset", True)
-            results[i] = result
+        if IS_ARM and not args and not kwargs:
+            for i, v in enumerate(series_gen):
+                result = func(v)
+                if isinstance(result, ABCSeries):
+                    result = result.copy(deep=False)
+                    object.__setattr__(v, "_row_apply_needs_ref_reset", True)
+                results[i] = result
+        else:
+            for i, v in enumerate(series_gen):
+                result = func(v, *args, **kwargs)
+                if isinstance(result, ABCSeries):
+                    result = result.copy(deep=False)
+                    object.__setattr__(v, "_row_apply_needs_ref_reset", True)
+                results[i] = result
 
         return results, res_index
 
@@ -1228,6 +1235,12 @@ class FrameApply(NDFrameApply):
 
         return result
 
+    _APPLY_STR_FAST_PATH = frozenset({
+        "mean", "sum", "std", "var", "min", "max", "count",
+        "median", "sem", "prod", "mad", "skew", "kurt",
+        "cumsum", "cumprod", "cummax", "cummin",
+    })
+
     def apply_str(self) -> DataFrame | Series:
         # Caller is responsible for checking isinstance(self.func, str)
         # TODO: GH#39993 - Avoid special-casing by replacing with lambda
@@ -1236,6 +1249,21 @@ class FrameApply(NDFrameApply):
             obj = self.obj
             value = obj.shape[self.axis]
             return obj._constructor_sliced(value, index=self.agg_axis)
+
+        if IS_ARM:
+            func = self.func
+            if func in self._APPLY_STR_FAST_PATH:
+                if self.axis != 0 and func in ("corrwith", "skew"):
+                    raise ValueError(
+                        f"Operation {func} does not support axis=1"
+                    )
+                obj = self.obj
+                method = getattr(obj, func, None)
+                if method is not None and callable(method):
+                    kwargs = self.kwargs.copy() if self.kwargs else {}
+                    kwargs["axis"] = self.axis
+                    return method(*self.args, **kwargs)
+
         return super().apply_str()
 
 
@@ -1244,7 +1272,54 @@ class FrameRowApply(FrameApply):
 
     @property
     def series_generator(self) -> Generator[Series]:
-        return (self.obj._ixs(i, axis=1) for i in range(len(self.columns)))
+        if IS_ARM:
+            obj = self.obj
+            columns = self.columns
+            ncols = len(columns)
+
+            mgr = obj._mgr
+            if len(mgr.blocks) == 1:
+                values = self.values
+                values = ensure_wrapped_if_datetimelike(values)
+                ser = obj._ixs(0, axis=1)
+
+                if not isinstance(ser.dtype, ExtensionDtype):
+                    ser_mgr = ser._mgr
+                    object.__setattr__(ser, "_row_apply_needs_ref_reset", False)
+                    is_view = ser_mgr.blocks[0].refs.has_reference()
+
+                    label_to_pos = None
+                    if columns.is_unique:
+                        label_to_pos = {
+                            label: pos for pos, label in enumerate(columns)
+                        }
+                    object.__setattr__(
+                        ser, "_row_apply_label_to_pos", label_to_pos
+                    )
+                    object.__setattr__(
+                        ser, "_row_apply_label_to_pos_index", ser.index
+                    )
+
+                    for i in range(ncols):
+                        arr = values[:, i]
+                        ser._mgr = ser_mgr
+                        ser_mgr.set_values(arr)
+                        object.__setattr__(ser, "_name", columns[i])
+                        if ser._row_apply_needs_ref_reset:
+                            if not is_view:
+                                ser_mgr.blocks[0].refs = BlockValuesRefs(
+                                    ser_mgr.blocks[0]
+                                )
+                            object.__setattr__(
+                                ser, "_row_apply_needs_ref_reset", False
+                            )
+                        yield ser
+                    return
+
+            for i in range(ncols):
+                yield obj._ixs(i, axis=1)
+        else:
+            yield from (self.obj._ixs(i, axis=1) for i in range(len(self.columns)))
 
     @staticmethod
     @functools.cache
