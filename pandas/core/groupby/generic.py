@@ -25,6 +25,7 @@ import warnings
 
 import numpy as np
 
+from pandas.compat._arch import IS_ARM
 from pandas._libs import Interval
 from pandas._libs.hashtable import duplicated
 from pandas.errors import (
@@ -2988,8 +2989,38 @@ class DataFrameGroupBy(GroupBy[DataFrame]):
     def _get_data_to_aggregate(
         self, *, numeric_only: bool = False, name: str | None = None
     ) -> BlockManager:
-        obj = self._obj_with_exclusions
-        mgr = obj._mgr
+        columns = self.obj.columns
+        if (
+            IS_ARM
+            and isinstance(self.obj, DataFrame)
+            and self.obj._constructor is DataFrame
+            and isinstance(columns, Index)
+            and columns._constructor is Index
+            and columns.is_unique
+            and not columns.hasnans
+            and self._selection is None
+            and self.exclusions
+        ):
+            # Avoid constructing an intermediate DataFrame just to access its
+            # manager. Grouping columns are excluded from cython operations.
+            indexer = np.array(
+                [
+                    i
+                    for i, column in enumerate(columns)
+                    if column not in self.exclusions
+                ],
+                dtype=np.intp,
+            )
+            columns = columns.take(indexer)
+            mgr = self.obj._mgr.reindex_indexer(
+                columns,
+                indexer,
+                axis=0,
+                allow_dups=True,
+                only_slice=True,
+            )
+        else:
+            mgr = self._obj_with_exclusions._mgr
         if numeric_only:
             mgr = mgr.get_numeric_data()
         return mgr
