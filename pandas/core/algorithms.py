@@ -1266,10 +1266,11 @@ def value_counts_arraylike(
             # Threshold: bincount array size should not exceed 10x the input size
             # to avoid excessive memory usage for sparse value ranges.
             if vmax < len(values) * 10:
-                counts_arr = np.bincount(values)
-                nonzero_idx = np.nonzero(counts_arr)[0]
-                keys = nonzero_idx.astype(values.dtype)
-                counts = counts_arr[nonzero_idx].astype(np.int64)
+                int_values = np.asarray(values, dtype=np.int64)
+                counts_arr = np.bincount(int_values)
+                order = lib.first_appearance_order(int_values)
+                keys = order.astype(values.dtype)
+                counts = counts_arr[order].astype(np.int64)
                 res_keys = _reconstruct_data(keys, original.dtype, original)
                 return res_keys, counts, 0
 
@@ -1293,9 +1294,9 @@ def value_counts_arraylike(
                 vmax = int_values.max()
                 if vmax < len(values) * 10:
                     counts_arr = np.bincount(int_values)
-                    nonzero_idx = np.nonzero(counts_arr)[0]
-                    keys = nonzero_idx.astype(values.dtype)
-                    counts = counts_arr[nonzero_idx].astype(np.int64)
+                    order = lib.first_appearance_order(int_values)
+                    keys = order.astype(values.dtype)
+                    counts = counts_arr[order].astype(np.int64)
                     res_keys = _reconstruct_data(keys, original.dtype, original)
                     return res_keys, counts, 0
 
@@ -1321,9 +1322,9 @@ def value_counts_arraylike(
                     vmax = int_values.max()
                     if vmax < len(values) * 10:
                         counts_arr = np.bincount(int_values)
-                        nonzero_idx = np.nonzero(counts_arr)[0]
-                        keys = nonzero_idx.astype(object)
-                        counts = counts_arr[nonzero_idx].astype(np.int64)
+                        order = lib.first_appearance_order(int_values)
+                        keys = order.astype(object)
+                        counts = counts_arr[order].astype(np.int64)
                         res_keys = _reconstruct_data(keys, original.dtype, original)
                         return res_keys, counts, 0
 
