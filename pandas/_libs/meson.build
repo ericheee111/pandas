@@ -87,7 +87,10 @@ libs_sources = {
         'deps': [_khash_primitive_helper_dep, m_dep],
     },
     'arrays': {'sources': ['arrays.pyx']},
-    'groupby': {'sources': ['groupby.pyx'], 'deps': [m_dep]},
+    'groupby': {
+        'sources': ['groupby.pyx', 'src/groupby_neon.c'],
+        'deps': [m_dep],
+    },
     'hashing': {'sources': ['hashing.pyx']},
     'hashtable': {
         'sources': [
