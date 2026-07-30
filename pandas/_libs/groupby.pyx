@@ -2737,23 +2737,19 @@ cdef group_cummin_max(
                         if numeric_t is float64_t or numeric_t is float32_t:
                             if val == val:
                                 mval = accum[lab, j]
-                                if compute_max:
-                                    if val > mval:
-                                        accum[lab, j] = mval = val
-                                else:
-                                    if val < mval:
-                                        accum[lab, j] = mval = val
+                                if (compute_max and val > mval) or (
+                                    not compute_max and val < mval
+                                ):
+                                    accum[lab, j] = mval = val
                                 out[i, j] = mval
                             else:
                                 out[i, j] = na_val
                         else:
                             mval = accum[lab, j]
-                            if compute_max:
-                                if val > mval:
-                                    accum[lab, j] = mval = val
-                            else:
-                                if val < mval:
-                                    accum[lab, j] = mval = val
+                            if (compute_max and val > mval) or (
+                                not compute_max and val < mval
+                            ):
+                                accum[lab, j] = mval = val
                             out[i, j] = mval
             return
 
@@ -2770,12 +2766,10 @@ cdef group_cummin_max(
                         continue
 
                     mval = accum[lab, 0]
-                    if compute_max:
-                        if val > mval:
-                            accum[lab, 0] = mval = val
-                    else:
-                        if val < mval:
-                            accum[lab, 0] = mval = val
+                    if (compute_max and val > mval) or (
+                        not compute_max and val < mval
+                    ):
+                        accum[lab, 0] = mval = val
                     out[i, 0] = mval
             return
 
