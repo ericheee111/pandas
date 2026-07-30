@@ -92,7 +92,69 @@ def test_series_groupby_unique_numeric_no_na_fastpath(monkeypatch):
     tm.assert_series_equal(result, expected)
 
 
-def test_series_groupby_unique_numeric_single_large_group_fallback(monkeypatch):
+@pytest.mark.parametrize(
+    "values, expected_values",
+    [
+        (np.array([True, False], dtype=bool), [np.array([True]), np.array([False])]),
+        (
+            np.array([1, 2], dtype=np.uint64),
+            [np.array([1], dtype=np.uint64), np.array([2], dtype=np.uint64)],
+        ),
+    ],
+)
+def test_series_groupby_unique_numeric_singleton_fastpath(
+    monkeypatch, values, expected_values
+):
+    from pandas.core.groupby import generic as groupby_generic
+
+    monkeypatch.setattr(groupby_generic, "IS_ARM", True)
+
+    ser = Series(values, name="values")
+    keys = Series(["a", "b"], name="key")
+
+    result = ser.groupby(keys).unique()
+    expected = Series(
+        expected_values,
+        index=Index(["a", "b"], name="key"),
+        name="values",
+    )
+    tm.assert_series_equal(result, expected)
+
+
+def test_series_groupby_unique_numeric_dropna_key_fastpath(monkeypatch):
+    from pandas.core.groupby import generic as groupby_generic
+
+    monkeypatch.setattr(groupby_generic, "IS_ARM", True)
+
+    ser = Series(np.array([1, 2, 3], dtype=np.uint64), name="values")
+    keys = Series(["a", np.nan, "b"], name="key")
+
+    result = ser.groupby(keys).unique()
+    expected = Series(
+        [np.array([1], dtype=np.uint64), np.array([3], dtype=np.uint64)],
+        index=Index(["a", "b"], name="key"),
+        name="values",
+    )
+    tm.assert_series_equal(result, expected)
+
+
+def test_series_groupby_unique_numeric_empty_groups_are_independent(monkeypatch):
+    from pandas.core.groupby import generic as groupby_generic
+
+    ser = Series(np.array([1], dtype=np.uint64), name="values")
+    keys = Categorical(["a"], categories=["a", "b", "c"])
+
+    monkeypatch.setattr(groupby_generic, "IS_ARM", False)
+    expected = ser.groupby(keys, observed=False).unique()
+
+    monkeypatch.setattr(groupby_generic, "IS_ARM", True)
+    result = ser.groupby(keys, observed=False).unique()
+
+    tm.assert_series_equal(result, expected)
+    assert result.iloc[1] is not result.iloc[2]
+
+
+def test_series_groupby_unique_numeric_single_group_fallback(monkeypatch):
     from pandas.core.groupby import generic as groupby_generic
 
     monkeypatch.setattr(groupby_generic, "IS_ARM", True)
@@ -107,6 +169,32 @@ def test_series_groupby_unique_numeric_single_large_group_fallback(monkeypatch):
         name="values",
     )
     tm.assert_series_equal(result, expected)
+
+
+def test_series_groupby_unique_numeric_large_group_fallback(monkeypatch):
+    from pandas.core.groupby import generic as groupby_generic
+
+    calls = []
+    original = groupby_generic.SeriesGroupBy._op_via_apply
+
+    def spy_op_via_apply(self, name, *args, **kwargs):
+        calls.append(name)
+        return original(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(groupby_generic, "IS_ARM", True)
+    monkeypatch.setattr(groupby_generic.SeriesGroupBy, "_op_via_apply", spy_op_via_apply)
+
+    ser = Series(np.arange(103, dtype=np.uint64), name="values")
+    keys = Series(["big"] * 101 + ["small"] * 2, name="key")
+
+    result = ser.groupby(keys, sort=False).unique()
+    expected = Series(
+        [np.arange(101, dtype=np.uint64), np.array([101, 102], dtype=np.uint64)],
+        index=Index(["big", "small"], name="key"),
+        name="values",
+    )
+    tm.assert_series_equal(result, expected)
+    assert calls == ["unique"]
 
 
 def test_pass_args_kwargs(ts):
