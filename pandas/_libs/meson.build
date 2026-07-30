@@ -34,6 +34,12 @@ _swisstable_class_helper = custom_target(
     input: 'swisstable_class_helper.pxi.in',
     command: [py, tempita, '@INPUT@', '-o', '@OUTDIR@'],
 )
+_swisstable_ismember_helper = custom_target(
+    'swisstable_ismember_pxi',
+    output: 'swisstable_ismember.pxi',
+    input: 'swisstable_ismember.pxi.in',
+    command: [py, tempita, '@INPUT@', '-o', '@OUTDIR@'],
+)
 _index_class_helper = custom_target(
     'index_class_helper_pxi',
     output: 'index_class_helper.pxi',
@@ -192,6 +198,17 @@ py.extension_module(
         'swisstable.pyx',
         _swisstable_class_helper,
     ],
+    cython_args: cython_args,
+    include_directories: [inc_np, inc_pd],
+    subdir: 'pandas/_libs',
+    cpp_args: swisstable_cpp_args,
+    override_options: ['cython_language=cpp', 'cpp_std=c++17'],
+    install: true,
+)
+
+py.extension_module(
+    'swisstable_ismember',
+    ['swisstable_ismember.pyx', _swisstable_ismember_helper],
     cython_args: cython_args,
     include_directories: [inc_np, inc_pd],
     subdir: 'pandas/_libs',

@@ -12,7 +12,10 @@ import numpy as np
 import pytest
 
 import pandas as pd
-from pandas._libs import swisstable
+from pandas._libs import (
+    swisstable,
+    swisstable_ismember,
+)
 
 import pandas._testing as tm
 
@@ -674,6 +677,132 @@ class TestIsmember:
         # Verify correctness with Python set (slow but correct)
         value_set = set(values)
         expected = np.array([x in value_set for x in arr])
+        tm.assert_numpy_array_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "ismember_fn,dtype",
+        [
+            (swisstable.ismember_int64, np.int64),
+            (swisstable.ismember_float64, np.float64),
+        ],
+    )
+    def test_large_batches(self, ismember_fn, dtype):
+        rng = np.random.default_rng(42)
+        values = rng.integers(-(2**40), 2**40, size=70_000).astype(dtype)
+        arr = np.concatenate(
+            [
+                values[:50_000],
+                rng.integers(-(2**40), 2**40, size=50_000).astype(dtype),
+            ]
+        )
+
+        result = ismember_fn(arr, values)
+
+        expected = np.isin(arr, values)
+        tm.assert_numpy_array_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "ismember_fn,dtype",
+        [
+            (swisstable.ismember_int64, np.int64),
+            (swisstable.ismember_uint64, np.uint64),
+            (swisstable.ismember_int32, np.int32),
+            (swisstable.ismember_uint32, np.uint32),
+            (swisstable.ismember_int16, np.int16),
+            (swisstable.ismember_uint16, np.uint16),
+            (swisstable.ismember_int8, np.int8),
+            (swisstable.ismember_uint8, np.uint8),
+            (swisstable_ismember.ismember_int64, np.int64),
+            (swisstable_ismember.ismember_uint64, np.uint64),
+            (swisstable_ismember.ismember_int32, np.int32),
+            (swisstable_ismember.ismember_uint32, np.uint32),
+        ],
+    )
+    def test_integer_empty_arrays(self, ismember_fn, dtype):
+        empty = np.array([], dtype=dtype)
+        values = np.array([1, 2], dtype=dtype)
+
+        result = ismember_fn(empty, values)
+        tm.assert_numpy_array_equal(result, np.array([], dtype=np.bool_))
+
+        result = ismember_fn(values, empty)
+        tm.assert_numpy_array_equal(result, np.array([False, False]))
+
+    @pytest.mark.parametrize(
+        "ismember_fn,dtype",
+        [
+            (swisstable_ismember.ismember_int64, np.int64),
+            (swisstable_ismember.ismember_uint64, np.uint64),
+            (swisstable_ismember.ismember_int32, np.int32),
+            (swisstable_ismember.ismember_uint32, np.uint32),
+        ],
+    )
+    def test_integer_direct_set_collisions(self, ismember_fn, dtype):
+        n_pairs = 35_000
+        collision_delta = (1 << 18) | (1 << 2)
+        info = np.iinfo(dtype)
+        base = np.arange(n_pairs, dtype=dtype)
+        colliding = np.bitwise_xor(base, collision_delta).astype(dtype)
+        values = np.concatenate([base, colliding])
+
+        # direct_set_index applies value ^= value >> 16 and masks by the
+        # 262144-slot table. Every pair above therefore shares one index.
+        raw = values.astype(np.uint64)
+        if info.bits == 64:
+            raw ^= raw >> 32
+        direct_indices = (raw ^ (raw >> 16)) & ((1 << 18) - 1)
+        assert np.unique(direct_indices).size == n_pairs
+
+        arr = np.concatenate(
+            [
+                base[::350],
+                colliding[::350],
+                np.array([info.max - 1, info.max], dtype=dtype),
+            ]
+        )
+
+        result = ismember_fn(arr, values)
+        expected = np.isin(arr, values)
+        tm.assert_numpy_array_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "ismember_fn,dtype",
+        [
+            (swisstable_ismember.ismember_int64, np.int64),
+            (swisstable_ismember.ismember_uint64, np.uint64),
+            (swisstable_ismember.ismember_int32, np.int32),
+            (swisstable_ismember.ismember_uint32, np.uint32),
+        ],
+    )
+    @pytest.mark.parametrize("size", [10, 70_000])
+    def test_integer_direct_set_fallback(self, ismember_fn, dtype, size):
+        values = np.arange(size, dtype=dtype)
+        arr = np.arange(size, dtype=dtype)
+
+        result = ismember_fn(arr, values)
+        expected = np.isin(arr, values)
+        tm.assert_numpy_array_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "ismember_fn,dtype",
+        [
+            (swisstable_ismember.ismember_int64, np.int64),
+            (swisstable_ismember.ismember_uint64, np.uint64),
+            (swisstable_ismember.ismember_int32, np.int32),
+            (swisstable_ismember.ismember_uint32, np.uint32),
+        ],
+    )
+    def test_integer_strided_arrays(self, ismember_fn, dtype):
+        values_storage = np.arange(140_000, dtype=dtype)
+        values = values_storage[::2]
+        arr_storage = np.arange(40_000, dtype=dtype)
+        arr = arr_storage[::2]
+        arr[1::2] += 1
+        assert not values.flags.c_contiguous
+        assert not arr.flags.c_contiguous
+
+        result = ismember_fn(arr, values)
+        expected = np.isin(arr, values)
         tm.assert_numpy_array_equal(result, expected)
 
 

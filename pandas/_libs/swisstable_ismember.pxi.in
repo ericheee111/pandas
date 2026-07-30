@@ -1,0 +1,89 @@
+{{py:
+
+# dtype, c_type
+integer_types = [
+    ("int64", "int64_t"),
+    ("uint64", "uint64_t"),
+    ("int32", "int32_t"),
+    ("uint32", "uint32_t"),
+]
+}}
+
+from libc.stddef cimport size_t
+from libc.stdint cimport (
+    int32_t,
+    int64_t,
+    uint8_t,
+    uint32_t,
+    uint64_t,
+)
+
+import numpy as np
+
+cimport numpy as cnp
+from numpy cimport (
+    ndarray,
+    uint8_t as np_uint8_t,
+)
+
+from pandas._libs import swisstable
+
+cdef extern from "swisstable/swisstable_class.hpp" namespace "pandas::swisstable" nogil:
+    cdef cppclass SwissTable[K, V]:
+        SwissTable()
+        int ismember_direct_batch(
+            const K *keys,
+            size_t n,
+            const K *values,
+            size_t n_values,
+            uint8_t *result
+        )
+
+cnp.import_array()
+
+
+{{for dtype, c_type in integer_types}}
+def ismember_{{dtype}}(
+    const {{c_type}}[:] arr, const {{c_type}}[:] values
+) -> ndarray:
+    """Use the adaptive large-integer membership implementation."""
+    cdef:
+        Py_ssize_t n_arr = len(arr), n_values = len(values)
+        SwissTable[{{c_type}}, size_t] table
+        int ret = 0
+        const {{c_type}}[:] arr_view = arr
+        const {{c_type}}[:] values_view = values
+        np_uint8_t[::1] result_view
+
+    result = np.empty(n_arr, dtype=np.uint8)
+    result_view = result
+
+    if n_arr == 0:
+        return result.view(np.bool_)
+    if n_values == 0:
+        result.fill(0)
+        return result.view(np.bool_)
+
+    # The C++ implementation uses pointer arithmetic and requires contiguous
+    # buffers. Keep the common contiguous path free of Python calls.
+    if arr.strides[0] != sizeof({{c_type}}):
+        arr_view = np.ascontiguousarray(arr)
+    if values.strides[0] != sizeof({{c_type}}):
+        values_view = np.ascontiguousarray(values)
+
+    with nogil:
+        ret = table.ismember_direct_batch(
+            &arr_view[0],
+            <size_t>n_arr,
+            &values_view[0],
+            <size_t>n_values,
+            &result_view[0],
+        )
+    if ret == -1:
+        raise MemoryError("Failed to allocate membership table")
+    if ret == 1:
+        return swisstable.ismember_{{dtype}}(arr_view, values_view)
+    return result.view(np.bool_)
+
+
+{{endfor}}
