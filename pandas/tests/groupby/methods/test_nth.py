@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
 
+from pandas._libs import groupby as libgroupby
+
 import pandas as pd
 from pandas import (
     DataFrame,
@@ -236,6 +238,14 @@ def test_nth_zero_arm_does_not_compute_cumcount(monkeypatch):
     result = grouped.nth(0)
     expected = df.iloc[[0, 2]]
     tm.assert_frame_equal(result, expected)
+
+
+def test_group_nth_zero_mask_valid_length():
+    labels = np.array([0, 1], dtype=np.intp)
+    valid = np.array([1], dtype=np.uint8)
+
+    with pytest.raises(ValueError, match="same length"):
+        libgroupby.group_nth_zero_mask(labels, 2, valid)
 
 
 @pytest.mark.parametrize("dropna", ["any", "all"])
