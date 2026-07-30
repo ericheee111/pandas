@@ -22,6 +22,7 @@ import numpy as np
 from pandas.compat import is_platform_arm
 
 _IS_ARM = is_platform_arm()
+_REDUCEAT_GUARD_PREFIX = 8
 
 from pandas._libs import (
     NaT,
@@ -78,8 +79,20 @@ if TYPE_CHECKING:
         Hashable,
         Iterator,
     )
-
     from pandas.core.generic import NDFrame
+
+
+def _is_reduceat_applicable(comp_ids: np.ndarray, ngroups: int) -> bool:
+    if comp_ids[0] != 0 or comp_ids[-1] != ngroups - 1:
+        return False
+
+    if len(comp_ids) >= _REDUCEAT_GUARD_PREFIX:
+        for i in range(_REDUCEAT_GUARD_PREFIX - 1):
+            if comp_ids[i] > comp_ids[i + 1]:
+                return False
+
+    diff = np.diff(comp_ids)
+    return (diff >= 0).all() and np.count_nonzero(diff) + 1 == ngroups
 
 
 def check_result_array(obj, dtype) -> None:
@@ -419,8 +432,7 @@ class WrappedCythonOp:
             and ngroups > 0
             and len(comp_ids) > 0
         ):
-            diff = np.diff(comp_ids)
-            if (diff >= 0).all() and np.count_nonzero(diff) + 1 == ngroups:
+            if _is_reduceat_applicable(comp_ids, ngroups):
                 group_starts = np.searchsorted(comp_ids, np.arange(ngroups))
                 reduce_func = np.fmax if self.how == "max" else np.fmin
                 if values.ndim == 2:
@@ -451,8 +463,7 @@ class WrappedCythonOp:
             and ngroups > 0
             and len(comp_ids) > 0
         ):
-            diff = np.diff(comp_ids)
-            if (diff >= 0).all() and np.count_nonzero(diff) + 1 == ngroups:
+            if _is_reduceat_applicable(comp_ids, ngroups):
                 group_starts = np.searchsorted(comp_ids, np.arange(ngroups))
                 group_sizes = np.diff(np.append(group_starts, len(comp_ids)))
                 if group_sizes.max() <= 100:
