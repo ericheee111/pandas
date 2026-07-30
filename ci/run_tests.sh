@@ -5,7 +5,7 @@ set -e
 SOURCE_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
 if [[ -z "${PYTEST_WORKERS+x}" ]]; then
-  PYTEST_WORKERS=8
+  PYTEST_WORKERS=auto
 fi
 if [[ -z "${PYTEST_TARGET+x}" ]]; then
   PYTEST_TARGET=pandas
