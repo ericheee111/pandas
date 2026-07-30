@@ -1050,6 +1050,43 @@ def test_string_dtype_all_na(
     tm.assert_equal(result, expected)
 
 
+@pytest.mark.parametrize(
+    "skipna,min_count,expected_values",
+    [
+        (True, 0, ["ab", "c"]),
+        (True, 2, ["ab", pd.NA]),
+        (False, 0, [pd.NA, pd.NA]),
+    ],
+)
+def test_string_dtype_sum_mixed_na(
+    string_dtype_no_object, skipna, min_count, expected_values
+):
+    dtype = string_dtype_no_object
+    ser = Series(["a", pd.NA, "b", pd.NA, "c"], dtype=dtype, name="value")
+    keys = Series([0, 0, 0, 1, 1])
+
+    result = ser.groupby(keys).sum(skipna=skipna, min_count=min_count)
+
+    expected = Series(expected_values, dtype=dtype, name="value")
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("skipna", [True, False])
+@pytest.mark.parametrize("min_count", [0, 1, 2])
+def test_string_dtype_sum_arm_matches_non_arm(
+    monkeypatch, string_dtype_no_object, skipna, min_count
+):
+    ser = Series(["a", pd.NA, "b", pd.NA, "c"], dtype=string_dtype_no_object)
+    keys = Series([0, 0, 0, 1, 1])
+
+    monkeypatch.setattr("pandas.core.arrays.base.IS_ARM", False)
+    expected = ser.groupby(keys).sum(skipna=skipna, min_count=min_count)
+    monkeypatch.setattr("pandas.core.arrays.base.IS_ARM", True)
+    result = ser.groupby(keys).sum(skipna=skipna, min_count=min_count)
+
+    tm.assert_series_equal(result, expected)
+
+
 def test_max_nan_bug():
     df = DataFrame(
         {
