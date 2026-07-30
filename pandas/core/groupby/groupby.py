@@ -57,6 +57,7 @@ from pandas._typing import (
     RandomState,
     npt,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import (
     AbstractMethodError,
@@ -4795,6 +4796,21 @@ class GroupBy(BaseGroupBy[NDFrameT]):
         # old behaviour, but with all and any support for DataFrames.
         # modified in GH 7559 to have better perf
         n = cast(int, n)
+        if IS_ARM and n == 0:
+            obj = self._selected_obj
+            if isinstance(obj, Series):
+                valid = notna(obj._values)
+            elif dropna == "any":
+                valid = notna(obj).all(axis=1, bool_only=False).to_numpy()
+            else:
+                valid = notna(obj).any(axis=1, bool_only=False).to_numpy()
+            mask = libgroupby.group_nth_zero_mask(
+                self._grouper.ids,
+                self._grouper.ngroups,
+                valid.view(np.uint8),
+            )
+            return obj[mask]
+
         dropped = self._selected_obj.dropna(how=dropna, axis=0)
 
         # get a new grouper for our dropped obj
