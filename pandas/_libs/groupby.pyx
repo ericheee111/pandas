@@ -3035,7 +3035,7 @@ cdef group_cummin_max(
                                     accum[lab, j] = mval = val
                                 out[i, j] = mval
                             else:
-                                out[i, j] = na_val
+                                out[i, j] = val
                         else:
                             mval = accum[lab, j]
                             if (compute_max and val > mval) or (
