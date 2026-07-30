@@ -72,6 +72,7 @@ from pandas.core.dtypes.cast import (
     ensure_dtype_can_hold_na,
 )
 from pandas.core.dtypes.common import (
+    ensure_platform_int,
     is_bool,
     is_bool_dtype,
     is_float_dtype,
@@ -139,6 +140,7 @@ from pandas.core.util.numba_ import (
 )
 
 _USE_NO_NA_COUNT_FASTPATH = machine().lower() in ("aarch64", "arm64")
+_USE_FILLNA_LABEL_FASTPATH = _USE_NO_NA_COUNT_FASTPATH
 
 if TYPE_CHECKING:
     from pandas._libs.tslibs import BaseOffset
@@ -4459,8 +4461,19 @@ class GroupBy(BaseGroupBy[NDFrameT]):
         if limit is None:
             limit = -1
 
-        ids = self._grouper.ids
-        ngroups = self._grouper.ngroups
+        if _USE_FILLNA_LABEL_FASTPATH and not isinstance(self._grouper, ops.BinGrouper):
+            groupings = self._grouper.groupings
+        else:
+            groupings = None
+
+        if groupings is not None and len(groupings) == 1:
+            ids = ensure_platform_int(self._grouper.codes[0])
+            ngroups = groupings[0].ngroups
+            has_dropped_na = bool((ids < 0).any())
+        else:
+            ids = self._grouper.ids
+            ngroups = self._grouper.ngroups
+            has_dropped_na = None
 
         col_func = partial(
             libgroupby.group_fillna_indexer,
@@ -4482,7 +4495,10 @@ class GroupBy(BaseGroupBy[NDFrameT]):
                 #  np.take_along_axis
                 if isinstance(values, np.ndarray):
                     dtype = values.dtype
-                    if self._grouper.has_dropped_na:
+                    dropped_na = has_dropped_na
+                    if dropped_na is None:
+                        dropped_na = self._grouper.has_dropped_na
+                    if dropped_na:
                         # dropped null groups give rise to nan in the result
                         dtype = ensure_dtype_can_hold_na(values.dtype)
                     out = np.empty(values.shape, dtype=dtype)
