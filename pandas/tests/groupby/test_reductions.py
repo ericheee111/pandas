@@ -1096,6 +1096,64 @@ def test_min_empty_string_dtype(func, string_dtype_no_object):
     tm.assert_frame_equal(result, expected)
 
 
+@pytest.mark.parametrize(
+    "func, skipna, min_count, expected_values",
+    [
+        ("min", True, 1, ["a", "c"]),
+        ("max", True, 1, ["b", "d"]),
+    ],
+)
+def test_min_max_string_dtype(
+    string_dtype_no_object, func, skipna, min_count, expected_values
+):
+    dtype = string_dtype_no_object
+    df = DataFrame(
+        {
+            "key": Series(["x", "x", "x", "y", "y", "y"], dtype=object),
+            "value": Series(["b", pd.NA, "a", "d", pd.NA, "c"], dtype=dtype),
+        }
+    )
+
+    result = getattr(df.groupby("key")["value"], func)(
+        skipna=skipna, min_count=min_count
+    )
+
+    expected = Series(
+        expected_values,
+        index=pd.Index(["x", "y"], name="key"),
+        name="value",
+        dtype=dtype,
+    )
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("func", ["min", "max"])
+@pytest.mark.parametrize(
+    "skipna,min_count", [(True, 1), (False, 1), (True, 3)]
+)
+def test_min_max_string_dtype_arm_matches_non_arm(
+    monkeypatch, string_dtype_no_object, func, skipna, min_count
+):
+    dtype = string_dtype_no_object
+    if dtype.storage == "pyarrow":
+        pytest.importorskip("pyarrow")
+        is_arm = "pandas.core.arrays.arrow.array.IS_ARM"
+    else:
+        is_arm = "pandas.core.arrays.string_.IS_ARM"
+
+    ser = Series(["b", pd.NA, "a", "d", pd.NA, "c"], dtype=dtype)
+    groups = [0, 0, 0, 1, 1, 1]
+
+    monkeypatch.setattr(is_arm, False)
+    expected = getattr(ser.groupby(groups), func)(
+        skipna=skipna, min_count=min_count
+    )
+    monkeypatch.setattr(is_arm, True)
+    result = getattr(ser.groupby(groups), func)(skipna=skipna, min_count=min_count)
+
+    tm.assert_series_equal(result, expected)
+
+
 @pytest.mark.parametrize("min_count", [0, 1])
 @pytest.mark.parametrize("test_series", [True, False])
 def test_string_dtype_all_na(
