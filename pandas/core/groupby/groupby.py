@@ -4461,9 +4461,14 @@ class GroupBy(BaseGroupBy[NDFrameT]):
         if limit is None:
             limit = -1
 
-        if _USE_FILLNA_LABEL_FASTPATH and len(self._grouper.groupings) == 1:
+        if _USE_FILLNA_LABEL_FASTPATH and not isinstance(self._grouper, ops.BinGrouper):
+            groupings = self._grouper.groupings
+        else:
+            groupings = None
+
+        if groupings is not None and len(groupings) == 1:
             ids = ensure_platform_int(self._grouper.codes[0])
-            ngroups = self._grouper.groupings[0].ngroups
+            ngroups = groupings[0].ngroups
             has_dropped_na = bool((ids < 0).any())
         else:
             ids = self._grouper.ids
