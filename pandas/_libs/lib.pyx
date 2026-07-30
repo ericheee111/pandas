@@ -3382,7 +3382,7 @@ def first_appearance_order(ndarray[int64_t] values, int64_t vmax):
             seen[v] = 1
             order[k] = v
             k += 1
-    return order[:k]
+    return order[:k].copy()
 
 
 @cython.boundscheck(False)

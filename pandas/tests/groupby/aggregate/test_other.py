@@ -4,6 +4,7 @@ test all other .agg behavior
 
 import datetime as dt
 from functools import partial
+import math
 
 import numpy as np
 import pytest
@@ -665,3 +666,25 @@ def test_groupby_agg_err_catching(err_cls):
 
     result = df["decimals"].groupby(df["id1"]).agg(weird_func)
     tm.assert_series_equal(result, expected, check_names=False)
+
+
+@pytest.mark.parametrize("n_per_group", [500, 2000])
+def test_groupby_mean_summation_precision(n_per_group):
+    # GH: groupby mean must use Kahan (compensated) summation, not pairwise
+    # (np.add.reduceat).  0.1 is not exactly representable in float64; summing
+    # 500 or 2000 copies with Kahan gives an exact match to math.fsum, while
+    # np.add.reduceat introduces ~1 ulp error per group.
+    n_groups = 10
+    values = np.array([0.1] * (n_per_group * n_groups))
+    keys = np.repeat(np.arange(n_groups), n_per_group)
+    df = DataFrame({"val": values, "key": keys})
+
+    result = df.groupby("key")["val"].mean()
+
+    expected_val = math.fsum([0.1] * n_per_group) / n_per_group
+    expected = Series(
+        [expected_val] * n_groups,
+        index=Index(np.arange(n_groups), name="key"),
+        name="val",
+    )
+    tm.assert_series_equal(result, expected, check_exact=True)
