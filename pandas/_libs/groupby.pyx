@@ -82,6 +82,9 @@ def group_nth_zero_mask(
         uint8_t[::1] seen = np.zeros(ngroups, dtype=np.uint8)
         uint8_t[::1] result = np.zeros(n, dtype=np.uint8)
 
+    if check_valid and len(valid) != n:
+        raise ValueError("valid must have the same length as labels")
+
     with nogil:
         for i in range(n):
             lab = labels[i]
