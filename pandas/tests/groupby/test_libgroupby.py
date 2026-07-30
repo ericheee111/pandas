@@ -87,6 +87,43 @@ class TestGroupVar:
         tm.assert_almost_equal(out, expected_out, rtol=0.5e-06)
         tm.assert_numpy_array_equal(counts, expected_counts)
 
+    @pytest.mark.parametrize("name", ["var", "std", "sem"])
+    def test_group_var_name(self, dtype, rtol, name):
+        values = np.array(
+            [
+                [1.0, np.nan],
+                [2.0, 4.0],
+                [3.0, 6.0],
+                [10.0, 8.0],
+                [12.0, np.nan],
+                [14.0, 12.0],
+            ],
+            dtype=dtype,
+        )
+        labels = np.repeat(np.arange(2), 3).astype("intp")
+        out = np.full((2, 2), np.nan, dtype=dtype)
+        counts = np.zeros(2, dtype="int64")
+
+        expected = np.vstack(
+            [np.nanvar(values[labels == label], axis=0, ddof=1) for label in range(2)]
+        )
+        if name == "std":
+            expected = np.sqrt(expected)
+        elif name == "sem":
+            nobs = np.vstack(
+                [
+                    np.sum(~np.isnan(values[labels == label]), axis=0)
+                    for label in range(2)
+                ]
+            )
+            expected = np.sqrt(expected / nobs)
+        expected = expected.astype(dtype)
+
+        group_var(out, counts, values, labels, name=name)
+
+        tm.assert_numpy_array_equal(counts, np.array([3, 3], dtype="int64"))
+        tm.assert_almost_equal(out, expected, rtol=rtol)
+
     def test_group_var_constant(self, dtype, rtol):
         # Regression test from GH 10448.
 
