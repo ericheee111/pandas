@@ -88,7 +88,7 @@ libs_sources = {
     },
     'arrays': {'sources': ['arrays.pyx']},
     'groupby': {
-        'sources': ['groupby.pyx', 'src/groupby_neon.c'],
+        'sources': ['groupby.pyx', 'src/groupby.c', 'src/groupby_neon.c'],
         'deps': [m_dep],
     },
     'hashing': {'sources': ['hashing.pyx']},

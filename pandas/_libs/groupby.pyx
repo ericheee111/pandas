@@ -60,6 +60,19 @@ cdef extern from "pandas/groupby_neon.h":
     ) noexcept nogil
 
 
+cdef extern from "pandas/groupby.h":
+    void pandas_group_idx_float32(
+        intp_t*, const float32_t*, const intp_t*, float32_t*, uint8_t*,
+        const uint8_t*, bint, bint, bint, Py_ssize_t, Py_ssize_t,
+        Py_ssize_t, Py_ssize_t, Py_ssize_t, Py_ssize_t,
+    ) noexcept nogil
+    void pandas_group_idx_float64(
+        intp_t*, const float64_t*, const intp_t*, float64_t*, uint8_t*,
+        const uint8_t*, bint, bint, bint, Py_ssize_t, Py_ssize_t,
+        Py_ssize_t, Py_ssize_t, Py_ssize_t, Py_ssize_t,
+    ) noexcept nogil
+
+
 from pandas._libs cimport util
 from pandas._libs.algos cimport (
     get_rank_nan_fill_val,
@@ -3337,6 +3350,9 @@ def group_idxmin_idxmax(
         bint uses_mask = mask is not None
         bint isna_entry
         bint compute_max = name == "idxmax"
+        const uint8_t* mask_data = NULL
+        Py_ssize_t mask_stride0 = 0
+        Py_ssize_t mask_stride1 = 0
 
     assert name == "idxmin" or name == "idxmax"
 
@@ -3354,6 +3370,33 @@ def group_idxmin_idxmax(
 
     # Sentinel for no valid values.
     out[:] = -1
+
+    if pandas_is_aarch64():
+        if uses_mask:
+            mask_data = &mask[0, 0]
+            mask_stride0 = mask.strides[0]
+            mask_stride1 = mask.strides[1]
+
+        if numeric_object_t is float64_t:
+            with nogil:
+                pandas_group_idx_float64(
+                    &out[0, 0], &values[0, 0], &labels[0],
+                    &group_min_or_max[0, 0], &seen[0, 0], mask_data,
+                    uses_mask, skipna, compute_max, N, K,
+                    values.strides[0], values.strides[1],
+                    mask_stride0, mask_stride1,
+                )
+            return
+        elif numeric_object_t is float32_t:
+            with nogil:
+                pandas_group_idx_float32(
+                    &out[0, 0], &values[0, 0], &labels[0],
+                    &group_min_or_max[0, 0], &seen[0, 0], mask_data,
+                    uses_mask, skipna, compute_max, N, K,
+                    values.strides[0], values.strides[1],
+                    mask_stride0, mask_stride1,
+                )
+            return
 
     with nogil(numeric_object_t is not object):
         for i in range(N):
@@ -3385,10 +3428,9 @@ def group_idxmin_idxmax(
                         if val > group_min_or_max[lab, j]:
                             group_min_or_max[lab, j] = val
                             out[lab, j] = i
-                    else:
-                        if val < group_min_or_max[lab, j]:
-                            group_min_or_max[lab, j] = val
-                            out[lab, j] = i
+                    elif val < group_min_or_max[lab, j]:
+                        group_min_or_max[lab, j] = val
+                        out[lab, j] = i
 
 
 @cython.wraparound(False)
