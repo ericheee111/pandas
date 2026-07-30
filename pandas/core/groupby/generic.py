@@ -2119,7 +2119,9 @@ class SeriesGroupBy(GroupBy[Series]):
 
             ids = self._grouper.ids
             result_values = np.empty(ngroups, dtype=object)
-            result_values[:] = [np.array([], dtype=values.dtype)]
+            result_values[:] = [
+                np.array([], dtype=values.dtype) for _ in range(ngroups)
+            ]
 
             valid = ids >= 0
             counts = np.bincount(ids[valid], minlength=ngroups)
