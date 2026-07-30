@@ -1177,7 +1177,7 @@ def value_counts_arraylike(
             if vmax < len(values) * 10:
                 int_values = np.asarray(values, dtype=np.int64)
                 counts_arr = np.bincount(int_values)
-                order = lib.first_appearance_order(int_values, vmax)
+                order = lib.first_appearance_order(int_values)
                 keys = order.astype(values.dtype)
                 counts = counts_arr[order].astype(np.int64)
                 res_keys = _reconstruct_data(keys, original.dtype, original)
@@ -1203,7 +1203,7 @@ def value_counts_arraylike(
                 vmax = int_values.max()
                 if vmax < len(values) * 10:
                     counts_arr = np.bincount(int_values)
-                    order = lib.first_appearance_order(int_values, vmax)
+                    order = lib.first_appearance_order(int_values)
                     keys = order.astype(values.dtype)
                     counts = counts_arr[order].astype(np.int64)
                     res_keys = _reconstruct_data(keys, original.dtype, original)
@@ -1231,7 +1231,7 @@ def value_counts_arraylike(
                     vmax = int_values.max()
                     if vmax < len(values) * 10:
                         counts_arr = np.bincount(int_values)
-                        order = lib.first_appearance_order(int_values, vmax)
+                        order = lib.first_appearance_order(int_values)
                         keys = order.astype(object)
                         counts = counts_arr[order].astype(np.int64)
                         res_keys = _reconstruct_data(keys, original.dtype, original)
