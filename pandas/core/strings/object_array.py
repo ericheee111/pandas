@@ -378,7 +378,7 @@ class ObjectStringArrayMixin:
             if result is not None:
                 from pandas.core.arrays.string_ import BaseStringArray
 
-                if isinstance(self, BaseStringArray):
+                if isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
                     from pandas.arrays import IntegerArray
 
                     return IntegerArray(
@@ -492,23 +492,21 @@ class ObjectStringArrayMixin:
         return dummies, tags2
 
     def _str_upper(self):
-        if _IS_ARM:
-            if len(self) > 0 and (
-                self.dtype == np.dtype(object)
-                or (
-                    getattr(self.dtype, "storage", None) == "python"
-                )
-            ):
-                result = lib.fast_string_upper(np.asarray(self, dtype=object))
-                if result is not None:
-                    from pandas.core.arrays.string_ import BaseStringArray
+        if _IS_ARM and len(self) > 0 and (
+            self.dtype == np.dtype(object)
+            or (
+                getattr(self.dtype, "storage", None) == "python"
+            )
+        ):
+            result = lib.fast_string_upper(np.asarray(self, dtype=object))
+            if result is not None:
+                from pandas.core.arrays.string_ import BaseStringArray
 
-                    if isinstance(self, BaseStringArray):
-                        return type(self)._from_sequence(
-                            result, dtype=self.dtype
-                        )
-                    return result
-            return self._str_map(lambda x: x.upper())
+                if isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
+                    return type(self)._from_sequence(
+                        result, dtype=self.dtype
+                    )
+                return result
         return self._str_map(lambda x: x.upper())
 
     def _str_isalnum(self):
