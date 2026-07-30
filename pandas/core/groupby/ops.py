@@ -22,6 +22,7 @@ import numpy as np
 from pandas.compat import is_platform_arm
 
 _IS_ARM = is_platform_arm()
+_REDUCEAT_GUARD_PREFIX = 8
 
 from pandas._libs import (
     NaT,
@@ -78,8 +79,19 @@ if TYPE_CHECKING:
         Hashable,
         Iterator,
     )
-
     from pandas.core.generic import NDFrame
+
+
+def _get_reduceat_guard_diff(comp_ids: np.ndarray, ngroups: int) -> np.ndarray | None:
+    if comp_ids[0] != 0 or comp_ids[-1] != ngroups - 1:
+        return None
+
+    if len(comp_ids) >= _REDUCEAT_GUARD_PREFIX:
+        for i in range(_REDUCEAT_GUARD_PREFIX - 1):
+            if comp_ids[i] > comp_ids[i + 1]:
+                return None
+
+    return np.diff(comp_ids)
 
 
 def check_result_array(obj, dtype) -> None:
@@ -419,24 +431,7 @@ class WrappedCythonOp:
             and ngroups > 0
             and len(comp_ids) > 0
         ):
-            if (
-                comp_ids[0] == 0
-                and comp_ids[-1] == ngroups - 1
-                and (
-                    len(comp_ids) < 8
-                    or comp_ids[0]
-                    <= comp_ids[1]
-                    <= comp_ids[2]
-                    <= comp_ids[3]
-                    <= comp_ids[4]
-                    <= comp_ids[5]
-                    <= comp_ids[6]
-                    <= comp_ids[7]
-                )
-            ):
-                diff = np.diff(comp_ids)
-            else:
-                diff = None
+            diff = _get_reduceat_guard_diff(comp_ids, ngroups)
             if (
                 diff is not None
                 and (diff >= 0).all()
