@@ -189,6 +189,14 @@ def group_rank(
     na_option: Literal["keep", "top", "bottom"] = ...,
     mask: npt.NDArray[np.bool_] | None = ...,
 ) -> None: ...
+def group_min_max_string(
+    values: npt.NDArray[np.object_],
+    labels: npt.NDArray[np.intp],
+    ngroups: int,
+    min_count: int = ...,
+    compute_max: bool = ...,
+    skipna: bool = ...,
+) -> npt.NDArray[np.object_]: ...
 def group_max(
     out: np.ndarray,  # groupby_t[:, ::1]
     counts: np.ndarray,  # int64_t[::1]

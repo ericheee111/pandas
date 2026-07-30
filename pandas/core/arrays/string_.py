@@ -770,6 +770,24 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
         ids: npt.NDArray[np.intp],
         **kwargs,
     ):
+        if (
+            IS_ARM
+            and how in ["min", "max"]
+            and kwargs.get("skipna", True)
+            and min_count <= 1
+        ):
+            from pandas._libs import groupby as libgroupby
+
+            result = libgroupby.group_min_max_string(
+                self._ndarray,
+                ids,
+                ngroups,
+                min_count=min_count,
+                compute_max=how == "max",
+                skipna=kwargs.get("skipna", True),
+            )
+            return type(self)._from_sequence(result, dtype=self.dtype)
+
         if IS_ARM and how in ["any", "all"]:
             from pandas._libs import groupby as libgroupby
 
