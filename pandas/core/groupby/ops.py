@@ -20,6 +20,7 @@ from typing import (
 import numpy as np
 
 from pandas.compat import is_platform_arm
+from pandas.compat._arch import IS_ARM as _IS_AARCH64
 
 _IS_ARM = is_platform_arm()
 _REDUCEAT_GUARD_PREFIX = 8
@@ -79,6 +80,7 @@ if TYPE_CHECKING:
         Hashable,
         Iterator,
     )
+
     from pandas.core.generic import NDFrame
 
 
@@ -395,6 +397,8 @@ class WrappedCythonOp:
         if self.how in ["any", "all"]:
             if mask is None:
                 mask = isna(values)
+            if _IS_AARCH64 and result_mask is None and not mask.any():
+                mask = None
 
         if is_datetimelike:
             values = values.view("int64")
@@ -507,6 +511,8 @@ class WrappedCythonOp:
                     **kwargs,
                 )
             elif self.how in ["any", "all"]:
+                if self.how == "any":
+                    kwargs["use_any_short_circuit"] = _IS_AARCH64
                 func(
                     out=result,
                     values=values,

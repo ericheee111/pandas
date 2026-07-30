@@ -132,6 +132,145 @@ def test_bool_aggs_dup_column_labels(all_boolean_reductions):
 
 
 @pytest.mark.parametrize(
+    "method,decisive,following",
+    [
+        ("any", True, False),
+        ("all", False, True),
+    ],
+)
+def test_bool_aggs_result_remains_decisive(method, decisive, following):
+    # The first row determines every output column.  Later values, including
+    # missing values, must not change the result.
+    columns = list("abcd")
+    df = DataFrame(
+        [[decisive] * len(columns), [following] * len(columns), [np.nan] * 4],
+        columns=columns,
+    )
+
+    result = getattr(df.groupby([0, 0, 0]), method)()
+    expected = DataFrame([[decisive] * len(columns)], columns=columns)
+
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("dtype", ["str", "string[pyarrow]", "string[python]"])
+@pytest.mark.parametrize(
+    "method,skipna,expected_values",
+    [
+        ("any", True, [True, False, True, False]),
+        ("any", False, [True, True, True, True]),
+        ("all", True, [False, False, True, True]),
+        ("all", False, [False, False, True, True]),
+    ],
+)
+def test_arrow_string_bool_aggs(dtype, method, skipna, expected_values):
+    if dtype != "string[python]":
+        pytest.importorskip("pyarrow")
+    ser = Series(["", "x", "", None, None, "x", None], dtype=dtype)
+
+    result = ser.groupby([0, 0, 1, 1, 2, 2, 3]).agg(method, skipna=skipna)
+    expected = Series(expected_values)
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["any", "all"])
+@pytest.mark.parametrize("dtype", ["str", "string[python]"])
+@pytest.mark.parametrize("skipna", [True, False])
+def test_string_bool_aggs_arm_matches_non_arm(monkeypatch, method, dtype, skipna):
+    if dtype == "str":
+        pytest.importorskip("pyarrow")
+        is_arm = "pandas.core.arrays.arrow.array.IS_ARM"
+    else:
+        is_arm = "pandas.core.arrays.string_.IS_ARM"
+
+    ser = Series(["", "x", None, "y", ""], dtype=dtype)
+    groups = [0, 0, 1, 1, 1]
+
+    monkeypatch.setattr(is_arm, False)
+    expected = getattr(ser.groupby(groups), method)(skipna=skipna)
+    monkeypatch.setattr(is_arm, True)
+    result = getattr(ser.groupby(groups), method)(skipna=skipna)
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["any", "all"])
+@pytest.mark.parametrize("skipna", [True, False])
+def test_python_string_nan_bool_aggs_arm_matches_non_arm(monkeypatch, method, skipna):
+    dtype = pd.StringDtype(storage="python", na_value=np.nan)
+    ser = Series(["", "é", np.nan, "x", ""], dtype=dtype)
+    groups = [0, 0, 1, 1, 1]
+    is_arm = "pandas.core.arrays.string_.IS_ARM"
+
+    monkeypatch.setattr(is_arm, False)
+    expected = getattr(ser.groupby(groups), method)(skipna=skipna)
+    monkeypatch.setattr(is_arm, True)
+    result = getattr(ser.groupby(groups), method)(skipna=skipna)
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["any", "all"])
+def test_bool_aggs_arm_kernel_matches_non_arm(monkeypatch, method):
+    from pandas.core.groupby import ops as groupby_ops
+
+    ser = Series([True, False, np.nan, True, False])
+    groups = [0, 0, 1, 1, 1]
+
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", False)
+    expected = getattr(ser.groupby(groups), method)(skipna=False)
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", True)
+    result = getattr(ser.groupby(groups), method)(skipna=False)
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["any", "all"])
+@pytest.mark.parametrize("skipna", [True, False])
+def test_bool_aggs_arm_multicolumn_kernel_matches_non_arm(monkeypatch, method, skipna):
+    from pandas.core.groupby import ops as groupby_ops
+
+    decisive = method == "any"
+    df = DataFrame(
+        [
+            [decisive, decisive, decisive],
+            [decisive, decisive, decisive],
+            [not decisive, np.nan, not decisive],
+        ]
+    )
+    groups = [0, 0, 0]
+
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", False)
+    expected = getattr(df.groupby(groups), method)(skipna=skipna)
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", True)
+    result = getattr(df.groupby(groups), method)(skipna=skipna)
+
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("skipna", [True, False])
+def test_bool_aggs_arm_any_mask_before_group_completed(monkeypatch, skipna):
+    from pandas.core.groupby import ops as groupby_ops
+
+    df = DataFrame(
+        {
+            "a": Series([pd.NA, True, False], dtype="boolean"),
+            "b": Series([True, False, False], dtype="boolean"),
+            "c": Series([True, False, False], dtype="boolean"),
+        }
+    )
+    groups = [0, 0, 0]
+
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", False)
+    expected = df.groupby(groups).any(skipna=skipna)
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", True)
+    result = df.groupby(groups).any(skipna=skipna)
+
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
     "data",
     [
         [False, False, False],

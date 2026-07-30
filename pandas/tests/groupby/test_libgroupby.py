@@ -12,8 +12,36 @@ from pandas._libs.groupby import (
 
 from pandas.core.dtypes.common import ensure_platform_int
 
-from pandas import isna
+from pandas import (
+    NA,
+    isna,
+)
 import pandas._testing as tm
+
+
+def test_string_array_to_bool_rejects_non_string():
+    values = np.array(["a", 1], dtype=object)
+
+    with pytest.raises(TypeError, match="must be strings or missing"):
+        libgroupby.string_array_to_bool(values, None)
+
+
+@pytest.mark.parametrize("na_value", [NA, np.nan])
+def test_string_array_to_bool_mask(na_value):
+    values = np.array(["", na_value, "x"], dtype=object)
+
+    result, mask = libgroupby.string_array_to_bool(values, na_value)
+
+    expected = np.array([0, 1, 1], dtype=np.uint8)
+    expected_mask = np.array([0, 1, 0], dtype=np.uint8)
+    tm.assert_numpy_array_equal(result, expected)
+    tm.assert_numpy_array_equal(mask, expected_mask)
+
+    result, mask = libgroupby.string_array_to_bool(
+        np.array(["", "x"], dtype=object), na_value
+    )
+    tm.assert_numpy_array_equal(result, np.array([0, 1], dtype=np.uint8))
+    assert mask is None
 
 
 @pytest.mark.parametrize("dtype, rtol", [("float32", 1e-2), ("float64", 1e-5)])

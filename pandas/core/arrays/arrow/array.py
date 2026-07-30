@@ -2644,6 +2644,31 @@ class ArrowExtensionArray(
         **kwargs,
     ):
         if isinstance(self.dtype, StringDtype):
+            if IS_ARM and how in ["any", "all"]:
+                from pandas.core.groupby.ops import WrappedCythonOp
+
+                truth_values = pc.not_equal(pc.binary_length(self._pa_array), 0)
+                # With skipna=False and no result mask, the kernel consumes
+                # masked positions. True preserves object-string truthiness,
+                # where bool(np.nan) is True.
+                truth_values = pc.fill_null(truth_values, True)
+                values = truth_values.to_numpy(zero_copy_only=False)
+
+                mask = None
+                if self._pa_array.null_count:
+                    mask = self.isna()
+
+                kind = WrappedCythonOp.get_kind_from_how(how)
+                op = WrappedCythonOp(how=how, kind=kind, has_dropped_na=has_dropped_na)
+                return op._cython_op_ndim_compat(
+                    values,
+                    min_count=min_count,
+                    ngroups=ngroups,
+                    comp_ids=ids,
+                    mask=mask,
+                    **kwargs,
+                )
+
             if how in [
                 "prod",
                 "mean",
