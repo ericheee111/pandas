@@ -3533,25 +3533,21 @@ cdef group_cummin_max(
 
                     for j in range(K):
                         val = values[i, j]
-                        if numeric_t is float64_t or numeric_t is float32_t:
-                            if val == val:
-                                mval = accum[lab, j]
-                                if (compute_max and val > mval) or (
-                                    not compute_max and val < mval
-                                ):
-                                    accum[lab, j] = mval = val
-                                out[i, j] = mval
-                            else:
-                                out[i, j] = val
-                        else:
-                            mval = accum[lab, j]
-                            if (compute_max and val > mval) or (
-                                not compute_max and val < mval
-                            ):
-                                accum[lab, j] = mval = val
-                            out[i, j] = mval
+                        if (
+                            numeric_t is float64_t or numeric_t is float32_t
+                        ) and val != val:
+                            out[i, j] = val
+                            continue
+
+                        mval = accum[lab, j]
+                        if (compute_max and val > mval) or (
+                            not compute_max and val < mval
+                        ):
+                            accum[lab, j] = mval = val
+                        out[i, j] = mval
             return
 
+        # Nullable EA blocks are dispatched one column at a time.
         if K == 1:
             with nogil:
                 for i in range(N):
