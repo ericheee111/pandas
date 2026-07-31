@@ -551,8 +551,7 @@ def _try_fast_pivot_table(
             else:
                 val_f64 = val_arr.astype(np.float64, copy=False)
                 sum_result = np.bincount(flat_codes, weights=val_f64, minlength=n_groups)
-                valid_mask = ~np.isnan(val_f64)
-                count_result = np.bincount(flat_codes[valid_mask], minlength=n_groups).astype(np.float64)
+                count_result = np.bincount(flat_codes, minlength=n_groups).astype(np.float64)
                 with np.errstate(invalid="ignore"):
                     agg_result = np.where(count_result > 0, sum_result / count_result, np.nan)
 
