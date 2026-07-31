@@ -3019,40 +3019,26 @@ cdef group_cummin_max(
     N, K = (<object>values).shape
     if pandas_is_aarch64() and skipna and not is_datetimelike:
         if not uses_mask:
-            if numeric_t is float64_t or numeric_t is float32_t:
-                with nogil:
-                    for i in range(N):
-                        lab = labels[i]
-                        if lab < 0:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    for j in range(K):
+                        val = values[i, j]
+                        if (
+                            numeric_t is float64_t or numeric_t is float32_t
+                        ) and val != val:
+                            out[i, j] = val
                             continue
 
-                        for j in range(K):
-                            val = values[i, j]
-                            if val != val:
-                                out[i, j] = val
-                                continue
-
-                            mval = accum[lab, j]
-                            if (compute_max and val > mval) or (
-                                not compute_max and val < mval
-                            ):
-                                accum[lab, j] = mval = val
-                            out[i, j] = mval
-            else:
-                with nogil:
-                    for i in range(N):
-                        lab = labels[i]
-                        if lab < 0:
-                            continue
-
-                        for j in range(K):
-                            val = values[i, j]
-                            mval = accum[lab, j]
-                            if (compute_max and val > mval) or (
-                                not compute_max and val < mval
-                            ):
-                                accum[lab, j] = mval = val
-                            out[i, j] = mval
+                        mval = accum[lab, j]
+                        if (compute_max and val > mval) or (
+                            not compute_max and val < mval
+                        ):
+                            accum[lab, j] = mval = val
+                        out[i, j] = mval
             return
 
         # Nullable EA blocks are dispatched one column at a time.
