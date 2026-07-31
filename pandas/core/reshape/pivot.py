@@ -18,6 +18,7 @@ from pandas.core.dtypes.common import (
     is_list_like,
     is_nested_list_like,
     is_scalar,
+    is_string_dtype,
 )
 from pandas.core.dtypes.dtypes import (
     CategoricalDtype,
@@ -380,7 +381,9 @@ def _try_fast_pivot_table(
             if isinstance(col_vals.dtype, CategoricalDtype):
                 if not observed:
                     return None
-            elif not hasattr(col_vals, "_ndarray"):
+            elif not hasattr(col_vals, "_ndarray") and not is_string_dtype(
+                col_vals.dtype
+            ):
                 return None
         try:
             if isinstance(col_vals, ABCCategorical):
@@ -893,7 +896,9 @@ def _try_fast_pivot_table_multi_agg(
             if isinstance(col_vals.dtype, CategoricalDtype):
                 if not observed:
                     return None
-            elif not hasattr(col_vals, "_ndarray"):
+            elif not hasattr(col_vals, "_ndarray") and not is_string_dtype(
+                col_vals.dtype
+            ):
                 return None
         try:
             if isinstance(col_vals, ABCCategorical):
