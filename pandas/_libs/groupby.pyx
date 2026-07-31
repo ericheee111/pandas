@@ -1733,6 +1733,45 @@ def group_var(
 
     out[:, :] = 0.0
 
+    # The common floating-point ndarray path does not need the mask,
+    # datetimelike, or skipna=False branches in the inner loop. Keeping this
+    # loop small gives AArch64 compilers more freedom to overlap the
+    # independent updates for adjacent columns.
+    if (
+        pandas_is_aarch64()
+        and not uses_mask
+        and not is_datetimelike
+        and skipna
+    ):
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
+                    continue
+
+                counts[lab] += 1
+
+                for j in range(K):
+                    val = values[i, j]
+                    if val == val:
+                        nobs[lab, j] += 1
+                        oldmean = mean[lab, j]
+                        mean[lab, j] += (val - oldmean) / nobs[lab, j]
+                        out[lab, j] += (val - mean[lab, j]) * (val - oldmean)
+
+            for i in range(ncounts):
+                for j in range(K):
+                    ct = nobs[i, j]
+                    if ct <= ddof:
+                        out[i, j] = NAN
+                    elif is_std:
+                        out[i, j] = sqrt(out[i, j] / (ct - ddof))
+                    elif is_sem:
+                        out[i, j] = sqrt(out[i, j] / (ct - ddof) / ct)
+                    else:
+                        out[i, j] /= (ct - ddof)
+        return
+
     with nogil:
         for i in range(N):
             lab = labels[i]
