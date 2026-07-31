@@ -41,6 +41,25 @@ cdef extern from "pandas/portable.h":
     bint pandas_is_aarch64() noexcept nogil
 
 
+cdef extern from "pandas/groupby_neon.h":
+    void pandas_group_prod_float64_neon(
+        float64_t*, const float64_t*, const intp_t*, int64_t*,
+        Py_ssize_t, Py_ssize_t,
+    ) noexcept nogil
+    void pandas_group_prod_float32_neon(
+        float32_t*, const float32_t*, const intp_t*, int64_t*,
+        Py_ssize_t, Py_ssize_t,
+    ) noexcept nogil
+    void pandas_group_prod_float64_neon_colmajor(
+        float64_t*, const float64_t*, const intp_t*, int64_t*,
+        Py_ssize_t, Py_ssize_t,
+    ) noexcept nogil
+    void pandas_group_prod_float32_neon_colmajor(
+        float32_t*, const float32_t*, const intp_t*, int64_t*,
+        Py_ssize_t, Py_ssize_t,
+    ) noexcept nogil
+
+
 from pandas._libs cimport util
 from pandas._libs.algos cimport (
     get_rank_nan_fill_val,
@@ -1458,6 +1477,128 @@ cdef bint _group_prod_float32_1d_min_count_le0(
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
+cdef bint _group_prod_float64_multicol_min_count_le0(
+    float64_t[:, ::1] out,
+    int64_t[::1] counts,
+    const float64_t[:, :] values,
+    const intp_t[::1] labels,
+):
+    """
+    Use two-lane AArch64 NEON for contiguous multi-column float64 products.
+
+    The vector lanes span columns, so each column retains its original row
+    order. NaN lanes are replaced by the multiplicative identity. ``nobs`` is
+    not maintained because it cannot affect ``min_count <= 0`` results.
+    """
+    cdef:
+        Py_ssize_t N, K
+        bint is_c_contiguous, is_f_contiguous
+
+    if not pandas_is_aarch64():
+        return False
+
+    N, K = (<object>values).shape
+    is_c_contiguous = (
+        values.strides[1] == sizeof(float64_t)
+        and values.strides[0] == K * sizeof(float64_t)
+    )
+    is_f_contiguous = (
+        values.strides[0] == sizeof(float64_t)
+        and values.strides[1] == N * sizeof(float64_t)
+    )
+    if (
+        K <= 1
+        or N == 0
+        or len(counts) == 0
+        or not (is_c_contiguous or is_f_contiguous)
+    ):
+        return False
+
+    out[:, :] = 1.0
+
+    with nogil:
+        if is_c_contiguous:
+            pandas_group_prod_float64_neon(
+                &out[0, 0],
+                &values[0, 0],
+                &labels[0],
+                &counts[0],
+                N,
+                K,
+            )
+        else:
+            pandas_group_prod_float64_neon_colmajor(
+                &out[0, 0],
+                &values[0, 0],
+                &labels[0],
+                &counts[0],
+                N,
+                K,
+            )
+
+    return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef bint _group_prod_float32_multicol_min_count_le0(
+    float32_t[:, ::1] out,
+    int64_t[::1] counts,
+    const float32_t[:, :] values,
+    const intp_t[::1] labels,
+):
+    """Use four-lane AArch64 NEON for contiguous multi-column float32 prod."""
+    cdef:
+        Py_ssize_t N, K
+        bint is_c_contiguous, is_f_contiguous
+
+    if not pandas_is_aarch64():
+        return False
+
+    N, K = (<object>values).shape
+    is_c_contiguous = (
+        values.strides[1] == sizeof(float32_t)
+        and values.strides[0] == K * sizeof(float32_t)
+    )
+    is_f_contiguous = (
+        values.strides[0] == sizeof(float32_t)
+        and values.strides[1] == N * sizeof(float32_t)
+    )
+    if (
+        K <= 1
+        or N == 0
+        or len(counts) == 0
+        or not (is_c_contiguous or is_f_contiguous)
+    ):
+        return False
+
+    out[:, :] = 1.0
+
+    with nogil:
+        if is_c_contiguous:
+            pandas_group_prod_float32_neon(
+                &out[0, 0],
+                &values[0, 0],
+                &labels[0],
+                &counts[0],
+                N,
+                K,
+            )
+        else:
+            pandas_group_prod_float32_neon_colmajor(
+                &out[0, 0],
+                &values[0, 0],
+                &labels[0],
+                &counts[0],
+                N,
+                K,
+            )
+
+    return True
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
 def group_prod(
     int64float_t[:, ::1] out,
     int64_t[::1] counts,
@@ -1485,18 +1626,25 @@ def group_prod(
     if (
         not uses_mask and skipna and min_count <= 0
     ) and (int64float_t is float64_t or int64float_t is float32_t):
-        # AArch64 K==1 branch-free specialization for skipna prod on a single
-        # native float column without a mask when min_count <= 0.  Delegated to
-        # dedicated cdef helpers (no need_nobs branch inside the N-row loop,
-        # unlike the rejected f1f0b985df experiment) so the generic loop's
-        # compiled layout is undisturbed.  All unsupported cases fall through
-        # to the existing implementation.
+        # AArch64 specializations for skipna prod on native float arrays
+        # without a mask when min_count <= 0. Multi-column C/F-contiguous
+        # inputs use NEON; single columns use a scalar branch-free loop.
+        # Dedicated helpers keep the generic loop's compiled layout unchanged.
+        # All unsupported cases fall through to the existing implementation.
         if int64float_t is float64_t:
+            if _group_prod_float64_multicol_min_count_le0(
+                out, counts, values, labels
+            ):
+                return
             if _group_prod_float64_1d_min_count_le0(
                 out, counts, values, labels, result_mask, ncounts, min_count
             ):
                 return
         elif int64float_t is float32_t:
+            if _group_prod_float32_multicol_min_count_le0(
+                out, counts, values, labels
+            ):
+                return
             if _group_prod_float32_1d_min_count_le0(
                 out, counts, values, labels, result_mask, ncounts, min_count
             ):

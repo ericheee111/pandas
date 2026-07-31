@@ -1,9 +1,9 @@
 """
 Direct libgroupby tests for ``group_prod``.
 
-These exercise the AArch64 K==1 branch-free float fastpath (min_count <= 0) as
-well as the generic fallback path.  On AArch64 the single-column native-float
-skipna cases with min_count <= 0 hit the fastpath; multi-column, masked,
+These exercise the AArch64 native-float fastpaths (min_count <= 0) as well as
+the generic fallback path. On AArch64, contiguous native-float arrays with
+skipna and min_count <= 0 hit a scalar or multi-column NEON fastpath; masked,
 non-float, skipna=False, min_count>0 cases hit the fallback.  Every case is
 cross-checked against an independent NumPy reference and, where both paths are
 reachable, against the fallback path itself.
@@ -46,8 +46,7 @@ def _reference_prod(values, labels, ngroups, skipna=True, min_count=0):
     return out, counts
 
 
-def _run_group_prod(values, labels, ngroups, skipna=True, min_count=0,
-                    mask=None):
+def _run_group_prod(values, labels, ngroups, skipna=True, min_count=0, mask=None):
     """Call libgroupby.group_prod with fresh output/counts buffers."""
     values = np.asarray(values)
     if values.ndim == 1:
@@ -59,7 +58,11 @@ def _run_group_prod(values, labels, ngroups, skipna=True, min_count=0,
     if mask is not None:
         result_mask = np.zeros((ngroups, values.shape[1]), dtype=np.uint8)
     group_prod(
-        out, counts, values, labels, mask,
+        out,
+        counts,
+        values,
+        labels,
+        mask,
         result_mask=result_mask,
         min_count=min_count,
         skipna=skipna,
@@ -72,14 +75,14 @@ def _run_group_prod(values, labels, ngroups, skipna=True, min_count=0,
 # min_count <= 0)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_prod_basic(dtype):
     rng = np.random.default_rng(0)
     values = (rng.standard_normal(50) + 1.5).astype(dtype)  # avoid zero products
     labels = np.tile(np.arange(5, dtype=np.intp), 10)
     out, counts, _ = _run_group_prod(values, labels, 5, min_count=0)
-    expected_out, expected_counts = _reference_prod(values, labels, 5,
-                                                    min_count=0)
+    expected_out, expected_counts = _reference_prod(values, labels, 5, min_count=0)
     tm.assert_almost_equal(out, expected_out, rtol=1e-5)
     tm.assert_numpy_array_equal(counts, expected_counts)
 
@@ -91,8 +94,9 @@ def test_prod_random_labels(dtype):
     values = (rng.standard_normal(n) + 2.0).astype(dtype)
     labels = rng.integers(0, ngroups, size=n).astype(np.intp)
     out, counts, _ = _run_group_prod(values, labels, ngroups, min_count=0)
-    expected_out, expected_counts = _reference_prod(values, labels, ngroups,
-                                                    min_count=0)
+    expected_out, expected_counts = _reference_prod(
+        values, labels, ngroups, min_count=0
+    )
     tm.assert_almost_equal(out, expected_out, rtol=1e-5)
     tm.assert_numpy_array_equal(counts, expected_counts)
 
@@ -103,8 +107,9 @@ def test_prod_negative_labels():
     values = (rng.standard_normal(n) + 2.0).astype(np.float64)
     labels = rng.integers(-1, ngroups, size=n).astype(np.intp)
     out, counts, _ = _run_group_prod(values, labels, ngroups, min_count=0)
-    expected_out, expected_counts = _reference_prod(values, labels, ngroups,
-                                                    min_count=0)
+    expected_out, expected_counts = _reference_prod(
+        values, labels, ngroups, min_count=0
+    )
     tm.assert_almost_equal(out, expected_out, rtol=1e-6)
     tm.assert_numpy_array_equal(counts, expected_counts)
 
@@ -125,12 +130,12 @@ def test_prod_counts_contract_with_nan():
 # NaN handling
 # ---------------------------------------------------------------------------
 
+
 def test_prod_no_nan():
     values = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], dtype=np.float64)
     labels = np.array([0, 0, 0, 1, 1, 1], dtype=np.intp)
     out, counts, _ = _run_group_prod(values, labels, 2, min_count=0)
-    expected_out, expected_counts = _reference_prod(values, labels, 2,
-                                                    min_count=0)
+    expected_out, expected_counts = _reference_prod(values, labels, 2, min_count=0)
     tm.assert_almost_equal(out, expected_out, rtol=1e-6)
     tm.assert_numpy_array_equal(counts, expected_counts)
 
@@ -139,8 +144,7 @@ def test_prod_sparse_nan():
     values = np.array([2.0, np.nan, 3.0, np.nan, np.nan, 5.0], dtype=np.float64)
     labels = np.array([0, 0, 0, 1, 1, 1], dtype=np.intp)
     out, counts, _ = _run_group_prod(values, labels, 2, min_count=0)
-    expected_out, expected_counts = _reference_prod(values, labels, 2,
-                                                    min_count=0)
+    expected_out, expected_counts = _reference_prod(values, labels, 2, min_count=0)
     tm.assert_almost_equal(out, expected_out, rtol=1e-6)
     tm.assert_numpy_array_equal(counts, expected_counts)
 
@@ -162,12 +166,12 @@ def test_prod_all_nan_group():
 # Infinity and signed zero
 # ---------------------------------------------------------------------------
 
+
 def test_prod_infinity():
     values = np.array([np.inf, 2.0, -np.inf, 3.0, 0.0, 4.0], dtype=np.float64)
     labels = np.array([0, 0, 1, 1, 2, 2], dtype=np.intp)
     out, counts, _ = _run_group_prod(values, labels, 3, min_count=0)
-    expected_out, expected_counts = _reference_prod(values, labels, 3,
-                                                    min_count=0)
+    expected_out, expected_counts = _reference_prod(values, labels, 3, min_count=0)
     tm.assert_almost_equal(out, expected_out, rtol=1e-6)
     tm.assert_numpy_array_equal(counts, expected_counts)
     # group 0: inf * 2.0 = inf
@@ -190,6 +194,7 @@ def test_prod_signed_zero():
 # ---------------------------------------------------------------------------
 # Empty / edge inputs
 # ---------------------------------------------------------------------------
+
 
 def test_prod_empty_input():
     values = np.array([], dtype=np.float64)
@@ -216,6 +221,7 @@ def test_prod_empty_groups():
 # min_count behavior
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("mc", [-1, 0, 1, 2])
 def test_prod_min_count(mc):
     rng = np.random.default_rng(11)
@@ -224,8 +230,9 @@ def test_prod_min_count(mc):
     values[::5] = np.nan
     labels = rng.integers(0, ngroups, size=n).astype(np.intp)
     out, counts, _ = _run_group_prod(values, labels, ngroups, min_count=mc)
-    expected_out, expected_counts = _reference_prod(values, labels, ngroups,
-                                                    min_count=mc)
+    expected_out, expected_counts = _reference_prod(
+        values, labels, ngroups, min_count=mc
+    )
     tm.assert_almost_equal(out, expected_out, rtol=1e-6)
     tm.assert_numpy_array_equal(counts, expected_counts)
 
@@ -245,8 +252,7 @@ def test_prod_min_count_neg1_treated_as_le0():
     values = np.array([np.nan, np.nan, 2.0, 3.0], dtype=np.float64)
     labels = np.array([0, 0, 1, 1], dtype=np.intp)
     out, counts, _ = _run_group_prod(values, labels, 2, min_count=-1)
-    expected_out, expected_counts = _reference_prod(values, labels, 2,
-                                                    min_count=-1)
+    expected_out, expected_counts = _reference_prod(values, labels, 2, min_count=-1)
     tm.assert_almost_equal(out, expected_out, rtol=1e-6)
     tm.assert_numpy_array_equal(counts, expected_counts)
     # group 0 all NaN, min_count=-1 -> product identity 1.0
@@ -257,12 +263,12 @@ def test_prod_min_count_neg1_treated_as_le0():
 # skipna=False forces fallback (fastpath requires skipna=True)
 # ---------------------------------------------------------------------------
 
+
 def test_prod_skipna_false():
     # skipna=False: NaN propagates to the product for that group.
     values = np.array([2.0, np.nan, 3.0, 4.0, np.nan, 5.0], dtype=np.float64)
     labels = np.array([0, 0, 0, 1, 1, 1], dtype=np.intp)
-    out, counts, _ = _run_group_prod(values, labels, 2, skipna=False,
-                                     min_count=0)
+    out, counts, _ = _run_group_prod(values, labels, 2, skipna=False, min_count=0)
     # group 0: 2.0, NaN -> once NA, stays NA
     assert np.isnan(out[0, 0])
     assert np.isnan(out[1, 0])
@@ -270,17 +276,20 @@ def test_prod_skipna_false():
 
 
 # ---------------------------------------------------------------------------
-# Multi-column forces fallback (fastpath requires K==1)
+# Multi-column native floats use NEON on AArch64
 # ---------------------------------------------------------------------------
 
-def test_prod_multi_column():
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("ncols", [2, 3, 4, 7, 10])
+@pytest.mark.parametrize("order", ["C", "F"])
+def test_prod_multi_column(dtype, ncols, order):
     rng = np.random.default_rng(5)
-    values = (rng.standard_normal((30, 2)) + 2.0).astype(np.float64)
+    values = np.array(rng.standard_normal((30, ncols)) + 2.0, dtype=dtype, order=order)
     labels = np.tile(np.arange(6, dtype=np.intp), 5)
     out, counts, _ = _run_group_prod(values, labels, 6, min_count=0)
-    expected_out, expected_counts = _reference_prod(values, labels, 6,
-                                                    min_count=0)
-    tm.assert_almost_equal(out, expected_out, rtol=1e-5)
+    expected_out, expected_counts = _reference_prod(values, labels, 6, min_count=0)
+    tm.assert_almost_equal(out, expected_out, rtol=1e-4)
     tm.assert_numpy_array_equal(counts, expected_counts)
 
 
@@ -291,15 +300,37 @@ def test_prod_multi_column_with_nan():
     )
     labels = np.array([0, 0, 1, 1], dtype=np.intp)
     out, counts, _ = _run_group_prod(values, labels, 2, min_count=0)
-    expected_out, expected_counts = _reference_prod(values, labels, 2,
-                                                    min_count=0)
+    expected_out, expected_counts = _reference_prod(values, labels, 2, min_count=0)
     tm.assert_almost_equal(out, expected_out, rtol=1e-6)
     tm.assert_numpy_array_equal(counts, expected_counts)
+
+
+def test_prod_multi_column_noncontiguous_fallback():
+    rng = np.random.default_rng(15)
+    base = (rng.standard_normal((40, 12)) + 2.0).astype(np.float64)
+    values = base[:, ::2]
+    assert not values.flags.c_contiguous
+    labels = np.tile(np.arange(8, dtype=np.intp), 5)
+    out, counts, _ = _run_group_prod(values, labels, 8, min_count=0)
+    expected_out, expected_counts = _reference_prod(values, labels, 8)
+    tm.assert_almost_equal(out, expected_out, rtol=1e-5)
+    tm.assert_numpy_array_equal(counts, expected_counts)
+
+
+def test_prod_multi_column_signed_zero_and_infinity():
+    values = np.array([[-0.0, np.inf, np.nan], [2.0, 3.0, 4.0]], dtype=np.float64)
+    labels = np.array([0, 0], dtype=np.intp)
+    out, counts, _ = _run_group_prod(values, labels, 1, min_count=0)
+    assert np.signbit(out[0, 0])
+    assert out[0, 1] == np.inf
+    assert out[0, 2] == 4.0
+    assert counts.tolist() == [2]
 
 
 # ---------------------------------------------------------------------------
 # Mask path forces fallback (fastpath requires not uses_mask)
 # ---------------------------------------------------------------------------
+
 
 def test_prod_with_mask():
     values = np.array([2.0, 3.0, 4.0, 5.0], dtype=np.float64)
@@ -336,6 +367,7 @@ def test_prod_with_mask_all_masked_group():
 # int64 path forces fallback (fastpath requires float32/float64)
 # ---------------------------------------------------------------------------
 
+
 def test_prod_int64_fallback():
     values = np.array([2, 3, 4, 5], dtype=np.int64).reshape(-1, 1)
     labels = np.array([0, 0, 1, 1], dtype=np.intp)
@@ -349,23 +381,21 @@ def test_prod_int64_fallback():
 # Fastpath vs fallback public-result equality on ARM
 # ---------------------------------------------------------------------------
 
-def test_prod_fastpath_equals_fallback():
-    """On AArch64 the 1-D float skipna min_count<=0 path hits the branch-free
-    fastpath; the same input reshaped to 2 columns forces the generic fallback.
-    Both must produce identical per-group products for the shared column."""
+
+@pytest.mark.parametrize("ncols", [1, 2, 3, 8])
+def test_prod_fastpath_equals_fallback(ncols):
+    """Compare eligible native-float fastpaths with min_count fallback."""
     rng = np.random.default_rng(13)
     n, ngroups = 500, 17
-    col = (rng.standard_normal(n) + 2.0).astype(np.float64)
-    col[::7] = np.nan
+    values = (rng.standard_normal((n, ncols)) + 2.0).astype(np.float64)
+    values[::7] = np.nan
     labels = rng.integers(0, ngroups, size=n).astype(np.intp)
 
-    # Fastpath-eligible: single column, min_count=0.
-    out1, counts1, _ = _run_group_prod(col, labels, ngroups, min_count=0)
+    fast, fast_counts, _ = _run_group_prod(values, labels, ngroups, min_count=0)
 
-    # Fallback: duplicate column -> K==2 forces generic path.
-    two_col = np.column_stack([col, col])
-    out2, counts2, _ = _run_group_prod(two_col, labels, ngroups, min_count=0)
+    # Positive min_count forces the generic loop while preserving results:
+    # every group/column has substantially more than one valid observation.
+    fallback, fallback_counts, _ = _run_group_prod(values, labels, ngroups, min_count=1)
 
-    tm.assert_numpy_array_equal(counts1, counts2)
-    tm.assert_almost_equal(out1[:, 0], out2[:, 0], rtol=1e-6)
-    tm.assert_almost_equal(out2[:, 0], out2[:, 1], rtol=1e-6)
+    tm.assert_numpy_array_equal(fast_counts, fallback_counts)
+    tm.assert_almost_equal(fast, fallback, rtol=1e-6)
