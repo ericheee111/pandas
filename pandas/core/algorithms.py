@@ -18,10 +18,6 @@ import warnings
 
 import numpy as np
 
-from pandas.compat import is_platform_arm
-
-_IS_ARM = is_platform_arm()
-
 from pandas._libs import (
     algos,
     hashtable as htable,
@@ -1248,85 +1244,6 @@ def value_counts_arraylike(
     """
     original = values
     values = _ensure_data(values)
-
-    # Fast path: use np.bincount for non-negative integer arrays when
-    # the value range is reasonable. bincount is O(N) vs khash O(N*hash_cost).
-    # Conditions: integer dtype, all values >= 0, max < len*10, dropna=True,
-    # and no external mask (int64 cannot hold NA natively).
-    if (
-        _IS_ARM
-        and is_integer_dtype(values.dtype)
-        and dropna
-        and mask is None
-        and len(values) > 0
-    ):
-        vmin = values.min()
-        if vmin >= 0:
-            vmax = values.max()
-            # Threshold: bincount array size should not exceed 10x the input size
-            # to avoid excessive memory usage for sparse value ranges.
-            if vmax < len(values) * 10:
-                int_values = np.asarray(values, dtype=np.int64)
-                counts_arr = np.bincount(int_values)
-                order = lib.first_appearance_order(int_values)
-                keys = order.astype(values.dtype)
-                counts = counts_arr[order].astype(np.int64)
-                res_keys = _reconstruct_data(keys, original.dtype, original)
-                return res_keys, counts, 0
-
-    # Fast path: use np.bincount for float arrays whose values are all
-    # integers (e.g. IDs or counts stored as float64).  np.modf detects
-    # non-integer values and NaN (whose fractional part is NaN), both of
-    # which trigger fallback to the khash path below.
-    if (
-        _IS_ARM
-        and values.dtype.kind == "f"
-        and dropna
-        and mask is None
-        and len(values) > 0
-    ):
-        frac, _ = np.modf(values)
-        if not frac.any() and np.isfinite(values).all():
-            with np.errstate(invalid="ignore"):
-                int_values = values.astype(np.int64)
-            vmin = int_values.min()
-            if vmin >= 0:
-                vmax = int_values.max()
-                if vmax < len(values) * 10:
-                    counts_arr = np.bincount(int_values)
-                    order = lib.first_appearance_order(int_values)
-                    keys = order.astype(values.dtype)
-                    counts = counts_arr[order].astype(np.int64)
-                    res_keys = _reconstruct_data(keys, original.dtype, original)
-                    return res_keys, counts, 0
-
-    # Fast path: use np.bincount for object arrays containing all Python
-    # ints (e.g. randint results stored as object).  lib.infer_dtype with
-    # skipna=False returns "integer" only when every element is a Python
-    # int — None, float, str, and mixed types all trigger fallback.
-    if (
-        _IS_ARM
-        and values.dtype == object
-        and dropna
-        and mask is None
-        and len(values) > 0
-    ):
-        if lib.infer_dtype(values, skipna=False) == "integer":
-            try:
-                int_values = np.array(values, dtype=np.int64)
-            except OverflowError:
-                pass
-            else:
-                vmin = int_values.min()
-                if vmin >= 0:
-                    vmax = int_values.max()
-                    if vmax < len(values) * 10:
-                        counts_arr = np.bincount(int_values)
-                        order = lib.first_appearance_order(int_values)
-                        keys = order.astype(object)
-                        counts = counts_arr[order].astype(np.int64)
-                        res_keys = _reconstruct_data(keys, original.dtype, original)
-                        return res_keys, counts, 0
 
     keys, counts, na_counter = htable.value_count(values, dropna, mask=mask)
 
