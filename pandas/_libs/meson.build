@@ -135,7 +135,6 @@ libs_sources = {
         'sources': ['parsers.pyx', 'src/parser/tokenizer.c', 'src/parser/io.c'],
         'deps': _khash_primitive_helper_dep,
     },
-    'pivot_fused': {'sources': ['pivot_fused.pyx']},
     'json': {
         'sources': [
             'src/vendored/ujson/python/ujson.c',
