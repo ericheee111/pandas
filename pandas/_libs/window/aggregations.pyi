@@ -196,12 +196,6 @@ def roll_nunique(
     end: np.ndarray,  # np.ndarray[np.int64]
     minp: int,  # int64_t
 ) -> np.ndarray: ...  # np.ndarray[float]
-def roll_apply_builtin_sum(
-    obj: object,
-    start: np.ndarray,  # np.ndarray[np.int64]
-    end: np.ndarray,  # np.ndarray[np.int64]
-    minp: int,  # int64_t
-) -> npt.NDArray[np.float64] | None: ...
 def roll_apply(
     obj: object,
     start: np.ndarray,  # np.ndarray[np.int64]

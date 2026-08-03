@@ -65,7 +65,6 @@ def group_any_all(
     val_test: Literal["any", "all"],
     skipna: bool,
     result_mask: np.ndarray | None,
-    use_any_short_circuit: bool = ...,
 ) -> None: ...
 def group_sum(
     out: np.ndarray,  # complexfloatingintuint_t[:, ::1]

@@ -511,8 +511,6 @@ class WrappedCythonOp:
                     **kwargs,
                 )
             elif self.how in ["any", "all"]:
-                if self.how == "any":
-                    kwargs["use_any_short_circuit"] = _IS_AARCH64
                 func(
                     out=result,
                     values=values,
