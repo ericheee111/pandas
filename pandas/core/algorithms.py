@@ -479,54 +479,6 @@ def nunique_ints(values: ArrayLike) -> int:
     return result
 
 
-_MINIMUM_MONOTONIC_RUN_LEN = 100_000
-_MONOTONIC_RUN_SAMPLE_SIZE = 257
-
-
-def _is_float64_monotonic_runs_candidate(values: np.ndarray) -> bool:
-    if (
-        not isinstance(values, np.ndarray)
-        or len(values) < _MINIMUM_MONOTONIC_RUN_LEN
-        or values.dtype != np.dtype(np.float64)
-        or values.ndim != 1
-        or not values.flags.c_contiguous
-        # The Cython kernel dereferences the buffer via a typed memoryview
-        # under ``nogil``; require aligned memory so the access is safe on
-        # strict-alignment architectures.  Misaligned input falls back to
-        # the hashtable path, which handles it via the same buffer protocol.
-        or not values.flags.aligned
-    ):
-        return False
-
-    sample = values[:_MONOTONIC_RUN_SAMPLE_SIZE]
-    adjacent_equal = np.count_nonzero(sample[1:] == sample[:-1])
-    return adjacent_equal >= len(sample) // 2
-
-
-def _unique_float64_monotonic_runs(
-    values: np.ndarray,
-) -> npt.NDArray[np.float64] | None:
-    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
-        return None
-
-    if not _is_float64_monotonic_runs_candidate(values):
-        return None
-
-    return htable.unique_float64_monotonic(values)
-
-
-def _factorize_float64_monotonic_runs(
-    values: np.ndarray,
-) -> tuple[npt.NDArray[np.intp], npt.NDArray[np.float64]] | None:
-    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
-        return None
-
-    if not _is_float64_monotonic_runs_candidate(values):
-        return None
-
-    return htable.factorize_float64_monotonic(values)
-
-
 # --- Dense-range int64 factorization fast path ---------------------------
 # Conservative thresholds mirroring the Cython kernel
 # ``factorize_int64_dense_range`` (the authoritative copy lives there; the
@@ -590,11 +542,6 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         # Dispatch to Index's unique.
         return values.unique()
 
-    if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS and mask is None:
-        result = _unique_float64_monotonic_runs(values)
-        if result is not None:
-            return result
-
     original = values
     use_swiss = get_use_swisstable() and len(values) <= 1_000_000
     hashtable, values = _get_hashtable_algo(values, use_swisstable=use_swiss)
@@ -620,45 +567,6 @@ unique1d = unique
 
 
 _MINIMUM_COMP_ARR_LEN = 1_000_000
-_MAX_ZERO_RANGE_VALUES = _MINIMUM_COMP_ARR_LEN // 10
-_ZERO_RANGE_ISIN_DTYPES = {"float64", "int64", "uint64"}
-
-
-def _isin_zero_range(
-    comps_array: np.ndarray, values: np.ndarray
-) -> npt.NDArray[np.bool_] | None:
-    if not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
-        return None
-
-    if (
-        len(comps_array) < _MINIMUM_COMP_ARR_LEN
-        or len(values) > _MAX_ZERO_RANGE_VALUES
-        or values.dtype != comps_array.dtype
-        or not values.dtype.isnative
-        or values.dtype.name not in _ZERO_RANGE_ISIN_DTYPES
-        or comps_array.ndim != 1
-        or values.ndim != 1
-    ):
-        return None
-
-    n_values = len(values)
-    if n_values == 0 or values[0] != 0 or values[-1] != n_values - 1:
-        return None
-
-    if n_values > 1 and not bool(
-        np.all(values == np.arange(n_values, dtype=values.dtype))
-    ):
-        return None
-
-    if values.dtype.name == "float64":
-        if not comps_array.flags.c_contiguous:
-            return None
-        return htable.ismember_float64_zero_range(comps_array, n_values)
-    if values.dtype.name == "uint64":
-        return comps_array < n_values
-    # Negative int64 values become large uint64 values, folding both bounds
-    # into one comparison.
-    return comps_array.view("uint64") < n_values
 
 
 def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
@@ -732,11 +640,6 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
 
     # GH60678
     # Ensure values don't contain <NA>, otherwise it throws exception with np.in1d
-
-    if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
-        result = _isin_zero_range(comps_array, values)
-        if result is not None:
-            return result
 
     if (
         len(comps_array) > _MINIMUM_COMP_ARR_LEN
@@ -867,16 +770,6 @@ def factorize_array(
         #  na_value is an appropriately-typed NaT.
         # e.g. test_where_datetimelike_categorical
         na_value = iNaT
-
-    if (
-        boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
-        and use_na_sentinel
-        and na_value is None
-        and mask is None
-    ):
-        result = _factorize_float64_monotonic_runs(values)
-        if result is not None:
-            return result
 
     use_swiss = get_use_swisstable() and mask is None
     hash_klass, values = _get_hashtable_algo(values, use_swisstable=use_swiss)

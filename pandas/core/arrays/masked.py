@@ -19,7 +19,6 @@ from pandas._config import (
 
 from pandas._libs import (
     algos as libalgos,
-    hashtable as htable,
     lib,
     missing as libmissing,
 )
@@ -58,7 +57,6 @@ from pandas.core.dtypes.missing import (
 from pandas.core import (
     algorithms as algos,
     arraylike,
-    boostkit_fastpaths,
     missing,
     nanops,
     ops,
@@ -1258,116 +1256,6 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         mask = self._mask
         return algos.duplicated(values, keep=keep, mask=mask)
 
-    def _unique_if_monotonic(self) -> Self | None:
-        if self.dtype.name not in {"Int64", "Float64"}:
-            return None
-
-        data = self._data
-        mask = self._mask
-        if data.ndim != 1:
-            return None
-
-        if len(mask) == 0 or not mask[-1] or mask[:-1].any():
-            return None
-
-        values = data[:-1]
-        if len(values) > 1 and not libalgos.is_monotonic(values, timelike=False)[2]:
-            return None
-
-        return self._simple_new(data.copy(), mask.copy())
-
-    def _unique_if_repeated_chunks(self) -> Self | None:
-        if self.dtype.name not in {"Int64", "Float64"}:
-            return None
-
-        data = self._data
-        mask = self._mask
-        if data.ndim != 1 or len(data) < 100_000:
-            return None
-
-        exact_float = self.dtype.name == "Float64"
-
-        def values_equal(left: np.ndarray, right: np.ndarray) -> bool:
-            if exact_float:
-                left = left.view("uint64")
-                right = right.view("uint64")
-            return bool(np.array_equal(left, right))
-
-        def values_equal_with_mask(
-            left: np.ndarray, right: np.ndarray, mask: np.ndarray
-        ) -> bool:
-            if values_equal(left, right):
-                return True
-            valid = ~mask
-            return values_equal(left[valid], right[valid])
-
-        for repeats in range(2, 5):
-            if len(data) % repeats:
-                continue
-
-            chunk = len(data) // repeats
-            sample = np.array(
-                sorted({0, 1, 2, chunk // 2, chunk - 3, chunk - 2, chunk - 1}),
-                dtype=np.intp,
-            )
-            sample = sample[(sample >= 0) & (sample < chunk)]
-            sample_mask = mask[sample]
-            sample_values = data[sample]
-            sample_valid = ~sample_mask
-
-            matched = True
-            for repeat in range(1, repeats):
-                offset_sample = sample + repeat * chunk
-                if not np.array_equal(sample_mask, mask[offset_sample]):
-                    matched = False
-                    break
-                if not values_equal(
-                    sample_values[sample_valid], data[offset_sample][sample_valid]
-                ):
-                    matched = False
-                    break
-
-            if not matched:
-                continue
-
-            first_mask = mask[:chunk]
-            first_values = data[:chunk]
-            for start in range(chunk, len(data), chunk):
-                end = start + chunk
-                if not np.array_equal(first_mask, mask[start:end]):
-                    matched = False
-                    break
-                if not values_equal_with_mask(
-                    first_values, data[start:end], first_mask
-                ):
-                    matched = False
-                    break
-
-            if matched:
-                result = None
-                if (
-                    first_values.flags.c_contiguous
-                    and first_mask.flags.c_contiguous
-                    and first_values.dtype.isnative
-                ):
-                    mask_view = first_mask.view("uint8")
-                    if exact_float:
-                        result = htable.unique_float64_masked_monotonic_tail(
-                            first_values, mask_view
-                        )
-                    else:
-                        result = htable.unique_int64_masked_monotonic_tail(
-                            first_values, mask_view
-                        )
-                if result is not None:
-                    uniques, unique_mask = result
-                    return self._simple_new(uniques, unique_mask)
-
-                uniques, unique_mask = algos.unique_with_mask(first_values, first_mask)
-                return self._simple_new(uniques, unique_mask)
-
-        return None
-
     def unique(self) -> Self:
         """
         Compute the BaseMaskedArray of unique values.
@@ -1376,15 +1264,6 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         -------
         uniques : BaseMaskedArray
         """
-        if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
-            result = self._unique_if_monotonic()
-            if result is not None:
-                return result
-
-            result = self._unique_if_repeated_chunks()
-            if result is not None:
-                return result
-
         uniques, mask = algos.unique_with_mask(self._data, self._mask)
         return self._simple_new(uniques, mask)
 
