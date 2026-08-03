@@ -757,7 +757,6 @@ def group_any_all(
     str val_test,
     bint skipna,
     uint8_t[:, ::1] result_mask,
-    bint use_any_short_circuit=False,
 ) -> None:
     """
     Aggregated boolean values to show truthfulness of group elements. If the
@@ -782,9 +781,6 @@ def group_any_all(
     result_mask : ndarray[bool, ndim=2], optional
         If not None, these specify locations in the output that are NA.
         Modified in-place.
-    use_any_short_circuit : bool, default False
-        Whether to enable the adaptive completed-group fast path for ``any``.
-
     Notes
     -----
     This method modifies the `out` parameter rather than returning an object.
@@ -792,9 +788,7 @@ def group_any_all(
     -1 to signify a masked position in the case of a nullable input.
     """
     cdef:
-        Py_ssize_t i, j, N = len(labels), K = out.shape[1], sample_N = 0
-        Py_ssize_t decisive_values = 0
-        Py_ssize_t* ncompleted = NULL
+        Py_ssize_t i, j, N = len(labels), K = out.shape[1]
         intp_t lab
         int8_t flag_val, val
         bint has_mask = mask is not None
@@ -815,75 +809,26 @@ def group_any_all(
 
     out[:] = 1 - flag_val
 
-    # Short-circuiting completed groups is beneficial when decisive values are
-    # common, but the extra per-group state is costly for e.g. any on all-False
-    # values.  Sample a small prefix before selecting the short-circuit path.
-    if use_any_short_circuit and flag_val == 1 and K > 1 and N > 0:
-        sample_N = min(N, 256)
-        with nogil:
-            for i in range(sample_N):
-                if labels[i] < 0:
-                    continue
-                for j in range(K):
-                    if skipna and has_mask and mask[i, j]:
-                        continue
-                    if uses_mask and mask[i, j]:
-                        continue
-                    if values[i, j] == flag_val:
-                        decisive_values += 1
+    with nogil:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
 
-    if sample_N > 0 and decisive_values * 8 >= sample_N * K:
-        ncompleted = <Py_ssize_t*>calloc(out.shape[0], sizeof(Py_ssize_t))
-
-    if ncompleted == NULL:
-        with nogil:
-            for i in range(N):
-                lab = labels[i]
-                if lab < 0:
+            for j in range(K):
+                if skipna and has_mask and mask[i, j]:
                     continue
 
-                for j in range(K):
-                    if skipna and has_mask and mask[i, j]:
-                        continue
-
-                    if uses_mask and mask[i, j]:
-                        if out[lab, j] != flag_val:
-                            result_mask[lab, j] = 1
-                        continue
-
-                    val = values[i, j]
-                    if val == flag_val:
-                        out[lab, j] = flag_val
-                        if uses_mask:
-                            result_mask[lab, j] = 0
-    else:
-        with nogil:
-            for i in range(N):
-                lab = labels[i]
-                if lab < 0:
+                if uses_mask and mask[i, j]:
+                    if out[lab, j] != flag_val:
+                        result_mask[lab, j] = 1
                     continue
 
-                if ncompleted[lab] == K:
-                    continue
-
-                for j in range(K):
-                    if skipna and has_mask and mask[i, j]:
-                        continue
-
-                    if uses_mask and mask[i, j]:
-                        if out[lab, j] != flag_val:
-                            result_mask[lab, j] = 1
-                        continue
-
-                    val = values[i, j]
-                    if val == flag_val:
-                        if out[lab, j] != flag_val:
-                            out[lab, j] = flag_val
-                            ncompleted[lab] += 1
-                        if uses_mask:
-                            result_mask[lab, j] = 0
-
-    free(ncompleted)
+                val = values[i, j]
+                if val == flag_val:
+                    out[lab, j] = flag_val
+                    if uses_mask:
+                        result_mask[lab, j] = 0
 
 
 # ----------------------------------------------------------------------
