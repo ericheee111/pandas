@@ -28,6 +28,7 @@ from pandas._libs import (
     lib,
 )
 from pandas.compat import set_function_name
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import AbstractMethodError
 from pandas.util._decorators import (
@@ -2812,12 +2813,17 @@ class ExtensionArray:
                 op._get_cython_function(op.kind, op.how, np.dtype(object), False)
 
             arr = self
+            mask = None
+            result_mask = None
             if op.how == "sum":
                 initial = ""
                 # https://github.com/pandas-dev/pandas/issues/60229
                 # All NA should result in the empty string.
                 assert "skipna" in kwargs
-                if kwargs["skipna"] and min_count == 0:
+                if IS_ARM and kwargs["skipna"]:
+                    mask = arr.isna()
+                    result_mask = np.zeros(ngroups, dtype=np.bool_)
+                elif kwargs["skipna"] and min_count == 0:
                     arr = arr.fillna("")
             npvalues = arr.to_numpy(object, na_value=np.nan)
         else:
@@ -2830,10 +2836,13 @@ class ExtensionArray:
             min_count=min_count,
             ngroups=ngroups,
             comp_ids=ids,
-            mask=None,
+            mask=mask,
+            result_mask=result_mask,
             initial=initial,
             **kwargs,
         )
+        if result_mask is not None:
+            res_values[result_mask] = np.nan
 
         if op.how in op.cast_blocklist:
             # i.e. how in ["rank"], since other cast_blocklist methods don't go
