@@ -52,15 +52,14 @@ class _Official_tslibs_offsets_OffestDatetimeArithmetic:
         self.date - 10 * offset
 
 # ---- Inlined official source: tslibs.timedelta ----
-import datetime
-import numpy as np
+import datetime as dt
 from pandas import Timedelta
 
 class _Official_tslibs_timedelta_TimedeltaConstructor:
 
     def setup(self):
         self.nptimedelta64 = np.timedelta64(3600)
-        self.dttimedelta = datetime.timedelta(seconds=3600)
+        self.dttimedelta = dt.timedelta(seconds=3600)
         self.td = Timedelta(3600, unit='s')
 
     def time_from_int(self):
