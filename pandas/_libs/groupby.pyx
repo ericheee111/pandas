@@ -7,6 +7,7 @@ from cython cimport (
     Py_ssize_t,
     floating,
 )
+from cpython.unicode cimport PyUnicode_Check
 from libc.math cimport (
     NAN,
     isfinite,
@@ -3113,6 +3114,77 @@ def group_rank(
 # ----------------------------------------------------------------------
 # group_min, group_max
 # ----------------------------------------------------------------------
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def group_min_max_string(
+    ndarray[object, ndim=1] values,
+    const intp_t[::1] labels,
+    Py_ssize_t ngroups,
+    Py_ssize_t min_count=-1,
+    bint compute_max=True,
+    bint skipna=True,
+):
+    """Compute the minimum/maximum of string values for each label."""
+    cdef:
+        Py_ssize_t i, N = len(values), lab
+        object val
+        object[::1] result
+        int64_t[::1] nobs
+        uint8_t[::1] seen
+
+    if N != len(labels):
+        raise AssertionError("len(values) != len(labels)")
+
+    min_count = max(min_count, 1)
+    result = np.empty(ngroups, dtype=object)
+    result[:] = None
+    nobs = np.zeros(ngroups, dtype=np.int64)
+    seen = np.zeros(ngroups, dtype=np.uint8)
+
+    if compute_max:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            val = values[i]
+            if not PyUnicode_Check(val):
+                if not skipna:
+                    seen[lab] = 2
+                continue
+
+            nobs[lab] += 1
+            if seen[lab] == 0:
+                result[lab] = val
+                seen[lab] = 1
+            elif seen[lab] == 1 and val > result[lab]:
+                result[lab] = val
+    else:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            val = values[i]
+            if not PyUnicode_Check(val):
+                if not skipna:
+                    seen[lab] = 2
+                continue
+
+            nobs[lab] += 1
+            if seen[lab] == 0:
+                result[lab] = val
+                seen[lab] = 1
+            elif seen[lab] == 1 and val < result[lab]:
+                result[lab] = val
+
+    for lab in range(ngroups):
+        if seen[lab] != 1 or nobs[lab] < min_count:
+            result[lab] = None
+
+    return result.base
 
 
 @cython.wraparound(False)

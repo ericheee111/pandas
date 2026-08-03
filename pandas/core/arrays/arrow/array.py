@@ -2644,6 +2644,25 @@ class ArrowExtensionArray(
         **kwargs,
     ):
         if isinstance(self.dtype, StringDtype):
+            if (
+                IS_ARM
+                and how in ["min", "max"]
+                and kwargs.get("skipna", True)
+                and min_count <= 1
+            ):
+                from pandas._libs import groupby as libgroupby
+
+                values = self.to_numpy(dtype=object, na_value=None)
+                result = libgroupby.group_min_max_string(
+                    values,
+                    ids,
+                    ngroups,
+                    min_count=min_count,
+                    compute_max=how == "max",
+                    skipna=kwargs.get("skipna", True),
+                )
+                return type(self)._from_sequence(result, dtype=self.dtype)
+
             if IS_ARM and how in ["any", "all"]:
                 from pandas.core.groupby.ops import WrappedCythonOp
 
