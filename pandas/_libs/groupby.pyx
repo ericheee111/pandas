@@ -13,7 +13,6 @@ from libc.math cimport (
     sqrt,
 )
 from libc.stdlib cimport (
-    calloc,
     free,
     malloc,
 )
