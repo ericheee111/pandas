@@ -1272,54 +1272,7 @@ class FrameRowApply(FrameApply):
 
     @property
     def series_generator(self) -> Generator[Series]:
-        if IS_ARM:
-            obj = self.obj
-            columns = self.columns
-            ncols = len(columns)
-
-            mgr = obj._mgr
-            if len(mgr.blocks) == 1:
-                values = self.values
-                values = ensure_wrapped_if_datetimelike(values)
-                ser = obj._ixs(0, axis=1)
-
-                if not isinstance(ser.dtype, ExtensionDtype):
-                    ser_mgr = ser._mgr
-                    object.__setattr__(ser, "_row_apply_needs_ref_reset", False)
-                    is_view = ser_mgr.blocks[0].refs.has_reference()
-
-                    label_to_pos = None
-                    if columns.is_unique:
-                        label_to_pos = {
-                            label: pos for pos, label in enumerate(columns)
-                        }
-                    object.__setattr__(
-                        ser, "_row_apply_label_to_pos", label_to_pos
-                    )
-                    object.__setattr__(
-                        ser, "_row_apply_label_to_pos_index", ser.index
-                    )
-
-                    for i in range(ncols):
-                        arr = values[:, i]
-                        ser._mgr = ser_mgr
-                        ser_mgr.set_values(arr)
-                        object.__setattr__(ser, "_name", columns[i])
-                        if ser._row_apply_needs_ref_reset:
-                            if not is_view:
-                                ser_mgr.blocks[0].refs = BlockValuesRefs(
-                                    ser_mgr.blocks[0]
-                                )
-                            object.__setattr__(
-                                ser, "_row_apply_needs_ref_reset", False
-                            )
-                        yield ser
-                    return
-
-            for i in range(ncols):
-                yield obj._ixs(i, axis=1)
-        else:
-            yield from (self.obj._ixs(i, axis=1) for i in range(len(self.columns)))
+        yield from (self.obj._ixs(i, axis=1) for i in range(len(self.columns)))
 
     @staticmethod
     @functools.cache
