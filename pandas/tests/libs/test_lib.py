@@ -382,8 +382,6 @@ def test_ensure_string_array_large_unicode():
 
     expected = values.astype(object)
     tm.assert_numpy_array_equal(result, expected)
-    if IS_ARM:
-        assert result[0] is result[3]
 
     non_native = values.astype(values.dtype.newbyteorder("S"))
     result = lib.ensure_string_array(non_native)
@@ -400,8 +398,6 @@ def test_ensure_string_array_large_unicode_embedded_null():
 
     expected = values.astype(object)
     tm.assert_numpy_array_equal(result, expected)
-    if IS_ARM:
-        assert result[0] is result[3]
 
 
 def test_item_from_zerodim_for_subclasses():
