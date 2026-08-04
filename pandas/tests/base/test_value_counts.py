@@ -422,9 +422,7 @@ def test_value_counts_index_datetimelike(index, expected_index):
 
 def test_value_counts_sort_false_first_appearance_order():
     # GH: value_counts(sort=False) must return values in first-appearance
-    # order, not ascending. This matches the khash path output and the
-    # 3.0 stable sort contract. On ARM the bincount fast path
-    # (first_appearance_order) must produce the same order as khash.
+    # order, not ascending, as required by the stable sort contract.
     s = Series([3, 1, 2, 1, 3])
     result = s.value_counts(sort=False)
     # First-appearance: 3 (pos 0), 1 (pos 1), 2 (pos 2)
