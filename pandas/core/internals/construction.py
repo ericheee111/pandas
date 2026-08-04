@@ -17,7 +17,6 @@ from numpy import ma
 from pandas._config import using_string_dtype
 
 from pandas._libs import lib
-from pandas.compat._arch import IS_ARM
 
 from pandas.core.dtypes.astype import astype_is_view
 from pandas.core.dtypes.cast import (
@@ -108,18 +107,6 @@ def arrays_to_mgr(
 
     Needs to handle a lot of exceptional cases.
     """
-    if IS_ARM and not verify_integrity:
-        # DataFrame._from_arrays documents these inputs as pre-validated.
-        index = ensure_index(index)
-        refs = [None] * len(arrays)
-        return create_block_manager_from_column_arrays(
-            arrays,
-            [columns, index],
-            consolidate=consolidate,
-            refs=refs,
-            unwrap_numpy_ea=True,
-        )
-
     if verify_integrity:
         # figure out the index, if necessary
         if index is None:
