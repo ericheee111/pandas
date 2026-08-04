@@ -377,21 +377,3 @@ class Constructor(_AggregateBenchmark):
         'time_with_nan',
     )
     case_types = (_Official_categoricals_Constructor, _Official_categoricals_Constructor, _Official_categoricals_Constructor,)
-
-
-class ValueCounts(_AggregateBenchmark):
-    """Aggregate categoricals.ValueCounts with frozen 920b weights."""
-
-    case_params = (
-        _select_case_params(_Official_categoricals_ValueCounts, 'time_value_counts', (1,)),  # categoricals.ValueCounts.time_value_counts(False)
-        _select_case_params(_Official_categoricals_ValueCounts, 'time_value_counts', (0,)),  # categoricals.ValueCounts.time_value_counts(True)
-    )
-    run_repeat = (
-        1,  # categoricals.ValueCounts.time_value_counts(False)
-        1,  # categoricals.ValueCounts.time_value_counts(True)
-    )
-    case_methods = (
-        'time_value_counts',
-        'time_value_counts',
-    )
-    case_types = (_Official_categoricals_ValueCounts, _Official_categoricals_ValueCounts,)

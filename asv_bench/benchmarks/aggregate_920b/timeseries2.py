@@ -107,17 +107,6 @@ class _Official_timeseries_TzLocalize:
     def time_infer_dst(self, tz):
         self.index.tz_localize(tz, ambiguous='infer')
 
-class _Official_timeseries_ResetIndex:
-    params = [None, 'US/Eastern']
-    param_names = 'tz'
-
-    def setup(self, tz):
-        idx = date_range(start='1/1/2000', periods=1000, freq='h', tz=tz)
-        self.df = DataFrame(np.random.randn(1000, 2), index=idx)
-
-    def time_reset_datetimeindex(self, tz):
-        self.df.reset_index()
-
 class _Official_timeseries_InferFreq:
     params = [None, 'D', 'B']
     param_names = ['freq']
@@ -295,8 +284,6 @@ from .._aggregate_common import (
     select_case_params as _select_case_params,
 )
 
-from .attrs_caching2 import _Official_attrs_caching_DataFrameAttributes
-
 
 class DatetimeAccessor(_AggregateBenchmark):
     """Aggregate timeseries.DatetimeAccessor with frozen 920b weights."""
@@ -320,27 +307,6 @@ class DatetimeAccessor(_AggregateBenchmark):
         'time_dt_accessor',
     )
     case_types = (_Official_timeseries_DatetimeAccessor, _Official_timeseries_DatetimeAccessor, _Official_timeseries_DatetimeAccessor, _Official_timeseries_DatetimeAccessor,)
-
-
-class ResetIndex(_AggregateBenchmark):
-    """Aggregate index reset and assignment operations with frozen 920b weights."""
-
-    case_params = (
-        _select_case_params(_Official_timeseries_ResetIndex, 'time_reset_datetimeindex', (0,)),  # timeseries.ResetIndex.time_reset_datetimeindex(None)
-        _select_case_params(_Official_timeseries_ResetIndex, 'time_reset_datetimeindex', (1,)),  # timeseries.ResetIndex.time_reset_datetimeindex('US/Eastern')
-        _select_case_params(_Official_attrs_caching_DataFrameAttributes, 'time_set_index', ()),  # attrs_caching.DataFrameAttributes.time_set_index
-    )
-    run_repeat = (
-        1,  # timeseries.ResetIndex.time_reset_datetimeindex(None)
-        1,  # timeseries.ResetIndex.time_reset_datetimeindex('US/Eastern')
-        1,  # attrs_caching.DataFrameAttributes.time_set_index
-    )
-    case_methods = (
-        'time_reset_datetimeindex',
-        'time_reset_datetimeindex',
-        'time_set_index',
-    )
-    case_types = (_Official_timeseries_ResetIndex, _Official_timeseries_ResetIndex, _Official_attrs_caching_DataFrameAttributes)
 
 
 class ResampleDataFrame(_AggregateBenchmark):

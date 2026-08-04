@@ -978,21 +978,6 @@ class Reindex(_AggregateBenchmark):
     case_types = (_Official_frame_methods_Reindex, _Official_frame_methods_Reindex, _Official_frame_methods_Reindex, _Official_frame_methods_Reindex, _Official_frame_methods_Reindex,)
 
 
-class SeriesNuniqueWithNan(_AggregateBenchmark):
-    """Aggregate frame_methods.SeriesNuniqueWithNan with frozen 920b weights."""
-
-    case_params = (
-        _select_case_params(_Official_frame_methods_SeriesNuniqueWithNan, 'time_series_nunique_nan', ()),  # frame_methods.SeriesNuniqueWithNan.time_series_nunique_nan
-    )
-    run_repeat = (
-        1,  # frame_methods.SeriesNuniqueWithNan.time_series_nunique_nan
-    )
-    case_methods = (
-        'time_series_nunique_nan',
-    )
-    case_types = (_Official_frame_methods_SeriesNuniqueWithNan,)
-
-
 class Where(_AggregateBenchmark):
     """Aggregate frame_methods.Where with frozen 920b weights."""
 

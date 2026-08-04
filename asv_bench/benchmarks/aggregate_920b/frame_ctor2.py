@@ -198,16 +198,19 @@ class FromArrays(_AggregateBenchmark):
     case_params = (
         _select_case_params(_Official_frame_ctor_FromArrays, 'time_frame_from_arrays_float', ()),  # frame_ctor.FromArrays.time_frame_from_arrays_float
         _select_case_params(_Official_frame_ctor_FromArrays, 'time_frame_from_arrays_int', ()),  # frame_ctor.FromArrays.time_frame_from_arrays_int
+        _select_case_params(_Official_frame_ctor_FromNDArray, 'time_frame_from_ndarray', ()),  # frame_ctor.FromNDArray.time_frame_from_ndarray
     )
     run_repeat = (
         2,  # frame_ctor.FromArrays.time_frame_from_arrays_float
         1,  # frame_ctor.FromArrays.time_frame_from_arrays_int
+        82,  # frame_ctor.FromNDArray.time_frame_from_ndarray
     )
     case_methods = (
         'time_frame_from_arrays_float',
         'time_frame_from_arrays_int',
+        'time_frame_from_ndarray',
     )
-    case_types = (_Official_frame_ctor_FromArrays, _Official_frame_ctor_FromArrays,)
+    case_types = (_Official_frame_ctor_FromArrays, _Official_frame_ctor_FromArrays, _Official_frame_ctor_FromNDArray,)
 
 
 class FromDicts(_AggregateBenchmark):
@@ -235,18 +238,3 @@ class FromDicts(_AggregateBenchmark):
         'time_nested_dict_int64',
     )
     case_types = (_Official_frame_ctor_FromDicts, _Official_frame_ctor_FromDicts, _Official_frame_ctor_FromDicts, _Official_frame_ctor_FromDicts, _Official_frame_ctor_FromDicts,)
-
-
-class FromNDArray(_AggregateBenchmark):
-    """Aggregate frame_ctor.FromNDArray with frozen 920b weights."""
-
-    case_params = (
-        _select_case_params(_Official_frame_ctor_FromNDArray, 'time_frame_from_ndarray', ()),  # frame_ctor.FromNDArray.time_frame_from_ndarray
-    )
-    run_repeat = (
-        1,  # frame_ctor.FromNDArray.time_frame_from_ndarray
-    )
-    case_methods = (
-        'time_frame_from_ndarray',
-    )
-    case_types = (_Official_frame_ctor_FromNDArray,)
