@@ -477,20 +477,26 @@ class I8Merge(_AggregateBenchmark):
         _select_case_params(_Official_join_merge_I8Merge, 'time_i8merge', (2,)),  # join_merge.I8Merge.time_i8merge('left')
         _select_case_params(_Official_join_merge_I8Merge, 'time_i8merge', (1,)),  # join_merge.I8Merge.time_i8merge('outer')
         _select_case_params(_Official_join_merge_I8Merge, 'time_i8merge', (3,)),  # join_merge.I8Merge.time_i8merge('right')
+        _select_case_params(_Official_join_merge_UniqueMerge, 'time_unique_merge', (1,)),  # join_merge.UniqueMerge.time_unique_merge(1000000)
+        _select_case_params(_Official_join_merge_UniqueMerge, 'time_unique_merge', (0,)),  # join_merge.UniqueMerge.time_unique_merge(4000000)
     )
     run_repeat = (
         3,  # join_merge.I8Merge.time_i8merge('inner')
         3,  # join_merge.I8Merge.time_i8merge('left')
         1,  # join_merge.I8Merge.time_i8merge('outer')
         3,  # join_merge.I8Merge.time_i8merge('right')
+        1,  # join_merge.UniqueMerge.time_unique_merge(1000000)
+        1,  # join_merge.UniqueMerge.time_unique_merge(4000000)
     )
     case_methods = (
         'time_i8merge',
         'time_i8merge',
         'time_i8merge',
         'time_i8merge',
+        'time_unique_merge',
+        'time_unique_merge',
     )
-    case_types = (_Official_join_merge_I8Merge, _Official_join_merge_I8Merge, _Official_join_merge_I8Merge, _Official_join_merge_I8Merge,)
+    case_types = (_Official_join_merge_I8Merge, _Official_join_merge_I8Merge, _Official_join_merge_I8Merge, _Official_join_merge_I8Merge, _Official_join_merge_UniqueMerge, _Official_join_merge_UniqueMerge,)
 
 
 class MergeCategoricals(_AggregateBenchmark):
@@ -515,21 +521,3 @@ class MergeCategoricals(_AggregateBenchmark):
         'time_merge_on_cat_idx',
     )
     case_types = (_Official_join_merge_MergeCategoricals, _Official_join_merge_MergeCategoricals, _Official_join_merge_MergeCategoricals, _Official_join_merge_MergeCategoricals,)
-
-
-class UniqueMerge(_AggregateBenchmark):
-    """Aggregate join_merge.UniqueMerge with frozen 920b weights."""
-
-    case_params = (
-        _select_case_params(_Official_join_merge_UniqueMerge, 'time_unique_merge', (1,)),  # join_merge.UniqueMerge.time_unique_merge(1000000)
-        _select_case_params(_Official_join_merge_UniqueMerge, 'time_unique_merge', (0,)),  # join_merge.UniqueMerge.time_unique_merge(4000000)
-    )
-    run_repeat = (
-        1,  # join_merge.UniqueMerge.time_unique_merge(1000000)
-        1,  # join_merge.UniqueMerge.time_unique_merge(4000000)
-    )
-    case_methods = (
-        'time_unique_merge',
-        'time_unique_merge',
-    )
-    case_types = (_Official_join_merge_UniqueMerge, _Official_join_merge_UniqueMerge,)

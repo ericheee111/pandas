@@ -350,12 +350,12 @@ class PivotTable(_AggregateBenchmark):
     )
     run_repeat = (
         1,  # reshape.Pivot.time_reshape_pivot_time_series
-        3,  # reshape.PivotTable.time_pivot_table
-        1,  # reshape.PivotTable.time_pivot_table_agg
-        12,  # reshape.PivotTable.time_pivot_table_categorical
-        12,  # reshape.PivotTable.time_pivot_table_categorical_observed
-        1,  # reshape.PivotTable.time_pivot_table_margins
-        1,  # reshape.PivotTable.time_pivot_table_margins_only_column
+        5,  # reshape.PivotTable.time_pivot_table
+        2,  # reshape.PivotTable.time_pivot_table_agg
+        20,  # reshape.PivotTable.time_pivot_table_categorical
+        20,  # reshape.PivotTable.time_pivot_table_categorical_observed
+        2,  # reshape.PivotTable.time_pivot_table_margins
+        2,  # reshape.PivotTable.time_pivot_table_margins_only_column
     )
     case_methods = (
         'time_reshape_pivot_time_series',

@@ -525,6 +525,8 @@ from .._aggregate_common import (
     select_case_params as _select_case_params,
 )
 
+from .attrs_caching2 import _Official_attrs_caching_DataFrameAttributes
+
 
 class NumericSeriesIndexing(_AggregateBenchmark):
     """Aggregate indexing.NumericSeriesIndexing with frozen 920b weights."""
@@ -554,15 +556,18 @@ class Setitem(_AggregateBenchmark):
     """Aggregate indexing.Setitem with frozen 920b weights."""
 
     case_params = (
+        _select_case_params(_Official_attrs_caching_DataFrameAttributes, 'time_set_index', ()),  # attrs_caching.DataFrameAttributes.time_set_index
         _select_case_params(_Official_indexing_Setitem, 'time_setitem', ()),  # indexing.Setitem.time_setitem
         _select_case_params(_Official_indexing_Setitem, 'time_setitem_list', ()),  # indexing.Setitem.time_setitem_list
     )
     run_repeat = (
+        359,  # attrs_caching.DataFrameAttributes.time_set_index
         3,  # indexing.Setitem.time_setitem
         1,  # indexing.Setitem.time_setitem_list
     )
     case_methods = (
+        'time_set_index',
         'time_setitem',
         'time_setitem_list',
     )
-    case_types = (_Official_indexing_Setitem, _Official_indexing_Setitem,)
+    case_types = (_Official_attrs_caching_DataFrameAttributes, _Official_indexing_Setitem, _Official_indexing_Setitem,)
