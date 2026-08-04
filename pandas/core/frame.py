@@ -191,7 +191,6 @@ from pandas.core.series import Series
 from pandas.core.shared_docs import _shared_docs
 from pandas.core.sorting import (
     get_group_index,
-    is_int64_overflow_possible,
     lexsort_indexer,
     nargsort,
 )
@@ -8229,6 +8228,10 @@ class DataFrame(NDFrame, OpsMixin):
         if self.empty:
             return self._constructor_sliced(dtype=bool)
 
+        def f(vals) -> tuple[np.ndarray, int]:
+            labels, shape = algorithms.factorize(vals, size_hint=len(self))
+            return labels.astype("i8"), len(shape)
+
         if subset is None:
             subset = self.columns
         elif (
@@ -8260,144 +8263,14 @@ class DataFrame(NDFrame, OpsMixin):
                     from pandas.core.algorithms import (
                         duplicated as _alg_duplicated,
                     )
+
                     dup_result = _alg_duplicated(arr, keep=keep)
                 result = self._constructor_sliced(dup_result, index=self.index)
                 result.name = None
             else:
                 result = self[next(iter(subset))].duplicated(keep)
                 result.name = None
-        elif IS_ARM and self.columns.is_unique:
-            n = len(self)
-            subset_list = list(subset)
-            ncols = len(subset_list)
-            if ncols == 0:
-                result = self._constructor_sliced(
-                    np.zeros(n, dtype=bool), index=self.index
-                )
-                return result.__finalize__(self, method="duplicated")
-
-            positions = self.columns.get_indexer(subset_list)
-            has_object = any(
-                blk.dtype == np.object_ for blk in self._mgr.blocks
-            )
-            def _is_float_dtype(arr_dtype) -> bool:
-                try:
-                    return np.issubdtype(arr_dtype, np.floating)
-                except TypeError:
-                    return False
-
-            has_float = any(
-                _is_float_dtype(self._get_column_array(positions[i]).dtype)
-                for i in range(ncols)
-            )
-
-            if not has_object and not has_float and ncols <= 10:
-                from pandas.core.util.hashing import (
-                    combine_hash_arrays,
-                    hash_array,
-                )
-
-                def _hash_gen():
-                    for i in range(ncols):
-                        arr = self._get_column_array(positions[i])
-                        yield hash_array(arr, categorize=True)
-
-                combined = combine_hash_arrays(_hash_gen(), ncols)
-                result = self._constructor_sliced(
-                    duplicated(combined, keep), index=self.index
-                )
-            else:
-                all_labels: list[np.ndarray] = []
-                all_shapes: list[int] = []
-
-                def _maybe_lift(lab, size: int):
-                    return (lab + 1, size + 1) if (lab == -1).any() else (lab, size)
-
-                if ncols > 10:
-                    batch_size = max(10, min(50, ncols // 5))
-
-                    for batch_start in range(0, ncols, batch_size):
-                        batch_end = min(batch_start + batch_size, ncols)
-                        for i in range(batch_start, batch_end):
-                            arr = self._get_column_array(positions[i])
-                            lab, shp = algorithms.factorize(arr, size_hint=n)
-                            lab = lab.astype("i8", copy=False)
-                            lab, lifted_size = _maybe_lift(lab, len(shp))
-                            all_labels.append(lab)
-                            all_shapes.append(lifted_size)
-
-                        cur_ncols = len(all_labels)
-                        cur_shape = np.array(all_shapes, dtype=np.int64)
-                        cur_overflow = is_int64_overflow_possible(cur_shape)
-                        if cur_overflow:
-                            break
-                        if cur_ncols > 1:
-                            cur_strides = np.ones(cur_ncols, dtype=np.int64)
-                            cur_strides[: cur_ncols - 1] = np.cumprod(
-                                cur_shape[1:][::-1]
-                            )[::-1]
-                        else:
-                            cur_strides = np.ones(1, dtype=np.int64)
-
-                        cur_ids = all_labels[0] * cur_strides[0]
-                        for j in range(1, cur_ncols):
-                            cur_ids = cur_ids + all_labels[j] * cur_strides[j]
-
-                        if batch_end < ncols and not duplicated(cur_ids, keep).any():
-                            result = self._constructor_sliced(
-                                np.zeros(n, dtype=bool), index=self.index
-                            )
-                            return result.__finalize__(self, method="duplicated")
-                else:
-                    for i in range(ncols):
-                        arr = self._get_column_array(positions[i])
-                        lab, shp = algorithms.factorize(arr, size_hint=n)
-                        lab = lab.astype("i8", copy=False)
-                        lab, lifted_size = _maybe_lift(lab, len(shp))
-                        all_labels.append(lab)
-                        all_shapes.append(lifted_size)
-
-                shape_arr = np.array(all_shapes, dtype=np.int64)
-                overflow = is_int64_overflow_possible(shape_arr)
-
-                if overflow:
-                    def f(vals) -> tuple[np.ndarray, int]:
-                        labels, shape = algorithms.factorize(
-                            vals, size_hint=len(self)
-                        )
-                        return labels.astype("i8"), len(shape)
-
-                    vals = (
-                        col.values for name, col in self.items() if name in subset
-                    )
-                    labels, shape = map(list, zip(*map(f, vals), strict=True))
-                    ids = get_group_index(
-                        labels, tuple(shape), sort=False, xnull=False
-                    )
-                else:
-                    if ncols > 1:
-                        strides = np.ones(ncols, dtype=np.int64)
-                        strides[: ncols - 1] = np.cumprod(
-                            shape_arr[1:][::-1]
-                        )[::-1]
-                    else:
-                        strides = np.ones(1, dtype=np.int64)
-
-                    if np.all(shape_arr <= 1):
-                        ids = np.zeros(n, dtype=np.int64)
-                    else:
-                        ids = all_labels[0] * strides[0]
-                        for j in range(1, ncols):
-                            ids = ids + all_labels[j] * strides[j]
-
-                result = self._constructor_sliced(
-                    duplicated(ids, keep), index=self.index
-                )
         else:
-            def f(vals) -> tuple[np.ndarray, int]:
-                labels, shape = algorithms.factorize(vals, size_hint=len(self))
-                return labels.astype("i8"), len(shape)
-
             vals = (col.values for name, col in self.items() if name in subset)
             labels, shape = map(list, zip(*map(f, vals), strict=True))
 
