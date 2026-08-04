@@ -33,6 +33,30 @@ class TestTimedeltaConstructorKeywordBased:
         assert td.unit == "ns"
         assert td == Timedelta(nanoseconds=1500)
 
+    @pytest.mark.parametrize("unit", ["Y", "y", "M"])
+    def test_ambiguous_unit_raises(self, unit):
+        msg = "Units 'M', 'Y', and 'y' are no longer supported"
+        warn = "The 'unit' keyword is only used when the Timedelta input"
+
+        with tm.assert_produces_warning(UserWarning, match=warn):
+            with pytest.raises(ValueError, match=msg):
+                Timedelta(days=1, unit=unit)
+
+    def test_ambiguous_unit_with_out_of_bounds_components(self):
+        warn = "The 'unit' keyword is only used when the Timedelta input"
+
+        with tm.assert_produces_warning(UserWarning, match=warn):
+            with pytest.raises(OutOfBoundsTimedelta):
+                Timedelta(days=106752, unit="M")
+
+    def test_ambiguous_unit_with_nat_components(self):
+        msg = "Units 'M', 'Y', and 'y' are no longer supported"
+        warn = "The 'unit' keyword is only used when the Timedelta input"
+
+        with tm.assert_produces_warning(UserWarning, match=warn):
+            with pytest.raises(ValueError, match=msg):
+                Timedelta(nanoseconds=np.iinfo(np.int64).min, unit="M")
+
 
 class TestTimedeltaConstructorUnitKeyword:
     def test_result_unit(self):
