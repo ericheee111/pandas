@@ -1235,12 +1235,6 @@ class FrameApply(NDFrameApply):
 
         return result
 
-    _APPLY_STR_FAST_PATH = frozenset({
-        "mean", "sum", "std", "var", "min", "max", "count",
-        "median", "sem", "prod", "mad", "skew", "kurt",
-        "cumsum", "cumprod", "cummax", "cummin",
-    })
-
     def apply_str(self) -> DataFrame | Series:
         # Caller is responsible for checking isinstance(self.func, str)
         # TODO: GH#39993 - Avoid special-casing by replacing with lambda
@@ -1249,20 +1243,6 @@ class FrameApply(NDFrameApply):
             obj = self.obj
             value = obj.shape[self.axis]
             return obj._constructor_sliced(value, index=self.agg_axis)
-
-        if IS_ARM:
-            func = self.func
-            if func in self._APPLY_STR_FAST_PATH:
-                if self.axis != 0 and func in ("corrwith", "skew"):
-                    raise ValueError(
-                        f"Operation {func} does not support axis=1"
-                    )
-                obj = self.obj
-                method = getattr(obj, func, None)
-                if method is not None and callable(method):
-                    kwargs = self.kwargs.copy() if self.kwargs else {}
-                    kwargs["axis"] = self.axis
-                    return method(*self.args, **kwargs)
 
         return super().apply_str()
 

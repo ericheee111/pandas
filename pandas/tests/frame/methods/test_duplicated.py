@@ -94,6 +94,22 @@ def test_duplicated_subset(subset, keep):
     tm.assert_series_equal(result, expected)
 
 
+def test_duplicated_single_column_arm_uses_column_array(monkeypatch):
+    df = DataFrame({"a": [1, 1, 2]})
+    expected = Series([False, True, False])
+
+    monkeypatch.setattr("pandas.core.frame.IS_ARM", True)
+
+    def fail_getitem(self, key):
+        raise AssertionError("single-column ARM path should use the column array")
+
+    monkeypatch.setattr(DataFrame, "__getitem__", fail_getitem)
+
+    result = df.duplicated(subset=["a"])
+
+    tm.assert_series_equal(result, expected)
+
+
 def test_duplicated_on_empty_frame():
     # GH 25184
 
