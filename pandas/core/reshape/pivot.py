@@ -10,7 +10,6 @@ from typing import (
 import numpy as np
 
 from pandas._libs import lib
-from pandas.compat._arch import IS_ARM
 from pandas.util._decorators import set_module
 
 from pandas.core.dtypes.cast import maybe_downcast_to_dtype
@@ -19,21 +18,13 @@ from pandas.core.dtypes.common import (
     is_nested_list_like,
     is_scalar,
 )
-from pandas.core.dtypes.dtypes import (
-    CategoricalDtype,
-    ExtensionDtype,
-)
+from pandas.core.dtypes.dtypes import ExtensionDtype
 from pandas.core.dtypes.generic import (
-    ABCCategorical,
     ABCDataFrame,
-    ABCExtensionArray,
     ABCSeries,
 )
 
 import pandas.core.common as com
-from pandas.core.algorithms import factorize
-from pandas.core.arrays import PeriodArray
-from pandas.core.dtypes.missing import isna
 from pandas.core.groupby import Grouper
 from pandas.core.indexes.api import (
     Index,
@@ -861,125 +852,6 @@ def pivot(
     """
     columns_listlike = com.convert_to_list_like(columns)
 
-    use_fast_path = IS_ARM and (
-        len(columns_listlike) == 1
-        and index is not lib.no_default
-        and values is not lib.no_default
-        and not (is_list_like(values) and not isinstance(values, tuple))
-    )
-
-    if use_fast_path:
-        index_col = com.convert_to_list_like(index)
-        if len(index_col) != 1:
-            use_fast_path = False
-        elif index_col[0] is None or columns_listlike[0] is None:
-            use_fast_path = False
-
-    if use_fast_path:
-        idx_name = index_col[0]
-        col_name = columns_listlike[0]
-        val_name = values
-
-        idx_series = data[idx_name]
-        col_series = data[col_name]
-        val_series = data[val_name]
-
-        if len(idx_series) == 0:
-            use_fast_path = False
-
-    if use_fast_path:
-        idx_vals = idx_series._values
-        col_vals = col_series._values
-        val_vals = val_series._values
-
-        if isinstance(idx_vals, ABCExtensionArray):
-            if isinstance(idx_vals, PeriodArray):
-                use_fast_path = False
-            elif hasattr(idx_vals, "_ndarray"):
-                if hasattr(idx_vals, "tz") and idx_vals.tz is not None:
-                    use_fast_path = False
-                elif isinstance(idx_vals.dtype, CategoricalDtype):
-                    use_fast_path = False
-                else:
-                    idx_arr = idx_vals._ndarray
-            else:
-                use_fast_path = False
-        else:
-            idx_arr = idx_vals
-
-        if isinstance(col_vals, ABCExtensionArray):
-            if isinstance(col_vals, PeriodArray):
-                use_fast_path = False
-            elif hasattr(col_vals, "_ndarray"):
-                if hasattr(col_vals, "tz") and col_vals.tz is not None:
-                    use_fast_path = False
-                elif isinstance(col_vals.dtype, CategoricalDtype):
-                    use_fast_path = False
-                else:
-                    col_arr = col_vals._ndarray
-            else:
-                use_fast_path = False
-        else:
-            col_arr = col_vals
-
-        if isinstance(val_vals, ABCExtensionArray):
-            if hasattr(val_vals, "_ndarray"):
-                val_arr = val_vals._ndarray
-            else:
-                use_fast_path = False
-        else:
-            val_arr = val_vals
-
-    if use_fast_path:
-        try:
-            has_nan = bool(np.any(isna(idx_arr)) or np.any(isna(col_arr)))
-        except (TypeError, ValueError):
-            has_nan = True
-
-        if has_nan:
-            use_fast_path = False
-
-    if use_fast_path:
-        row_codes, row_uniques = factorize(idx_arr, sort=True, use_na_sentinel=True)
-        col_codes, col_uniques = factorize(col_arr, sort=True, use_na_sentinel=True)
-
-        n_row = len(row_uniques)
-        n_col = len(col_uniques)
-
-        flat_idx = row_codes * n_col + col_codes
-        if len(flat_idx) > 0:
-            counts = np.bincount(flat_idx, minlength=n_row * n_col)
-            if counts.max() > 1:
-                raise ValueError("Index contains duplicate entries, cannot reshape")
-            has_missing = counts.min() == 0
-        else:
-            has_missing = False
-
-        if np.issubdtype(val_arr.dtype, np.floating):
-            result_data = np.full((n_row, n_col), np.nan, dtype=val_arr.dtype)
-        elif np.issubdtype(val_arr.dtype, np.integer):
-            if has_missing:
-                result_data = np.full((n_row, n_col), np.nan, dtype=np.float64)
-                val_arr = val_arr.astype(np.float64, copy=False)
-            else:
-                result_data = np.full((n_row, n_col), -1, dtype=val_arr.dtype)
-        else:
-            result_data = np.full((n_row, n_col), None, dtype=object)
-
-        result_data[row_codes, col_codes] = val_arr
-
-        row_idx = Index(row_uniques, name=idx_name)
-        if row_idx.dtype != idx_series.dtype:
-            row_idx = row_idx.astype(idx_series.dtype)
-
-        col_idx = Index(col_uniques, name=col_name)
-        if col_idx.dtype != col_series.dtype:
-            col_idx = col_idx.astype(col_series.dtype)
-
-        result = data._constructor(result_data, index=row_idx, columns=col_idx)
-
-        return result
-
     # If columns is None we will create a MultiIndex level with None as name
     # which might cause duplicated names because None is the default for
     # level names
@@ -1219,134 +1091,28 @@ def crosstab(
 
     from pandas import DataFrame
 
-    use_fast_path = IS_ARM and (
-        len(index) == 1
-        and len(columns) == 1
-        and not isinstance(index[0], ABCCategorical)
-        and not isinstance(columns[0], ABCCategorical)
-    )
+    data = {
+        **dict(zip(unique_rownames, index, strict=True)),
+        **dict(zip(unique_colnames, columns, strict=True)),
+    }
+    df = DataFrame(data, index=common_idx)
 
-    if use_fast_path:
-        idx_dtype = getattr(index[0], "dtype", None)
-        col_dtype = getattr(columns[0], "dtype", None)
-        if isinstance(idx_dtype, CategoricalDtype) or isinstance(
-            col_dtype, CategoricalDtype
-        ):
-            use_fast_path = False
-
-    if use_fast_path and values is not None:
-        if isinstance(values, ABCSeries):
-            if isinstance(values.dtype, ExtensionDtype):
-                use_fast_path = False
-        elif isinstance(values, ABCExtensionArray):
-            use_fast_path = False
-
-    if use_fast_path:
-        raw_index = index[0]
-        raw_columns = columns[0]
-
-        try:
-                has_nan = bool(
-                    np.any(isna(raw_index)) or np.any(isna(raw_columns))
-                )
-                if not has_nan and values is not None:
-                    has_nan = bool(np.any(isna(values)))
-        except (TypeError, ValueError):
-            has_nan = True
-
-        if has_nan:
-            use_fast_path = False
-
-    if use_fast_path:
-        raw_index = index[0]
-        raw_columns = columns[0]
-
-        if common_idx is not None:
-            if isinstance(raw_index, ABCSeries):
-                raw_index = raw_index.reindex(common_idx)
-            if isinstance(raw_columns, ABCSeries):
-                raw_columns = raw_columns.reindex(common_idx)
-
-        if not isinstance(
-            raw_index, (Index, ABCSeries, ABCExtensionArray, np.ndarray)
-        ):
-            raw_index = np.asarray(raw_index)
-        if not isinstance(
-            raw_columns, (Index, ABCSeries, ABCExtensionArray, np.ndarray)
-        ):
-            raw_columns = np.asarray(raw_columns)
-
-        row_codes, row_uniques = factorize(raw_index, sort=True, use_na_sentinel=True)
-        col_codes, col_uniques = factorize(raw_columns, sort=True, use_na_sentinel=True)
-
-        n_row = len(row_uniques)
-        n_col = len(col_uniques)
-
-        if values is None:
-            flat = row_codes * n_col + col_codes
-            counts = np.bincount(flat, minlength=n_row * n_col)
-            table_data = counts.reshape(n_row, n_col).astype(np.int64)
-        elif aggfunc == "sum":
-            values_arr = np.asarray(values)
-            if np.issubdtype(values_arr.dtype, np.integer):
-                acc_dtype = np.int64
-            else:
-                acc_dtype = values_arr.dtype
-            table_data = np.zeros((n_row, n_col), dtype=acc_dtype)
-            np.add.at(
-                table_data, (row_codes, col_codes), values_arr.astype(acc_dtype, copy=False)
-            )
-        else:
-            use_fast_path = False
-
-    if use_fast_path:
-        row_idx = Index(row_uniques, name=unique_rownames[0])
-        col_idx = Index(col_uniques, name=unique_colnames[0])
-        table = DataFrame(table_data, index=row_idx, columns=col_idx)
-
-        if margins:
-            row_margin = table_data.sum(axis=1)
-            col_margin = table_data.sum(axis=0)
-            grand_total = row_margin.sum()
-
-            if values is None:
-                row_margin = row_margin.astype(np.int64)
-                col_margin = col_margin.astype(np.int64)
-                grand_total = np.int64(grand_total)
-
-            col_with_margin = col_idx.append(Index([margins_name]))
-            col_with_margin.name = col_idx.name
-            new_data = np.column_stack([table_data, row_margin])
-            bottom_row = np.append(col_margin, grand_total)
-            new_data = np.vstack([new_data, bottom_row])
-
-            row_with_margin = row_idx.append(Index([margins_name]))
-            row_with_margin.name = row_idx.name
-            table = DataFrame(new_data, index=row_with_margin, columns=col_with_margin)
+    if values is None:
+        df["__dummy__"] = 0
     else:
-        data = {
-            **dict(zip(unique_rownames, index, strict=True)),
-            **dict(zip(unique_colnames, columns, strict=True)),
-        }
-        df = DataFrame(data, index=common_idx)
+        df["__dummy__"] = values
 
-        if values is None:
-            df["__dummy__"] = 0
-            kwargs = {"aggfunc": len, "fill_value": 0}
-        else:
-            df["__dummy__"] = values
-            kwargs = {"aggfunc": aggfunc}
-
-        table = df.pivot_table(
-            "__dummy__",
-            index=unique_rownames,
-            columns=unique_colnames,
-            margins=margins,
-            margins_name=margins_name,
-            dropna=dropna,
-            observed=dropna,
-            **kwargs,
-        )
+    table = df.pivot_table(
+        "__dummy__",
+        index=unique_rownames,
+        columns=unique_colnames,
+        margins=margins,
+        margins_name=margins_name,
+        dropna=dropna,
+        observed=dropna,
+        aggfunc=len if values is None else aggfunc,
+        fill_value=0 if values is None else None,
+    )
 
     # Post-process
     if normalize is not False:
