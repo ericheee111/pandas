@@ -82,6 +82,7 @@ def get_changed_lines(base_ref: str) -> dict[str, set[int]]:
         for filename, lines in changed_lines.items()
         if filename.startswith("pandas/")
         and Path(filename).suffix in SOURCE_SUFFIXES
+        and not filename.startswith("pandas/tests/")
     }
 
 
