@@ -76,19 +76,7 @@ from pandas._libs.tslibs.np_datetime cimport (
 
 import_pandas_datetime()
 
-# ----------------------------------------------------------------------
-# Architecture Detection
-
-cdef extern from *:
-    """
-    static inline int pandas_is_aarch64(void) {
-    #if defined(__aarch64__)
-        return 1;
-    #else
-        return 0;
-    #endif
-    }
-    """
+cdef extern from "pandas/portable.h":
     bint pandas_is_aarch64() noexcept nogil
 
 
@@ -804,6 +792,13 @@ cdef bint needs_nano_unit(int64_t ival, str item):
 
     if ival % 1000 != 0:
         return True
+
+    if not pandas_is_aarch64():
+        return bool(
+            re.search(r"\.\d{7}", item)
+            or "ns" in item
+            or "nano" in item.lower()
+        )
 
     in_frac = 0
     digit_count = 0
@@ -2153,6 +2148,8 @@ class Timedelta(_Timedelta):
                            "milliseconds", "microseconds", "nanoseconds"}
 
     def __new__(cls, object value=_no_input, unit=None, **kwargs):
+        cdef bint use_fastpath = pandas_is_aarch64()
+
         unsupported_kwargs = set(kwargs)
         unsupported_kwargs.difference_update(cls._req_any_kwargs_new)
         if unsupported_kwargs or (
@@ -2205,36 +2202,55 @@ class Timedelta(_Timedelta):
             ns = kwargs.get("nanoseconds", 0)
             us = kwargs.get("microseconds", 0)
             ms = kwargs.get("milliseconds", 0)
+            if use_fastpath:
+                try:
+                    total_ns = (
+                        int(ns)
+                        + int(us * 1_000)
+                        + int(ms * 1_000_000)
+                        + seconds
+                    )
+                except OverflowError as err:
+                    # GH#55503
+                    msg = (
+                        f"seconds={seconds}, milliseconds={ms}, "
+                        f"microseconds={us}, nanoseconds={ns}"
+                    )
+                    raise OutOfBoundsTimedelta(msg) from err
+
+                if total_ns == NPY_NAT:
+                    return NaT
+
+                if total_ns > 9223372036854775807 or total_ns < -9223372036854775807:
+                    msg = (
+                        f"seconds={seconds}, milliseconds={ms}, "
+                        f"microseconds={us}, nanoseconds={ns}"
+                    )
+                    raise OutOfBoundsTimedelta(msg)
+
+                if "nanoseconds" not in kwargs and total_ns % 1000 == 0:
+                    return _timedelta_from_value_and_reso(
+                        cls, total_ns // 1000, NPY_DATETIMEUNIT.NPY_FR_us
+                    )
+                return _timedelta_from_value_and_reso(cls, total_ns, NPY_FR_ns)
+
             try:
-                total_ns = (
-                    int(ns)
-                    + int(us * 1_000)
-                    + int(ms * 1_000_000)
-                    + seconds
+                value = np.timedelta64(
+                    int(ns) + int(us * 1_000) + int(ms * 1_000_000) + seconds,
+                    "ns",
                 )
             except OverflowError as err:
-                # GH#55503
                 msg = (
                     f"seconds={seconds}, milliseconds={ms}, "
                     f"microseconds={us}, nanoseconds={ns}"
                 )
                 raise OutOfBoundsTimedelta(msg) from err
 
-            if total_ns == NPY_NAT:
-                return NaT
-
-            if total_ns > 9223372036854775807 or total_ns < -9223372036854775807:
-                msg = (
-                    f"seconds={seconds}, milliseconds={ms}, "
-                    f"microseconds={us}, nanoseconds={ns}"
-                )
-                raise OutOfBoundsTimedelta(msg)
-
-            if "nanoseconds" not in kwargs and total_ns % 1000 == 0:
-                return _timedelta_from_value_and_reso(
-                    cls, total_ns // 1000, NPY_DATETIMEUNIT.NPY_FR_us
-                )
-            return _timedelta_from_value_and_reso(cls, total_ns, NPY_FR_ns)
+            if (
+                "nanoseconds" not in kwargs
+                and cnp.get_timedelta64_value(value) % 1000 == 0
+            ):
+                value = value.astype("m8[us]")
 
         disallow_ambiguous_unit(unit)
 
@@ -2263,22 +2279,23 @@ class Timedelta(_Timedelta):
                 return NaT
 
             reso = get_datetime64_unit(value)
-            if reso == NPY_DATETIMEUNIT.NPY_FR_GENERIC:
-                return _timedelta_from_value_and_reso(cls, new_value, NPY_FR_ns)
-            elif reso == NPY_DATETIMEUNIT.NPY_FR_ns:
-                return _timedelta_from_value_and_reso(cls, new_value, NPY_FR_ns)
-            elif reso == NPY_DATETIMEUNIT.NPY_FR_us:
-                return _timedelta_from_value_and_reso(
-                    cls, new_value, NPY_DATETIMEUNIT.NPY_FR_us
-                )
-            elif reso == NPY_DATETIMEUNIT.NPY_FR_ms:
-                return _timedelta_from_value_and_reso(
-                    cls, new_value, NPY_DATETIMEUNIT.NPY_FR_ms
-                )
-            elif reso == NPY_DATETIMEUNIT.NPY_FR_s:
-                return _timedelta_from_value_and_reso(
-                    cls, new_value, NPY_DATETIMEUNIT.NPY_FR_s
-                )
+            if use_fastpath:
+                if reso == NPY_DATETIMEUNIT.NPY_FR_GENERIC:
+                    return _timedelta_from_value_and_reso(cls, new_value, NPY_FR_ns)
+                elif reso == NPY_DATETIMEUNIT.NPY_FR_ns:
+                    return _timedelta_from_value_and_reso(cls, new_value, NPY_FR_ns)
+                elif reso == NPY_DATETIMEUNIT.NPY_FR_us:
+                    return _timedelta_from_value_and_reso(
+                        cls, new_value, NPY_DATETIMEUNIT.NPY_FR_us
+                    )
+                elif reso == NPY_DATETIMEUNIT.NPY_FR_ms:
+                    return _timedelta_from_value_and_reso(
+                        cls, new_value, NPY_DATETIMEUNIT.NPY_FR_ms
+                    )
+                elif reso == NPY_DATETIMEUNIT.NPY_FR_s:
+                    return _timedelta_from_value_and_reso(
+                        cls, new_value, NPY_DATETIMEUNIT.NPY_FR_s
+                    )
             
             if not (is_supported_unit(reso) or
                     reso in [NPY_DATETIMEUNIT.NPY_FR_m,
@@ -2308,7 +2325,7 @@ class Timedelta(_Timedelta):
         elif isinstance(value, str):
             if unit is not None:
                 raise ValueError("unit must not be specified if the value is a str")
-            if value in nat_strings:
+            if use_fastpath and value in nat_strings:
                 return NaT
             if (len(value) > 0 and value[0] == "P") or (
                 len(value) > 1 and value[:2] == "-P"
@@ -2317,17 +2334,30 @@ class Timedelta(_Timedelta):
             else:
                 ival = parse_timedelta_string(value)
 
-            if ival == NPY_NAT:
+            if use_fastpath and ival == NPY_NAT:
                 return NaT
 
             if not needs_nano_unit(ival, value):
-                return _timedelta_from_value_and_reso(
-                    cls, ival // 1000, NPY_DATETIMEUNIT.NPY_FR_us
-                )
+                if use_fastpath:
+                    return _timedelta_from_value_and_reso(
+                        cls, ival // 1000, NPY_DATETIMEUNIT.NPY_FR_us
+                    )
+                value = np.timedelta64(ival // 1000, "us")
+                return cls(value)
             else:
-                return _timedelta_from_value_and_reso(cls, ival, NPY_FR_ns)
+                if use_fastpath:
+                    return _timedelta_from_value_and_reso(cls, ival, NPY_FR_ns)
+                value = np.timedelta64(ival, "ns")
         elif PyDelta_Check(value):
             # pytimedelta object -> microsecond resolution
+            if not use_fastpath:
+                new_value = delta_to_nanoseconds(
+                    value, reso=NPY_DATETIMEUNIT.NPY_FR_us
+                )
+                return cls._from_value_and_reso(
+                    new_value, reso=NPY_DATETIMEUNIT.NPY_FR_us
+                )
+
             py_us_value = (
                 value.days * 86400000000
                 + value.seconds * 1000000
@@ -2354,72 +2384,81 @@ class Timedelta(_Timedelta):
 
         elif is_integer_object(value):
             # unit=None is de-facto 'ns'
-            if value == NPY_NAT:
-                return NaT
-            if unit is None:
-                if value > 9223372036854775807 or value < -9223372036854775808:
-                    raise OutOfBoundsTimedelta(
-                        f"Cannot cast {value} from ns to 'ns' without overflow."
-                    )
-                return _timedelta_from_value_and_reso(cls, value, NPY_FR_ns)
-            unit = parse_timedelta_unit(unit)
-            if unit == "ns":
-                if value > 9223372036854775807 or value < -9223372036854775808:
-                    raise OutOfBoundsTimedelta(
-                        f"Cannot cast {value} from ns to 'ns' without overflow."
-                    )
-                return _timedelta_from_value_and_reso(cls, value, NPY_FR_ns)
-            elif unit == "D":
-                new_value = int(value) * 86400
-                if new_value > 9223372036854775807 or new_value < -9223372036854775808:
-                    raise OutOfBoundsTimedelta(value)
-                return cls._from_value_and_reso(
-                    new_value, NPY_DATETIMEUNIT.NPY_FR_s
-                )
-            elif unit == "h":
-                new_value = int(value) * 3600
-                if new_value > 9223372036854775807 or new_value < -9223372036854775808:
-                    raise OutOfBoundsTimedelta(value)
-                return cls._from_value_and_reso(
-                    new_value, NPY_DATETIMEUNIT.NPY_FR_s
-                )
-            elif unit == "m":
-                new_value = int(value) * 60
-                if new_value > 9223372036854775807 or new_value < -9223372036854775808:
-                    raise OutOfBoundsTimedelta(value)
-                return cls._from_value_and_reso(
-                    new_value, NPY_DATETIMEUNIT.NPY_FR_s
-                )
-            elif unit == "s":
-                return cls._from_value_and_reso(
-                    value, NPY_DATETIMEUNIT.NPY_FR_s
-                )
-            elif unit == "ms":
-                return cls._from_value_and_reso(
-                    value, NPY_DATETIMEUNIT.NPY_FR_ms
-                )
-            elif unit == "us":
-                return cls._from_value_and_reso(
-                    value, NPY_DATETIMEUNIT.NPY_FR_us
-                )
-            else:
-                td = np.timedelta64(value, unit)
-                new_value = cnp.get_timedelta64_value(td)
-                reso = get_datetime64_unit(td)
-                new_reso = get_supported_reso(reso)
-                if reso != NPY_DATETIMEUNIT.NPY_FR_GENERIC:
-                    try:
-                        new_value = convert_reso(
-                            new_value, reso, new_reso, round_ok=True,
+            if use_fastpath:
+                if value == NPY_NAT:
+                    return NaT
+                if unit is None:
+                    if value > 9223372036854775807 or value < -9223372036854775808:
+                        raise OutOfBoundsTimedelta(
+                            f"Cannot cast {value} from ns to 'ns' without overflow."
                         )
-                    except (OverflowError, OutOfBoundsDatetime) as err:
-                        raise OutOfBoundsTimedelta(td) from err
-                return cls._from_value_and_reso(new_value, reso=new_reso)
+                    return _timedelta_from_value_and_reso(cls, value, NPY_FR_ns)
+                unit = parse_timedelta_unit(unit)
+                if unit == "ns":
+                    if value > 9223372036854775807 or value < -9223372036854775808:
+                        raise OutOfBoundsTimedelta(
+                            f"Cannot cast {value} from ns to 'ns' without overflow."
+                        )
+                    return _timedelta_from_value_and_reso(cls, value, NPY_FR_ns)
+                elif unit == "D":
+                    new_value = int(value) * 86400
+                    if new_value > 9223372036854775807 or new_value < -9223372036854775808:
+                        raise OutOfBoundsTimedelta(value)
+                    return cls._from_value_and_reso(
+                        new_value, NPY_DATETIMEUNIT.NPY_FR_s
+                    )
+                elif unit == "h":
+                    new_value = int(value) * 3600
+                    if new_value > 9223372036854775807 or new_value < -9223372036854775808:
+                        raise OutOfBoundsTimedelta(value)
+                    return cls._from_value_and_reso(
+                        new_value, NPY_DATETIMEUNIT.NPY_FR_s
+                    )
+                elif unit == "m":
+                    new_value = int(value) * 60
+                    if new_value > 9223372036854775807 or new_value < -9223372036854775808:
+                        raise OutOfBoundsTimedelta(value)
+                    return cls._from_value_and_reso(
+                        new_value, NPY_DATETIMEUNIT.NPY_FR_s
+                    )
+                elif unit == "s":
+                    return cls._from_value_and_reso(
+                        value, NPY_DATETIMEUNIT.NPY_FR_s
+                    )
+                elif unit == "ms":
+                    return cls._from_value_and_reso(
+                        value, NPY_DATETIMEUNIT.NPY_FR_ms
+                    )
+                elif unit == "us":
+                    return cls._from_value_and_reso(
+                        value, NPY_DATETIMEUNIT.NPY_FR_us
+                    )
+                else:
+                    td = np.timedelta64(value, unit)
+                    new_value = cnp.get_timedelta64_value(td)
+                    reso = get_datetime64_unit(td)
+                    new_reso = get_supported_reso(reso)
+                    if reso != NPY_DATETIMEUNIT.NPY_FR_GENERIC:
+                        try:
+                            new_value = convert_reso(
+                                new_value, reso, new_reso, round_ok=True,
+                            )
+                        except (OverflowError, OutOfBoundsDatetime) as err:
+                            raise OutOfBoundsTimedelta(td) from err
+                    return cls._from_value_and_reso(new_value, reso=new_reso)
+            elif value != NPY_NAT:
+                unit = parse_timedelta_unit(unit)
+                if unit != "ns":
+                    td = np.timedelta64(value, unit)
+                    return cls(td)
+                value = _numeric_to_td64ns(value, unit)
 
         elif is_float_object(value):
             int_item = int(value)
             if value == int_item:
                 # round float -> treat like a int, try to preserve unit
+                if not use_fastpath:
+                    return cls(int_item, unit=unit)
                 if int_item == NPY_NAT:
                     return NaT
                 unit = parse_timedelta_unit(unit)
