@@ -488,6 +488,43 @@ def test_apply_axis1_homogeneous_mutation_exception_preserved():
         df.apply(mutate_then_read, axis=1)
 
 
+def test_apply_axis0_arm_label_lookup_uses_series_index(monkeypatch):
+    monkeypatch.setattr("pandas.core.apply.IS_ARM", True)
+    df = DataFrame([[1, 10], [2, 20]], index=["B", "A"], columns=["A", "C"])
+
+    result = df.apply(lambda column: column["A"])
+
+    expected = Series([2, 20], index=df.columns)
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis0_arm_retained_series_do_not_alias(monkeypatch):
+    monkeypatch.setattr("pandas.core.apply.IS_ARM", True)
+    df = DataFrame({"A": [1, 2], "B": [10, 20]}, index=["x", "y"])
+    retained = []
+    indexes = []
+
+    def retain_and_relabel(column):
+        retained.append(column)
+        indexes.append(column.index)
+        column.index = ["left", "right"]
+        return column.sum()
+
+    result = df.apply(retain_and_relabel)
+
+    expected = Series([3, 30], index=df.columns)
+    tm.assert_series_equal(result, expected)
+    for index in indexes:
+        tm.assert_index_equal(index, df.index)
+    assert retained[0] is not retained[1]
+    tm.assert_series_equal(
+        retained[0], Series([1, 2], index=["left", "right"], name="A")
+    )
+    tm.assert_series_equal(
+        retained[1], Series([10, 20], index=["left", "right"], name="B")
+    )
+
+
 @pytest.mark.parametrize("setter", ["bracket", "loc", "iloc", "at", "iat"])
 def test_apply_axis1_single_row_homogeneous_mutation_visible(setter):
     df = DataFrame({"A": [1.0], "B": [10.0]})

@@ -5,6 +5,7 @@ from pandas import (
     DataFrame,
     Index,
     Period,
+    RangeIndex,
     Series,
     Timestamp,
     array,
@@ -82,8 +83,7 @@ def test_shallow_copy_non_arm_uses_manager_apply(monkeypatch):
     assert not any(block_copy_calls)
 
 
-def test_arrays_to_mgr_non_arm_runs_validation_path(monkeypatch):
-    monkeypatch.setattr(construction, "IS_ARM", False, raising=False)
+def test_arrays_to_mgr_runs_validation_path(monkeypatch):
     original = construction.ensure_index
     seen = []
 
@@ -106,8 +106,37 @@ def test_arrays_to_mgr_non_arm_runs_validation_path(monkeypatch):
     assert any(obj is columns for obj in seen)
 
 
-def test_arrays_to_mgr_arm_normalizes_range_index(monkeypatch):
-    monkeypatch.setattr(construction, "IS_ARM", True, raising=False)
+def test_arrays_to_mgr_rejects_2d_array_without_integrity_verification():
+    with pytest.raises(ValueError, match="Arrays must be 1-dimensional"):
+        construction.arrays_to_mgr(
+            [np.array([[1, 2]])],
+            Index(["a"]),
+            Index(range(2)),
+            verify_integrity=False,
+        )
+
+
+def test_arrays_to_mgr_rejects_length_mismatch_without_integrity_verification():
+    with pytest.raises(ValueError, match="length matching len\\(index\\)"):
+        construction.arrays_to_mgr(
+            [np.array([1])],
+            Index(["a"]),
+            Index(range(2)),
+            verify_integrity=False,
+        )
+
+
+def test_arrays_to_mgr_rejects_columns_mismatch_without_integrity_verification():
+    with pytest.raises(ValueError, match=r"len\(arrays\) must match len\(columns\)"):
+        construction.arrays_to_mgr(
+            [np.array([1, 2])],
+            Index(["a", "b"]),
+            Index(range(2)),
+            verify_integrity=False,
+        )
+
+
+def test_arrays_to_mgr_normalizes_range_index():
 
     result = DataFrame._from_arrays(
         [np.array([1, 2])],
@@ -116,12 +145,12 @@ def test_arrays_to_mgr_arm_normalizes_range_index(monkeypatch):
         verify_integrity=False,
     )
 
-    assert isinstance(result.index, Index)
+    assert isinstance(result.index, RangeIndex)
+    tm.assert_index_equal(result.index, RangeIndex(2))
     tm.assert_frame_equal(result.copy(), DataFrame({"a": [1, 2]}))
 
 
-def test_arrays_to_mgr_arm_unwraps_numpy_extension_array(monkeypatch):
-    monkeypatch.setattr(construction, "IS_ARM", True, raising=False)
+def test_arrays_to_mgr_unwraps_numpy_extension_array():
     values = array([1, 2], dtype=np.dtype("int64"))
 
     result = DataFrame._from_arrays(
@@ -132,14 +161,11 @@ def test_arrays_to_mgr_arm_unwraps_numpy_extension_array(monkeypatch):
     )
 
     expected = DataFrame({"a": [1, 2]})
+    assert isinstance(result._mgr.iget_values(0), np.ndarray)
     tm.assert_frame_equal(result, expected)
 
 
-def test_arrays_to_mgr_arm_unwraps_unconsolidated_numpy_extension_array(
-    monkeypatch,
-):
-    monkeypatch.setattr(construction, "IS_ARM", True, raising=False)
-    monkeypatch.setattr(managers, "IS_ARM", True, raising=False)
+def test_arrays_to_mgr_unwraps_unconsolidated_numpy_extension_array():
     values = array([1, 2], dtype=np.dtype("int64"))
 
     result = construction.arrays_to_mgr(

@@ -2220,15 +2220,17 @@ class Timedelta(_Timedelta):
                 )
                 raise OutOfBoundsTimedelta(msg) from err
 
-            if total_ns == NPY_NAT:
-                return NaT
-
-            if total_ns > 9223372036854775807 or total_ns < -9223372036854775807:
+            if total_ns > 9223372036854775807 or total_ns < -9223372036854775808:
                 msg = (
                     f"seconds={seconds}, milliseconds={ms}, "
                     f"microseconds={us}, nanoseconds={ns}"
                 )
                 raise OutOfBoundsTimedelta(msg)
+
+            disallow_ambiguous_unit(unit)
+
+            if total_ns == NPY_NAT:
+                return NaT
 
             if "nanoseconds" not in kwargs and total_ns % 1000 == 0:
                 return _timedelta_from_value_and_reso(
