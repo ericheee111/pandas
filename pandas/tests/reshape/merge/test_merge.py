@@ -3356,6 +3356,16 @@ class TestMergeCommonColsFastPath:
         )
         tm.assert_frame_equal(result, expected)
 
+    def test_multi_key_hash_collision(self, monkeypatch):
+        monkeypatch.setattr("pandas.core.reshape.merge.IS_ARM", True)
+        collision = -5404708725711972331
+        left = DataFrame({"a": [0], "b": [0]})
+        right = DataFrame({"a": [collision], "b": [1]})
+
+        result = left.merge(right, on=["a", "b"], how="inner")
+
+        assert result.empty
+
     def test_common_cols_single_col(self):
         left = DataFrame({"key": [1, 2, 3], "a": [10, 20, 30]})
         right = DataFrame({"key": [2, 3, 4], "b": [200, 300, 400]})
