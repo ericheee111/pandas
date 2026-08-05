@@ -589,13 +589,52 @@ cdef class {{name}}HashTable(HashTable):
             Py_ssize_t na_position = self.na_position
             bint uses_mask = self.uses_mask and mask is not None
             bint has_na = False
-            ndarray lidx_arr = np.empty(n, dtype=np.intp)
-            ndarray ridx_arr = np.empty(n, dtype=np.intp)
-            intp_t[::1] lidx_v = lidx_arr
-            intp_t[::1] ridx_v = ridx_arr
+            Int64Vector locs
+            Int64Vector self_locs
+            Int64VectorData *l
+            Int64VectorData *sl
+            ndarray lidx_arr
+            ndarray ridx_arr
+            intp_t[::1] lidx_v
+            intp_t[::1] ridx_v
 
         if self.uses_mask and mask is None:
             raise NotImplementedError  # pragma: no cover
+
+        if not _use_boostkit_fastpaths:
+            locs = Int64Vector()
+            self_locs = Int64Vector()
+            l = &locs.data
+            sl = &self_locs.data
+
+            with nogil:
+                for i in range(n):
+                    if self.uses_mask and mask[i]:
+                        if na_position == -1:
+                            continue
+                        if needs_resize(l.size, l.capacity):
+                            with gil:
+                                locs.resize(locs.data.capacity * 4)
+                                self_locs.resize(locs.data.capacity * 4)
+                        append_data_int64(l, i)
+                        append_data_int64(sl, na_position)
+                    else:
+                        val = {{to_c_type}}(values[i])
+                        k = kh_get_{{dtype}}(self.table, val)
+                        if k != self.table.n_buckets:
+                            if needs_resize(l.size, l.capacity):
+                                with gil:
+                                    locs.resize(locs.data.capacity * 4)
+                                    self_locs.resize(locs.data.capacity * 4)
+                            append_data_int64(l, i)
+                            append_data_int64(sl, self.table.vals[k])
+
+            return self_locs.to_array(), locs.to_array()
+
+        lidx_arr = np.empty(n, dtype=np.intp)
+        ridx_arr = np.empty(n, dtype=np.intp)
+        lidx_v = lidx_arr
+        ridx_v = ridx_arr
 
         # Cheap pre-scan: if this batch has no NA, run a branchless inner loop
         # without per-element mask checks.

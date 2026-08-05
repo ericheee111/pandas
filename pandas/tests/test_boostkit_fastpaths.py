@@ -111,6 +111,22 @@ def test_float64_hashtable_paths_preserve_semantics(
     tm.assert_numpy_array_equal(factorizer_labels, labels)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_hash_inner_join_paths_preserve_semantics(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    _set_fastpaths(monkeypatch, enabled)
+    right = np.array([1, 2, 4, 8], dtype=np.int64)
+    left = np.array([8, 3, 2, 1, 5], dtype=np.int64)
+    factorizer = htable.Int64Factorizer(len(right))
+    factorizer.factorize(right)
+
+    right_indexer, left_indexer = factorizer.hash_inner_join(left)
+
+    tm.assert_numpy_array_equal(right_indexer, np.array([3, 1, 0], dtype=np.intp))
+    tm.assert_numpy_array_equal(left_indexer, np.array([0, 2, 3], dtype=np.intp))
+
+
 @pytest.mark.parametrize("enabled, expected_calls", [(False, 1), (True, 0)])
 def test_sorted_factorize_safe_sort_dispatch(
     monkeypatch: pytest.MonkeyPatch, enabled: bool, expected_calls: int

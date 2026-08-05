@@ -2168,7 +2168,7 @@ class _MergeOperation:
                 # use the common columns
                 left_cols = self.left.columns
                 right_cols = self.right.columns
-                if left_cols.is_unique and right_cols.is_unique:
+                if IS_ARM and left_cols.is_unique and right_cols.is_unique:
                     # Fast path: both frames have unique column names -> the
                     # common columns are a simple isin mask gather on left_cols.
                     # This avoids the expensive Index.intersection + Index.join
@@ -3446,7 +3446,8 @@ def _factorize_keys(
     # dtype dispatch below and the labels/uniques allocation that factorize()
     # would do (only the hash table is needed for the probe).
     if (
-        how == "inner"
+        IS_ARM
+        and how == "inner"
         and not sort
         and isinstance(lk, BaseMaskedArray)
         and isinstance(rk, BaseMaskedArray)
