@@ -187,8 +187,12 @@ def test_cross_merge_arm_pyarrow_multi_chunk():
     result = _cross_merge_arm(left, right, ("_x", "_y"))
     expected = DataFrame(
         {
-            "a": pd.array(["x", "x", "y", "y"], dtype="string[pyarrow]"),
-            "b": pd.array(["m", "n", "m", "n"], dtype="string[pyarrow]"),
+            "a": pd.arrays.ArrowExtensionArray(
+                pa.array(["x", "x", "y", "y"])
+            ),
+            "b": pd.arrays.ArrowExtensionArray(
+                pa.array(["m", "n", "m", "n"])
+            ),
         }
     )
     tm.assert_frame_equal(result, expected)
