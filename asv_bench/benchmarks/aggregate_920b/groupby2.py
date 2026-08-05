@@ -810,37 +810,25 @@ from .._aggregate_common import (
 from .hash_functions2 import _Official_hash_functions_Float64GroupIndex
 
 
-class CountMultiDtype(_AggregateBenchmark):
-    """Aggregate groupby.CountMultiDtype with frozen 920b weights."""
+class CountMulti(_AggregateBenchmark):
+    """Aggregate groupby.CountMulti with frozen 920b weights."""
 
     case_params = (
         _select_case_params(_Official_groupby_CountMultiDtype, 'time_multi_count', ()),  # groupby.CountMultiDtype.time_multi_count
-    )
-    run_repeat = (
-        1,  # groupby.CountMultiDtype.time_multi_count
-    )
-    case_methods = (
-        'time_multi_count',
-    )
-    case_types = (_Official_groupby_CountMultiDtype,)
-
-
-class CountMultiInt(_AggregateBenchmark):
-    """Aggregate groupby.CountMultiInt with frozen 920b weights."""
-
-    case_params = (
         _select_case_params(_Official_groupby_CountMultiInt, 'time_multi_int_count', ()),  # groupby.CountMultiInt.time_multi_int_count
         _select_case_params(_Official_groupby_CountMultiInt, 'time_multi_int_nunique', ()),  # groupby.CountMultiInt.time_multi_int_nunique
     )
     run_repeat = (
+        1,  # groupby.CountMultiDtype.time_multi_count
         1,  # groupby.CountMultiInt.time_multi_int_count
         1,  # groupby.CountMultiInt.time_multi_int_nunique
     )
     case_methods = (
+        'time_multi_count',
         'time_multi_int_count',
         'time_multi_int_nunique',
     )
-    case_types = (_Official_groupby_CountMultiInt, _Official_groupby_CountMultiInt,)
+    case_types = (_Official_groupby_CountMultiDtype, _Official_groupby_CountMultiInt, _Official_groupby_CountMultiInt,)
 
 
 class GroupByCythonAgg(_AggregateBenchmark):
@@ -904,10 +892,9 @@ class GroupByCythonAggEaDtypes(_AggregateBenchmark):
 
 
 class GroupByMethods(_AggregateBenchmark):
-    """Aggregate groupby operations with frozen 920b weights."""
+    """Aggregate groupby.GroupByMethods with frozen 920b weights."""
 
     case_params = (
-        _select_case_params(_Official_hash_functions_Float64GroupIndex, 'time_groupby', ()),  # hash_functions.Float64GroupIndex.time_groupby
         _select_case_params(_Official_groupby_GroupByMethods, 'time_dtype_as_group', (2, 3, 0, 0, 0)),  # groupby.GroupByMethods.time_dtype_as_group('float', 'count', 'direct', 1, 'cython')
         _select_case_params(_Official_groupby_GroupByMethods, 'time_dtype_as_group', (2, 18, 0, 0, 0)),  # groupby.GroupByMethods.time_dtype_as_group('float', 'mean', 'direct', 1, 'cython')
         _select_case_params(_Official_groupby_GroupByMethods, 'time_dtype_as_group', (2, 19, 0, 0, 0)),  # groupby.GroupByMethods.time_dtype_as_group('float', 'nunique', 'direct', 1, 'cython')
@@ -920,7 +907,6 @@ class GroupByMethods(_AggregateBenchmark):
         _select_case_params(_Official_groupby_GroupByMethods, 'time_dtype_as_group', (3, 19, 0, 0, 0)),  # groupby.GroupByMethods.time_dtype_as_group('object', 'nunique', 'direct', 1, 'cython')
     )
     run_repeat = (
-        1,  # hash_functions.Float64GroupIndex.time_groupby
         5,  # groupby.GroupByMethods.time_dtype_as_group('float', 'count', 'direct', 1, 'cython')
         2,  # groupby.GroupByMethods.time_dtype_as_group('float', 'mean', 'direct', 1, 'cython')
         1,  # groupby.GroupByMethods.time_dtype_as_group('float', 'nunique', 'direct', 1, 'cython')
@@ -933,7 +919,6 @@ class GroupByMethods(_AggregateBenchmark):
         1,  # groupby.GroupByMethods.time_dtype_as_group('object', 'nunique', 'direct', 1, 'cython')
     )
     case_methods = (
-        'time_groupby',
         'time_dtype_as_group',
         'time_dtype_as_group',
         'time_dtype_as_group',
@@ -945,7 +930,7 @@ class GroupByMethods(_AggregateBenchmark):
         'time_dtype_as_group',
         'time_dtype_as_group',
     )
-    case_types = (_Official_hash_functions_Float64GroupIndex, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods,)
+    case_types = (_Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods, _Official_groupby_GroupByMethods,)
 
 
 class MultiColumn(_AggregateBenchmark):
@@ -954,13 +939,16 @@ class MultiColumn(_AggregateBenchmark):
     case_params = (
         _select_case_params(_Official_groupby_MultiColumn, 'time_col_select_str_sum', ()),  # groupby.MultiColumn.time_col_select_str_sum
         _select_case_params(_Official_groupby_MultiColumn, 'time_cython_sum', ()),  # groupby.MultiColumn.time_cython_sum
+        _select_case_params(_Official_hash_functions_Float64GroupIndex, 'time_groupby', ()),  # hash_functions.Float64GroupIndex.time_groupby
     )
     run_repeat = (
         1,  # groupby.MultiColumn.time_col_select_str_sum
         1,  # groupby.MultiColumn.time_cython_sum
+        1,  # hash_functions.Float64GroupIndex.time_groupby
     )
     case_methods = (
         'time_col_select_str_sum',
         'time_cython_sum',
+        'time_groupby',
     )
-    case_types = (_Official_groupby_MultiColumn, _Official_groupby_MultiColumn,)
+    case_types = (_Official_groupby_MultiColumn, _Official_groupby_MultiColumn, _Official_hash_functions_Float64GroupIndex,)

@@ -378,6 +378,8 @@ from .._aggregate_common import (
     select_case_params as _select_case_params,
 )
 
+from .categoricals2 import _Official_categoricals_ValueCounts
+
 
 class Fillna(_AggregateBenchmark):
     """Aggregate series_methods.Fillna with frozen 920b weights."""
@@ -440,11 +442,15 @@ class ValueCounts(_AggregateBenchmark):
     """Aggregate series_methods.ValueCounts with frozen 920b weights."""
 
     case_params = (
+        _select_case_params(_Official_categoricals_ValueCounts, 'time_value_counts', (1,)),  # categoricals.ValueCounts.time_value_counts(False)
+        _select_case_params(_Official_categoricals_ValueCounts, 'time_value_counts', (0,)),  # categoricals.ValueCounts.time_value_counts(True)
         _select_case_params(_Official_series_methods_ValueCounts, 'time_value_counts', (2, 2)),  # series_methods.ValueCounts.time_value_counts(100000, 'float')
         _select_case_params(_Official_series_methods_ValueCounts, 'time_value_counts', (2, 0)),  # series_methods.ValueCounts.time_value_counts(100000, 'int')
         _select_case_params(_Official_series_methods_ValueCounts, 'time_value_counts', (2, 3)),  # series_methods.ValueCounts.time_value_counts(100000, 'object')
     )
     run_repeat = (
+        31,  # categoricals.ValueCounts.time_value_counts(False)
+        31,  # categoricals.ValueCounts.time_value_counts(True)
         4,  # series_methods.ValueCounts.time_value_counts(100000, 'float')
         6,  # series_methods.ValueCounts.time_value_counts(100000, 'int')
         1,  # series_methods.ValueCounts.time_value_counts(100000, 'object')
@@ -453,5 +459,7 @@ class ValueCounts(_AggregateBenchmark):
         'time_value_counts',
         'time_value_counts',
         'time_value_counts',
+        'time_value_counts',
+        'time_value_counts',
     )
-    case_types = (_Official_series_methods_ValueCounts, _Official_series_methods_ValueCounts, _Official_series_methods_ValueCounts,)
+    case_types = (_Official_categoricals_ValueCounts, _Official_categoricals_ValueCounts, _Official_series_methods_ValueCounts, _Official_series_methods_ValueCounts, _Official_series_methods_ValueCounts,)

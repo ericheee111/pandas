@@ -85,29 +85,34 @@ from .._aggregate_common import (
     select_case_params as _select_case_params,
 )
 
+from .frame_methods2 import _Official_frame_methods_SeriesNuniqueWithNan
+
 
 class Unique(_AggregateBenchmark):
     """Aggregate hash_functions.Unique with frozen 920b weights."""
 
     case_params = (
+        _select_case_params(_Official_frame_methods_SeriesNuniqueWithNan, 'time_series_nunique_nan', ()),  # frame_methods.SeriesNuniqueWithNan.time_series_nunique_nan
         _select_case_params(_Official_hash_functions_Unique, 'time_unique', (1,)),  # hash_functions.Unique.time_unique('Float64')
         _select_case_params(_Official_hash_functions_Unique, 'time_unique', (0,)),  # hash_functions.Unique.time_unique('Int64')
         _select_case_params(_Official_hash_functions_Unique, 'time_unique_with_duplicates', (1,)),  # hash_functions.Unique.time_unique_with_duplicates('Float64')
         _select_case_params(_Official_hash_functions_Unique, 'time_unique_with_duplicates', (0,)),  # hash_functions.Unique.time_unique_with_duplicates('Int64')
     )
     run_repeat = (
+        1,  # frame_methods.SeriesNuniqueWithNan.time_series_nunique_nan
         1,  # hash_functions.Unique.time_unique('Float64')
         3,  # hash_functions.Unique.time_unique('Int64')
         2,  # hash_functions.Unique.time_unique_with_duplicates('Float64')
         4,  # hash_functions.Unique.time_unique_with_duplicates('Int64')
     )
     case_methods = (
+        'time_series_nunique_nan',
         'time_unique',
         'time_unique',
         'time_unique_with_duplicates',
         'time_unique_with_duplicates',
     )
-    case_types = (_Official_hash_functions_Unique, _Official_hash_functions_Unique, _Official_hash_functions_Unique, _Official_hash_functions_Unique,)
+    case_types = (_Official_frame_methods_SeriesNuniqueWithNan, _Official_hash_functions_Unique, _Official_hash_functions_Unique, _Official_hash_functions_Unique, _Official_hash_functions_Unique,)
 
 
 class UniqueAndFactorizeArange(_AggregateBenchmark):
