@@ -4,6 +4,7 @@ import pytest
 from pandas import (
     DataFrame,
     Index,
+    MultiIndex,
     Period,
     Series,
     Timestamp,
@@ -183,6 +184,87 @@ def test_dropna_non_arm_avoids_nanvalidity(monkeypatch):
     tm.assert_frame_equal(result, df.iloc[[1]])
 
 
+def test_multiindex_arithmetic_non_arm_avoids_broadcast_fastpath(monkeypatch):
+    monkeypatch.setattr(frame, "IS_ARM", False)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("non-ARM arithmetic used MultiIndex broadcast fast path")
+
+    monkeypatch.setattr(DataFrame, "_arith_method_with_multiindex_level", forbidden)
+    index = MultiIndex.from_product(
+        [["a", "b"], [0, 1]], names=["group", "position"]
+    )
+    left = DataFrame({"value": [1, 2, 3, 4]}, index=index)
+    right = DataFrame({"value": [10, 20]}, index=Index(["a", "b"], name="group"))
+
+    result = left.add(right, level="group")
+
+    expected = DataFrame({"value": [11, 12, 23, 24]}, index=index)
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("op", ["add", "sub", "mul", "div"])
+def test_multiindex_arithmetic_arm_matches_legacy(monkeypatch, op):
+    index = MultiIndex.from_product(
+        [["a", "b"], [0, 1]], names=["group", "position"]
+    )
+    left = DataFrame({"value": [2.0, 4.0, 6.0, 8.0]}, index=index)
+    right = DataFrame({"value": [2.0, 4.0]}, index=Index(["a", "b"]))
+
+    monkeypatch.setattr(frame, "IS_ARM", False)
+    expected = getattr(left, op)(right, level="group")
+    calls = []
+    original = DataFrame._arith_method_with_multiindex_level
+
+    def tracked(self, *args, **kwargs):
+        calls.append(None)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(DataFrame, "_arith_method_with_multiindex_level", tracked)
+    monkeypatch.setattr(frame, "IS_ARM", True)
+    result = getattr(left, op)(right, level="group")
+
+    assert calls == [None]
+    tm.assert_frame_equal(result, expected)
+
+
+def test_count_float_block_non_arm_avoids_nancount(monkeypatch):
+    monkeypatch.setattr(frame, "IS_ARM", False)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("non-ARM count used nancount_2d")
+
+    monkeypatch.setattr(DataFrame, "_nancount_float_block", forbidden)
+    df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
+
+    result = df.count(axis=1)
+
+    expected = Series([1, 1])
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_count_float_block_arm_matches_legacy(monkeypatch, axis, dtype):
+    df = DataFrame(np.array([[1.0, np.nan], [np.nan, 2.0]], dtype=dtype))
+
+    monkeypatch.setattr(frame, "IS_ARM", False)
+    expected = df.count(axis=axis)
+    calls = []
+    original = DataFrame._nancount_float_block
+
+    def tracked(self, *args, **kwargs):
+        calls.append(None)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(DataFrame, "_nancount_float_block", tracked)
+    monkeypatch.setattr(frame, "IS_ARM", True)
+    result = df.count(axis=axis)
+
+    assert calls == [None]
+    tm.assert_series_equal(result, expected)
+
+
 def test_fillna_extension_blocks_non_arm_avoids_batch_helper(monkeypatch):
     monkeypatch.setattr(generic, "IS_ARM", False, raising=False)
 
@@ -204,6 +286,49 @@ def test_fillna_extension_blocks_non_arm_avoids_batch_helper(monkeypatch):
             "b": Series([1.5, 2.5], dtype="Float64"),
         }
     )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_fillna_numpy_block_non_arm_avoids_batch_fastpath(monkeypatch):
+    monkeypatch.setattr(generic, "IS_ARM", False, raising=False)
+    original = managers.BlockManager.fillna
+
+    def reject_2d_fill_values(self, value, limit, inplace):
+        if isinstance(value, np.ndarray) and value.ndim == 2:
+            pytest.fail("non-ARM NumPy fillna used the batch fast path")
+        return original(self, value=value, limit=limit, inplace=inplace)
+
+    monkeypatch.setattr(managers.BlockManager, "fillna", reject_2d_fill_values)
+    df = DataFrame({"a": [1.0, np.nan], "b": [np.nan, 2.0]})
+
+    result = df.fillna({"a": 0.0, "b": 1.0})
+
+    expected = DataFrame({"a": [1.0, 0.0], "b": [1.0, 2.0]})
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64", "object"])
+def test_fillna_numpy_block_arm_matches_legacy(monkeypatch, dtype):
+    df = DataFrame(
+        np.array([[1.0, np.nan], [np.nan, 2.0]], dtype=dtype), columns=["a", "b"]
+    )
+    values = {"a": 0, "b": 1}
+
+    monkeypatch.setattr(generic, "IS_ARM", False, raising=False)
+    expected = df.fillna(values)
+    batch_calls = []
+    original = managers.BlockManager.fillna
+
+    def tracked(self, value, limit, inplace):
+        if isinstance(value, np.ndarray) and value.ndim == 2:
+            batch_calls.append(None)
+        return original(self, value=value, limit=limit, inplace=inplace)
+
+    monkeypatch.setattr(managers.BlockManager, "fillna", tracked)
+    monkeypatch.setattr(generic, "IS_ARM", True, raising=False)
+    result = df.fillna(values)
+
+    assert batch_calls == [None]
     tm.assert_frame_equal(result, expected)
 
 
