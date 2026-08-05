@@ -23,7 +23,6 @@ from pandas.compat import is_platform_arm
 from pandas.compat._arch import IS_ARM as _IS_AARCH64
 
 _IS_ARM = is_platform_arm()
-_REDUCEAT_GUARD_PREFIX = 8
 
 from pandas._libs import (
     NaT,
@@ -82,19 +81,6 @@ if TYPE_CHECKING:
     )
 
     from pandas.core.generic import NDFrame
-
-
-def _is_reduceat_applicable(comp_ids: np.ndarray, ngroups: int) -> bool:
-    if comp_ids[0] != 0 or comp_ids[-1] != ngroups - 1:
-        return False
-
-    if len(comp_ids) >= _REDUCEAT_GUARD_PREFIX:
-        for i in range(_REDUCEAT_GUARD_PREFIX - 1):
-            if comp_ids[i] > comp_ids[i + 1]:
-                return False
-
-    diff = np.diff(comp_ids)
-    return (diff >= 0).all() and np.count_nonzero(diff) + 1 == ngroups
 
 
 def check_result_array(obj, dtype) -> None:
@@ -418,44 +404,6 @@ class WrappedCythonOp:
                         values[mask] = True
             values = values.astype(bool, copy=False).view(np.int8)
             is_numeric = True
-
-        # Fast path: use np.fmax/fmin.reduceat for float64 max/min.
-        # NumPy's reduceat uses SIMD-optimized C internally, much faster
-        # than the Cython scalar loop. np.fmax handles NaN correctly
-        # (fmax(NaN, x) = x, same as skipna=True).
-        if (
-            _IS_ARM
-            and self.kind == "aggregate"
-            and self.how in ("max", "min")
-            and dtype == np.dtype(np.float64)
-            and mask is None
-            and result_mask is None
-            and min_count <= 1
-            and kwargs.get("skipna", True)
-            and not is_datetimelike
-            and ngroups > 0
-            and len(comp_ids) > 0
-        ):
-            if _is_reduceat_applicable(comp_ids, ngroups):
-                group_starts = np.searchsorted(comp_ids, np.arange(ngroups))
-                reduce_func = np.fmax if self.how == "max" else np.fmin
-                if values.ndim == 2:
-                    # Block.values passes data in (cols, rows) layout, so rows
-                    # are along axis 1. len(comp_ids) == n_rows identifies the
-                    # rows axis. See ops.py:444 (values = values.T) and
-                    # blocks.py:347 (func(self.values)) for the layout proof.
-                    rows_axis = 1 if values.shape[1] == len(comp_ids) else 0
-                    result = reduce_func.reduceat(values, group_starts, axis=rows_axis)
-                    return result if rows_axis == 1 else result.T
-                else:
-                    # unreachable: _cython_op_ndim_compat always passes 2D values
-                    return reduce_func.reduceat(values, group_starts)
-
-        # NOTE: float64 mean fast path (np.add.reduceat) removed — it replaced
-        # Cython Kahan summation with plain pairwise sum, causing ulp-level
-        # precision loss and ARM/x86 result divergence. Reverted to the Cython
-        # group_mean path below to preserve precision + cross-arch consistency.
-        # max/min (fmax/fmin above) are exact and kept.
 
         values = values.T
         if mask is not None:
