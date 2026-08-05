@@ -174,9 +174,9 @@ def test_merge_masked_ea_non_arm_avoids_hash_fastpath(monkeypatch):
 
     expected = pd.DataFrame(
         {
-            "key": pd.Series([1, 1, None], dtype="Int64"),
-            "left": [0, 3, 1],
-            "right": [0, 0, 1],
+            "key": pd.Series([1, None, 1], dtype="Int64"),
+            "left": [0, 1, 3],
+            "right": [0, 1, 0],
         }
     )
     tm.assert_frame_equal(result, expected)
