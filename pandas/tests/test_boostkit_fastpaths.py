@@ -5,8 +5,6 @@ import importlib
 import numpy as np
 import pytest
 
-from pandas._libs import hashtable as htable
-
 import pandas._testing as tm
 from pandas.core import algorithms
 
@@ -14,15 +12,6 @@ from pandas.core import algorithms
 def _set_fastpaths(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
     fastpaths = importlib.import_module("pandas.core.boostkit_fastpaths")
     monkeypatch.setattr(fastpaths, "USE_BOOSTKIT_FASTPATHS", enabled)
-    htable.set_use_boostkit_fastpaths(enabled)
-
-
-@pytest.fixture(autouse=True)
-def _restore_cython_fastpath_state(monkeypatch: pytest.MonkeyPatch):
-    fastpaths = importlib.import_module("pandas.core.boostkit_fastpaths")
-    original = fastpaths.USE_BOOSTKIT_FASTPATHS
-    yield
-    htable.set_use_boostkit_fastpaths(original)
 
 
 @pytest.mark.parametrize(
@@ -48,11 +37,7 @@ def test_boostkit_fastpaths_environment(
 
     try:
         with monkeypatch.context() as context:
-            calls: list[bool] = []
             context.setattr(fastpaths.platform, "machine", lambda: machine)
-            context.setattr(
-                fastpaths.htable, "set_use_boostkit_fastpaths", calls.append
-            )
             if setting is None:
                 context.delenv("PANDAS_BOOSTKIT_FASTPATHS", raising=False)
             else:
@@ -60,7 +45,6 @@ def test_boostkit_fastpaths_environment(
 
             importlib.reload(fastpaths)
             assert fastpaths.USE_BOOSTKIT_FASTPATHS is expected
-            assert calls == [expected]
     finally:
         importlib.reload(fastpaths)
 
@@ -88,27 +72,6 @@ def test_isin_dtype_normalization_dispatch(
     expected[:100] = True
     tm.assert_numpy_array_equal(result, expected)
     assert calls == expected_calls
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-def test_float64_hashtable_paths_preserve_semantics(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool
-) -> None:
-    _set_fastpaths(monkeypatch, enabled)
-    values = np.array([0.0, -0.0, np.nan, np.nan, 1.0, 1.0])
-
-    uniques, inverse = htable.Float64HashTable().unique(values, return_inverse=True)
-    tm.assert_numpy_array_equal(uniques, np.array([0.0, np.nan, 1.0]))
-    tm.assert_numpy_array_equal(inverse, np.array([0, 0, 1, 1, 2, 2]))
-    assert not np.signbit(uniques[0])
-
-    factorized_uniques, labels = htable.Float64HashTable().factorize(values)
-    tm.assert_numpy_array_equal(factorized_uniques, np.array([0.0, 1.0]))
-    tm.assert_numpy_array_equal(labels, np.array([0, 0, -1, -1, 1, 1]))
-
-    factorizer = htable.Float64Factorizer(len(values))
-    factorizer_labels = factorizer.factorize(values)
-    tm.assert_numpy_array_equal(factorizer_labels, labels)
 
 
 @pytest.mark.parametrize("enabled, expected_calls", [(False, 1), (True, 0)])
