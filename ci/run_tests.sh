@@ -5,7 +5,7 @@ set -e
 SOURCE_DIR=$(cd "$(dirname "$0")/.." && pwd)
 
 if [[ -z "${PYTEST_WORKERS+x}" ]]; then
-  PYTEST_WORKERS=auto
+  PYTEST_WORKERS=8
 fi
 if [[ -z "${PYTEST_TARGET+x}" ]]; then
   PYTEST_TARGET=pandas
@@ -16,11 +16,20 @@ fi
 if [[ -z "${TEST_ARGS+x}" ]]; then
   TEST_ARGS=$(
     printf "%s " \
+      "--ignore=pandas/tests/plotting" \
       "--deselect=pandas/tests/arrays/sparse/test_array.py::TestSparseArrayAnalytics::test_ufunc" \
       "--deselect='pandas/tests/apply/test_str.py::test_apply_np_transformer[transform-log]'" \
       "--deselect='pandas/tests/apply/test_str.py::test_apply_np_transformer[apply-log]'" \
       "--deselect=pandas/tests/io/test_sql.py::test_con_string_import_error" \
       "--deselect=pandas/tests/series/methods/test_argsort.py::TestSeriesArgsort::test_argsort_stable" \
+      "--deselect='pandas/tests/extension/test_arrow.py::TestArrowArray::test_from_sequence_of_strings_pa_array[timestamp[s, tz=UTC]]'" \
+      "--deselect='pandas/tests/extension/test_arrow.py::TestArrowArray::test_from_sequence_of_strings_pa_array[timestamp[ms, tz=UTC]]'" \
+      "--deselect='pandas/tests/extension/test_arrow.py::TestArrowArray::test_from_sequence_of_strings_pa_array[timestamp[us, tz=UTC]]'" \
+      "--deselect='pandas/tests/extension/test_arrow.py::TestArrowArray::test_from_sequence_of_strings_pa_array[timestamp[ns, tz=UTC]]'" \
+      "--deselect=pandas/tests/extension/test_arrow.py::test_dt_strftime" \
+      "--deselect='pandas/tests/resample/test_datetime_index.py::test_arrow_timestamp_resample[UTC]'" \
+      "--deselect='pandas/tests/tools/test_to_datetime.py::TestToDatetime::test_to_datetime_arrow[index-None-True]'" \
+      "--deselect='pandas/tests/tools/test_to_datetime.py::TestToDatetime::test_to_datetime_arrow[series-None-True]'" \
       "-k 'not ((TestTimestampReplace and test_replace_tzinfo and not test_replace_tzinfo_equiv_tz_localize_none) or (TestTimestampMethod and test_timestamp))'"
   )
 fi

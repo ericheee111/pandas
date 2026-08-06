@@ -176,9 +176,29 @@ def test_cross_merge_arm_pyarrow_direct():
     tm.assert_frame_equal(result, expected)
 
 
+def test_cross_merge_arm_pyarrow_single_chunk():
+    pa = pytest.importorskip("pyarrow")
+    from pandas.core.reshape.merge import _cross_merge_arm
+    from pandas.core.dtypes.dtypes import ArrowDtype
+
+    left_arr = pa.chunked_array([["x", "y"]])
+    right_arr = pa.chunked_array([["m", "n"]])
+    left = DataFrame({"a": pd.arrays.ArrowExtensionArray(left_arr)})
+    right = DataFrame({"b": pd.arrays.ArrowExtensionArray(right_arr)})
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.array(["x", "x", "y", "y"], dtype=ArrowDtype(pa.string())),
+            "b": pd.array(["m", "n", "m", "n"], dtype=ArrowDtype(pa.string())),
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
 def test_cross_merge_arm_pyarrow_multi_chunk():
     pa = pytest.importorskip("pyarrow")
     from pandas.core.reshape.merge import _cross_merge_arm
+    from pandas.core.dtypes.dtypes import ArrowDtype
 
     left_arr = pa.chunked_array([["x"], ["y"]])
     right_arr = pa.chunked_array([["m"], ["n"]])
@@ -187,8 +207,8 @@ def test_cross_merge_arm_pyarrow_multi_chunk():
     result = _cross_merge_arm(left, right, ("_x", "_y"))
     expected = DataFrame(
         {
-            "a": pd.array(["x", "x", "y", "y"], dtype="string[pyarrow]"),
-            "b": pd.array(["m", "n", "m", "n"], dtype="string[pyarrow]"),
+            "a": pd.array(["x", "x", "y", "y"], dtype=ArrowDtype(pa.string())),
+            "b": pd.array(["m", "n", "m", "n"], dtype=ArrowDtype(pa.string())),
         }
     )
     tm.assert_frame_equal(result, expected)

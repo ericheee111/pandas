@@ -573,8 +573,9 @@ def _cross_merge_arm(
             import pyarrow as pa
 
             if pa_arr.num_chunks != 1:
-                pa_arr = pa_arr.combine_chunks()
-            chunk = pa_arr.chunk(0)
+                chunk = pa_arr.combine_chunks()
+            else:
+                chunk = pa_arr.chunk(0)
             if is_left:
                 new_ca = pa.chunked_array(
                     [pa.repeat(chunk[i], n_other) for i in range(len(chunk))]
