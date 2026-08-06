@@ -1,7 +1,7 @@
 """
 Direct libgroupby tests for ``group_last``.
 
-These exercise the AArch64 reverse-scan fastpaths as well as the generic
+These exercise the AArch64 reverse-scan fastpath as well as the generic
 fallback path.  Every case is cross-checked against an independent reference
 and, where both paths are reachable, against the fallback path itself.
 """
@@ -9,12 +9,8 @@ and, where both paths are reachable, against the fallback path itself.
 import numpy as np
 import pytest
 
-from pandas._libs.groupby import (
-    group_last,
-    group_nth,
-)
+from pandas._libs.groupby import group_last
 
-from pandas import DataFrame
 import pandas._testing as tm
 
 
@@ -69,30 +65,6 @@ def _run_group_last(
         min_count=min_count,
         is_datetimelike=is_datetimelike,
         skipna=skipna,
-    )
-    return out, counts, result_mask
-
-
-def _run_group_nth(values, labels, ngroups, mask=None):
-    """Call libgroupby.group_nth(rank=1) with fresh output/counts buffers."""
-    values = np.asarray(values)
-    if values.ndim == 1:
-        values = values[:, None]
-    out = np.empty((ngroups, values.shape[1]), dtype=values.dtype)
-    counts = np.zeros(ngroups, dtype=np.int64)
-    result_mask = None
-    if mask is not None:
-        result_mask = np.zeros((ngroups, values.shape[1]), dtype=np.uint8)
-    group_nth(
-        out,
-        counts,
-        values,
-        labels,
-        mask,
-        result_mask=result_mask,
-        min_count=1,
-        rank=1,
-        skipna=True,
     )
     return out, counts, result_mask
 
@@ -399,109 +371,3 @@ def test_last_fastpath_equals_fallback():
 
     tm.assert_numpy_array_equal(counts1, counts2)
     tm.assert_almost_equal(out1[:, 0], out2[:, 0], rtol=1e-6)
-
-
-@pytest.mark.parametrize("how", ["first", "last"])
-def test_first_last_multi_column_completion_path(how):
-    """Exercise the multi-column completion path with missing values."""
-    n, ngroups, ncols = 160, 10, 2
-    labels = np.arange(n, dtype=np.intp) % ngroups
-    values = np.arange(n * ncols, dtype=np.float64).reshape(n, ncols)
-    values[::13, 0] = np.nan
-    values[::17, 1] = np.nan
-
-    if how == "first":
-        result, counts, _ = _run_group_nth(values, labels, ngroups)
-        expected = DataFrame(values).groupby(labels).first().to_numpy()
-    else:
-        result, counts, _ = _run_group_last(values, labels, ngroups)
-        expected = DataFrame(values).groupby(labels).last().to_numpy()
-
-    tm.assert_numpy_array_equal(counts, np.full(ngroups, n // ngroups))
-    tm.assert_numpy_array_equal(result, expected)
-
-
-@pytest.mark.parametrize("how", ["first", "last"])
-def test_first_last_object_completion_path(how):
-    """Exercise the object path, including None values."""
-    n, ngroups = 160, 10
-    labels = np.arange(n, dtype=np.intp) % ngroups
-    values = np.full((n, 2), "value", dtype=object)
-    values[::11, 0] = None
-    values[::13, 1] = None
-
-    if how == "first":
-        result, counts, _ = _run_group_nth(values, labels, ngroups)
-        expected = DataFrame(values).groupby(labels).first().to_numpy()
-    else:
-        result, counts, _ = _run_group_last(values, labels, ngroups)
-        expected = DataFrame(values).groupby(labels).last().to_numpy()
-
-    tm.assert_numpy_array_equal(counts, np.full(ngroups, n // ngroups))
-    tm.assert_numpy_array_equal(result, expected)
-
-
-@pytest.mark.parametrize("how", ["first", "last"])
-def test_first_last_mask_completion_path(how):
-    """Exercise the mask path and an entirely masked group-column pair."""
-    n, ngroups = 160, 10
-    labels = np.arange(n, dtype=np.intp) % ngroups
-    values = np.arange(n * 2, dtype=np.int64).reshape(n, 2)
-    mask = np.zeros_like(values, dtype=np.uint8)
-    mask[labels == 0, 1] = 1
-
-    if how == "first":
-        result, counts, result_mask = _run_group_nth(values, labels, ngroups, mask=mask)
-    else:
-        result, counts, result_mask = _run_group_last(
-            values, labels, ngroups, mask=mask
-        )
-
-    tm.assert_numpy_array_equal(counts, np.full(ngroups, n // ngroups))
-    assert result_mask[0, 1] == 1
-    assert result[0, 1] == 0
-    assert not result_mask[1:, :].any()
-
-
-@pytest.mark.parametrize("how", ["first", "last"])
-def test_first_last_probe_fallback_restores_counts(how):
-    """Check counts after the completion probe falls back."""
-    n, ngroups = 100, 10
-    labels = np.arange(n, dtype=np.intp) % ngroups
-    values = np.full((n, 2), np.nan)
-    if how == "first":
-        # The forward probe sees only missing values.
-        values[-ngroups:, :] = 1.0
-        result, counts, _ = _run_group_nth(values, labels, ngroups)
-    else:
-        # The reverse probe sees only missing values.
-        values[:ngroups, :] = 1.0
-        result, counts, _ = _run_group_last(values, labels, ngroups)
-
-    tm.assert_numpy_array_equal(counts, np.full(ngroups, n // ngroups))
-    tm.assert_numpy_array_equal(result, np.ones((ngroups, 2)))
-
-
-@pytest.mark.parametrize("how", ["first", "last"])
-@pytest.mark.parametrize("scenario", ["high_cardinality", "all_na"])
-def test_first_last_guard_fallback(how, scenario):
-    """Exercise the workload guard and an all-missing probe fallback."""
-    ngroups = 10
-    if scenario == "high_cardinality":
-        # N < 8 * ncounts forces the workload guard fallback.
-        n = 40
-        values = np.arange(n * 2, dtype=np.float64).reshape(n, 2)
-    else:
-        n = 100
-        values = np.full((n, 2), np.nan)
-    labels = np.arange(n, dtype=np.intp) % ngroups
-
-    if how == "first":
-        result, counts, _ = _run_group_nth(values, labels, ngroups)
-        expected = DataFrame(values).groupby(labels).first().to_numpy()
-    else:
-        result, counts, _ = _run_group_last(values, labels, ngroups)
-        expected = DataFrame(values).groupby(labels).last().to_numpy()
-
-    tm.assert_numpy_array_equal(counts, np.full(ngroups, n // ngroups))
-    tm.assert_numpy_array_equal(result, expected)
