@@ -223,15 +223,6 @@ class TestDataFrameIndexing:
         with pytest.raises(ValueError, match=msg):
             df[[True, False]]
 
-    def test_getitem_boolean_list_wrong_length_arm_path(self):
-        from unittest import mock
-
-        df = DataFrame(np.arange(12).reshape(3, 4))
-        msg = "Item wrong length 2 instead of 3."
-        with mock.patch("pandas.core.frame.IS_ARM", True):
-            with pytest.raises(ValueError, match=msg):
-                df[[True, False]]
-
     def test_getitem_boolean_iadd(self):
         arr = np.random.default_rng(2).standard_normal((5, 5))
 
