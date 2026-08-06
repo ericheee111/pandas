@@ -53,12 +53,6 @@ SIZE_HINT_LIMIT = (1 << 20) + 7
 
 
 cdef Py_ssize_t _INIT_VEC_CAP = 128
-cdef bint _use_boostkit_fastpaths = False
-
-
-def set_use_boostkit_fastpaths(bint value):
-    global _use_boostkit_fastpaths
-    _use_boostkit_fastpaths = value
 
 
 include "hashtable_class_helper.pxi"

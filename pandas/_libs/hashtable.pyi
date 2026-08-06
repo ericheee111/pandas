@@ -9,7 +9,6 @@ import numpy as np
 
 from pandas._typing import npt
 
-def set_use_boostkit_fastpaths(value: bool) -> None: ...
 def unique_label_indices(
     labels: np.ndarray,  # const int64_t[:]
 ) -> np.ndarray: ...
