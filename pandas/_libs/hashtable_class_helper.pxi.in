@@ -569,6 +569,46 @@ cdef class {{name}}HashTable(HashTable):
 
     @cython.wraparound(False)
     @cython.boundscheck(False)
+    def hash_inner_join_legacy(self, const {{dtype}}_t[:] values, const uint8_t[:] mask = None) -> tuple[ndarray, ndarray]:
+        cdef:
+            Py_ssize_t i, n = len(values)
+            {{c_type}} val
+            khiter_t k
+            Int64Vector locs = Int64Vector()
+            Int64Vector self_locs = Int64Vector()
+            Int64VectorData *l = &locs.data
+            Int64VectorData *sl = &self_locs.data
+            Py_ssize_t na_position = self.na_position
+
+        if self.uses_mask and mask is None:
+            raise NotImplementedError  # pragma: no cover
+
+        with nogil:
+            for i in range(n):
+                if self.uses_mask and mask[i]:
+                    if na_position == -1:
+                        continue
+                    if needs_resize(l.size, l.capacity):
+                        with gil:
+                            locs.resize(locs.data.capacity * 4)
+                            self_locs.resize(locs.data.capacity * 4)
+                    append_data_int64(l, i)
+                    append_data_int64(sl, na_position)
+                else:
+                    val = {{to_c_type}}(values[i])
+                    k = kh_get_{{dtype}}(self.table, val)
+                    if k != self.table.n_buckets:
+                        if needs_resize(l.size, l.capacity):
+                            with gil:
+                                locs.resize(locs.data.capacity * 4)
+                                self_locs.resize(locs.data.capacity * 4)
+                        append_data_int64(l, i)
+                        append_data_int64(sl, self.table.vals[k])
+
+        return self_locs.to_array(), locs.to_array()
+
+    @cython.wraparound(False)
+    @cython.boundscheck(False)
     def hash_inner_join(self, const {{dtype}}_t[:] values, const uint8_t[:] mask = None) -> tuple[ndarray, ndarray]:
         # NOTE: the caller (_factorize_keys) only dispatches here when the right
         # keys are unique (rizer.get_count() == len(right_labels)), so each left
@@ -1049,6 +1089,8 @@ cdef class {{name}}Factorizer(Factorizer):
         return labels
 
     def hash_inner_join(self, const {{c_type}}[:] values, const uint8_t[:] mask = None) -> tuple[np.ndarray, np.ndarray]:
+        if not _use_boostkit_fastpaths:
+            return self.table.hash_inner_join_legacy(values, mask)
         return self.table.hash_inner_join(values, mask)
 
 {{endfor}}

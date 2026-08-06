@@ -45,6 +45,7 @@ from pandas._typing import (
     Shape,
     npt,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import (
     InvalidIndexError,
@@ -2068,7 +2069,7 @@ class MultiIndex(Index):
 
     def drop_duplicates(self, *, keep: DropKeep = "first") -> Self:
         """Return MultiIndex with duplicate values removed (order of appearance)."""
-        if keep != "first":
+        if keep != "first" or not IS_ARM:
             return super().drop_duplicates(keep=keep)
 
         # Short-circuit: is_unique builds/caches the engine and is cheap on
