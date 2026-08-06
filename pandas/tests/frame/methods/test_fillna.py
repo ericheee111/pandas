@@ -16,6 +16,7 @@ from pandas import (
     to_datetime,
 )
 import pandas._testing as tm
+from pandas.core import generic
 from pandas.core.internals import BlockManager
 from pandas.tests.frame.common import _check_mixed_float
 
@@ -26,6 +27,7 @@ class TestFillNA:
     def test_fillna_complete_dict_homogeneous_manager_batch(
         self, monkeypatch, dtype, inplace
     ):
+        monkeypatch.setattr(generic, "IS_ARM", True)
         df = DataFrame(
             [[np.nan, 2.0], [3.0, np.nan], [np.nan, np.nan]],
             columns=["a", "b"],
@@ -76,6 +78,7 @@ class TestFillNA:
     def test_fillna_complete_dict_inplace_uses_2d_manager_value(
         self, monkeypatch
     ):
+        monkeypatch.setattr(generic, "IS_ARM", True)
         df = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
         original = BlockManager.fillna
         value_shapes = []
