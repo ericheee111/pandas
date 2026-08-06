@@ -17,6 +17,8 @@ from pandas import (
     date_range,
 )
 import pandas._testing as tm
+from pandas.core import apply as apply_module
+from pandas.core import series as series_module
 from pandas.tests.apply.conftest import MockEngineDecorator
 from pandas.tests.frame.common import zip_frames
 from pandas.util.version import Version
@@ -420,6 +422,9 @@ def test_apply_axis1_label_lookup_uses_row_values_cache():
 
 
 def test_apply_axis1_string_label_lookup_bypasses_apply_if_callable(monkeypatch):
+    monkeypatch.setattr(apply_module, "IS_ARM", True)
+    monkeypatch.setattr(series_module, "IS_ARM", True)
+
     def raise_if_called(key, obj):
         raise AssertionError("cached string labels should avoid apply_if_callable")
 

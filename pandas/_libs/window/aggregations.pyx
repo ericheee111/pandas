@@ -37,6 +37,10 @@ cdef extern from "pandas/window_aggregations.h" namespace "pandas":
     ) noexcept nogil
 
 
+cdef extern from "pandas/portable.h":
+    bint pandas_is_aarch64() noexcept nogil
+
+
 cdef extern from "pandas/skiplist.h":
     ctypedef struct node_t:
         node_t **next
@@ -2534,7 +2538,7 @@ def roll_apply(object obj,
         ndarray[float64_t, cast=True] arr
         ndarray window
         Py_ssize_t i, s, e, N = len(start), n = len(obj)
-        bint use_direct_call = raw and len(args) == 0 and len(kwargs) == 0
+        bint use_direct_call
         bint use_direct_view
 
     if n == 0:
@@ -2545,6 +2549,26 @@ def roll_apply(object obj,
     # ndarray input
     if raw and not arr.flags.c_contiguous:
         arr = arr.copy("C")
+
+    if not pandas_is_aarch64():
+        counts = roll_sum(np.isfinite(arr).astype(float), start, end, minp)
+        output = np.empty(N, dtype=np.float64)
+
+        for i in range(N):
+            s = start[i]
+            e = end[i]
+
+            if counts[i] >= minp:
+                if raw:
+                    output[i] = function(arr[s:e], *args, **kwargs)
+                else:
+                    output[i] = function(obj.iloc[s:e], *args, **kwargs)
+            else:
+                output[i] = NaN
+
+        return output
+
+    use_direct_call = raw and len(args) == 0 and len(kwargs) == 0
 
     use_direct_view = (
         use_direct_call
