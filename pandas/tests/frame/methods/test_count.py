@@ -8,6 +8,7 @@ from pandas import (
     Series,
 )
 import pandas._testing as tm
+from pandas.core import frame as frame_module
 
 
 class TestDataFrameCount:
@@ -46,6 +47,7 @@ class TestDataFrameCount:
 
 @pytest.mark.parametrize("axis", [0, 1])
 def test_count_float_block_uses_nancount(monkeypatch, axis):
+    monkeypatch.setattr(frame_module, "IS_ARM", True)
     df = DataFrame([[1.0, np.nan, 3.0], [np.nan, 2.0, 4.0]])
     original = algos.nancount_2d
     called = False
