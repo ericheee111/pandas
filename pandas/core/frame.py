@@ -9649,7 +9649,8 @@ class DataFrame(NDFrame, OpsMixin):
         axis = self._get_axis_number(axis) if axis is not None else 1
 
         if (
-            isinstance(other, DataFrame)
+            IS_ARM
+            and isinstance(other, DataFrame)
             and axis == 1
             and level is not None
             and fill_value is None
@@ -13747,7 +13748,7 @@ class DataFrame(NDFrame, OpsMixin):
         # GH #423
         if len(frame._get_axis(axis)) == 0:
             result = self._constructor_sliced(0, index=frame._get_agg_axis(axis))
-        elif (counts := frame._nancount_float_block(axis)) is not None:
+        elif IS_ARM and (counts := frame._nancount_float_block(axis)) is not None:
             result = frame._constructor_sliced(
                 counts, index=frame._get_agg_axis(axis), copy=False
             )
