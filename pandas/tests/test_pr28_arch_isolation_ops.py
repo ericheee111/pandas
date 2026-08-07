@@ -9,26 +9,8 @@ import pandas._testing as tm
 from pandas.core.arrays import masked
 from pandas.core.arrays.base import ExtensionArray
 from pandas.core.indexes import multi
-from pandas.core.ops import array_ops
 from pandas.core.reshape import merge
 from pandas.core import series
-
-
-def test_int64_divide_non_arm_uses_na_arithmetic(monkeypatch):
-    monkeypatch.setattr(array_ops, "IS_ARM", False, raising=False)
-    monkeypatch.setattr(
-        array_ops.libops,
-        "int64_true_divide",
-        lambda *args: pytest.fail("ARM helper called on non-ARM"),
-    )
-
-    result = array_ops.arithmetic_op(
-        np.array([4, 9], dtype=np.int64),
-        np.array([2, 3], dtype=np.int64),
-        operator.truediv,
-    )
-
-    tm.assert_numpy_array_equal(result, np.array([2.0, 3.0]))
 
 
 def test_series_arithmetic_manager_non_arm_uses_constructor(monkeypatch):

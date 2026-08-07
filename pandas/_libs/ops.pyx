@@ -15,9 +15,7 @@ from cython cimport Py_ssize_t
 import numpy as np
 
 from numpy cimport (
-    float64_t,
     import_array,
-    int64_t,
     ndarray,
     uint8_t,
 )
@@ -27,36 +25,6 @@ import_array()
 
 from pandas._libs.missing cimport checknull
 from pandas._libs.util cimport is_nan
-
-
-@cython.cdivision(True)
-@cython.wraparound(False)
-@cython.boundscheck(False)
-def int64_true_divide(
-    const int64_t[::1] left,
-    const int64_t[::1] right,
-) -> ndarray:
-    """
-    Divide two contiguous int64 arrays into one float64 result.
-
-    The fused loop avoids the temporary float64 cast buffers allocated by
-    NumPy's generic int64 true-divide loop.
-    """
-    cdef:
-        Py_ssize_t i, n = left.shape[0]
-        float64_t[::1] result
-
-    if n != right.shape[0]:
-        raise ValueError(
-            f"Arrays were different lengths: {n} vs {right.shape[0]}"
-        )
-
-    result = np.empty(n, dtype=np.float64)
-    with nogil:
-        for i in range(n):
-            result[i] = <float64_t>left[i] / <float64_t>right[i]
-
-    return result.base
 
 
 @cython.wraparound(False)

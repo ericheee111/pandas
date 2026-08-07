@@ -1011,35 +1011,6 @@ def test_nunique_ints(index_or_series_or_array):
 
 
 class TestIsin:
-    @pytest.mark.parametrize(
-        "dtype, values, comps, expected",
-        [
-            ("int64", [-3, -2, -1, 0], [-4, -3, 0, 1], [False, True, True, False]),
-            ("uint64", [4, 5, 6], [3, 4, 6, 7], [False, True, True, False]),
-        ],
-    )
-    def test_consecutive_integer_range(
-        self, monkeypatch, dtype, values, comps, expected
-    ):
-        monkeypatch.setattr(algos, "IS_ARM", True)
-        monkeypatch.setattr(algos.boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", True)
-        values_array = np.array(values, dtype=dtype)
-        comps_array = np.tile(np.array(comps, dtype=dtype), 8)
-
-        result = algos._isin_consecutive_integer_range(comps_array, values_array)
-
-        expected_array = np.tile(np.array(expected, dtype=bool), 8)
-        tm.assert_numpy_array_equal(result, expected_array)
-
-    def test_consecutive_integer_range_rejects_gaps(self, monkeypatch):
-        monkeypatch.setattr(algos, "IS_ARM", True)
-        values = np.array([1, 2, 4], dtype=np.int64)
-        comps = np.arange(24, dtype=np.int64)
-
-        result = algos._isin_consecutive_integer_range(comps, values)
-
-        assert result is None
-
     def test_invalid(self):
         msg = (
             r"only list-like objects are allowed to be passed to isin\(\), "
