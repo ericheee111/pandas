@@ -382,9 +382,9 @@ class WrappedCythonOp:
 
         if self.how in ["any", "all"]:
             if mask is None:
-                mask = isna(values)
-            if _IS_AARCH64 and result_mask is None and not mask.any():
-                mask = None
+                # bool/int/uint numpy arrays cannot represent NaN
+                if not _IS_AARCH64 or dtype.kind not in "biu":
+                    mask = isna(values)
 
         if is_datetimelike:
             values = values.view("int64")
