@@ -968,7 +968,7 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
 
     def __getitem__(self, key):
         check_dict_or_set_indexers(key)
-        if not callable(key):
+        if IS_ARM and not callable(key):
             result = self._get_row_apply_cached_value(key)
             if result is not lib.no_default:
                 return result
@@ -1105,7 +1105,8 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
                     _chained_assignment_msg, ChainedAssignmentError, stacklevel=2
                 )
 
-        self._invalidate_row_apply_cache()
+        if IS_ARM:
+            self._invalidate_row_apply_cache()
         check_dict_or_set_indexers(key)
         key = com.apply_if_callable(key, self)
 

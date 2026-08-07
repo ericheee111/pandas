@@ -37,6 +37,10 @@ cdef extern from "pandas/window_aggregations.h" namespace "pandas":
     ) noexcept nogil
 
 
+cdef extern from "pandas/portable.h":
+    bint pandas_is_aarch64() noexcept nogil
+
+
 cdef extern from "pandas/skiplist.h":
     ctypedef struct node_t:
         node_t **next
@@ -2534,7 +2538,10 @@ def roll_apply(object obj,
         ndarray[float64_t, cast=True] arr
         ndarray window
         Py_ssize_t i, s, e, N = len(start), n = len(obj)
-        bint use_direct_call = raw and len(args) == 0 and len(kwargs) == 0
+        bint use_fastpath = pandas_is_aarch64()
+        bint use_direct_call = (
+            use_fastpath and raw and len(args) == 0 and len(kwargs) == 0
+        )
         bint use_direct_view
 
     if n == 0:
@@ -2592,7 +2599,10 @@ def roll_apply(object obj,
                 # no-ops for a slice with concrete integer bounds.  The
                 # returned Series has identical index, name, dtype, view/copy
                 # and Copy-on-Write refs as ``obj.iloc[s:e]``.
-                output[i] = function(obj._slice(slice(s, e)), *args, **kwargs)
+                if use_fastpath:
+                    output[i] = function(obj._slice(slice(s, e)), *args, **kwargs)
+                else:
+                    output[i] = function(obj.iloc[s:e], *args, **kwargs)
         else:
             output[i] = NaN
 
