@@ -8,7 +8,9 @@ import pandas as pd
 import pandas._testing as tm
 from pandas.core.arrays import masked
 from pandas.core.arrays.base import ExtensionArray
+from pandas.core.indexes import multi
 from pandas.core.ops import array_ops
+from pandas.core.reshape import merge
 from pandas.core import series
 
 
@@ -220,3 +222,97 @@ def test_arrow_scalar_selection_arm_preserves_invalid_value_error(
     monkeypatch.setattr(arrow_array, "IS_ARM", True, raising=False)
     with pytest.raises(type(expected.value), match=re.escape(str(expected.value))):
         apply()
+
+
+def test_merge_masked_ea_non_arm_avoids_hash_fastpath(monkeypatch):
+    monkeypatch.setattr(merge, "IS_ARM", False)
+    monkeypatch.setattr(
+        merge,
+        "_masked_hash_inner_join_fastpath",
+        lambda *args: pytest.fail("non-ARM merge used masked EA hash fast path"),
+    )
+    left = pd.DataFrame(
+        {"key": pd.Series([1, None, 2, 1], dtype="Int64"), "left": range(4)}
+    )
+    right = pd.DataFrame(
+        {"key": pd.Series([1, None, 3], dtype="Int64"), "right": range(3)}
+    )
+
+    result = pd.merge(left, right, on="key", how="inner", sort=False)
+
+    expected = pd.DataFrame(
+        {
+            "key": pd.Series([1, None, 1], dtype="Int64"),
+            "left": [0, 1, 3],
+            "right": [0, 1, 0],
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("dtype", ["Int64", "Float64"])
+def test_merge_masked_ea_arm_matches_legacy(monkeypatch, dtype):
+    left = pd.DataFrame(
+        {"key": pd.Series([1, None, 2, 1], dtype=dtype), "left": range(4)}
+    )
+    right = pd.DataFrame(
+        {"key": pd.Series([1, None, 3], dtype=dtype), "right": range(3)}
+    )
+
+    monkeypatch.setattr(merge, "IS_ARM", False)
+    expected = pd.merge(left, right, on="key", how="inner", sort=False)
+    calls = []
+    original = merge._masked_hash_inner_join_fastpath
+
+    def tracked(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(merge, "_masked_hash_inner_join_fastpath", tracked)
+    monkeypatch.setattr(merge, "IS_ARM", True)
+    result = pd.merge(left, right, on="key", how="inner", sort=False)
+
+    assert calls == [None]
+    tm.assert_frame_equal(result, expected)
+
+
+def test_multiindex_unique_non_arm_avoids_packed_codes(monkeypatch):
+    monkeypatch.setattr(multi, "IS_ARM", False)
+    monkeypatch.setattr(
+        multi.np,
+        "unique",
+        lambda *args, **kwargs: pytest.fail(
+            "non-ARM MultiIndex.unique used packed-code fast path"
+        ),
+    )
+    index = pd.MultiIndex.from_arrays(
+        [pd.array([1, None, 1, 2, None], dtype="Int64"), ["a", "b", "a", "c", "b"]]
+    )
+
+    result = index.unique()
+
+    expected = index[[0, 1, 3]]
+    tm.assert_index_equal(result, expected)
+
+
+def test_multiindex_unique_arm_matches_legacy(monkeypatch):
+    index = pd.MultiIndex.from_arrays(
+        [pd.array([1, None, 1, 2, None], dtype="Int64"), ["a", "b", "a", "c", "b"]],
+        names=["number", "label"],
+    )
+
+    monkeypatch.setattr(multi, "IS_ARM", False)
+    expected = index.unique()
+    calls = []
+    original = multi.np.unique
+
+    def tracked(*args, **kwargs):
+        calls.append(None)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(multi.np, "unique", tracked)
+    monkeypatch.setattr(multi, "IS_ARM", True)
+    result = index.unique()
+
+    assert calls == [None]
+    tm.assert_index_equal(result, expected)

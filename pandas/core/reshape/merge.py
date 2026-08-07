@@ -3227,7 +3227,8 @@ def _factorize_keys(
     # dtype dispatch below and the labels/uniques allocation that factorize()
     # would do (only the hash table is needed for the probe).
     if (
-        how == "inner"
+        IS_ARM
+        and how == "inner"
         and not sort
         and isinstance(lk, BaseMaskedArray)
         and isinstance(rk, BaseMaskedArray)
