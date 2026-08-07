@@ -1011,6 +1011,83 @@ def test_nunique_ints(index_or_series_or_array):
 
 
 class TestIsin:
+    @pytest.mark.parametrize(
+        "dtype,start,outside",
+        [
+            ("int64", np.iinfo(np.int64).min, np.iinfo(np.int64).min + 27),
+            ("int64", -13, -14),
+            (
+                "uint64",
+                np.iinfo(np.uint64).max - 26,
+                np.iinfo(np.uint64).max - 27,
+            ),
+        ],
+    )
+    def test_consecutive_integer_range(self, monkeypatch, dtype, start, outside):
+        monkeypatch.setattr(algos, "IS_ARM", True)
+        monkeypatch.setattr(algos.boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", True)
+        values = np.arange(27, dtype=dtype) + np.array(start, dtype=dtype)
+        probes = np.array([outside, values[0], values[-1]], dtype=dtype)
+        comps = np.tile(probes, 72)
+
+        result = algos._isin_consecutive_integer_range(comps, values)
+
+        expected = np.isin(comps, values)
+        tm.assert_numpy_array_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "values,comps",
+        [
+            (np.arange(26, dtype=np.int64), np.arange(26 * 8, dtype=np.int64)),
+            (np.r_[np.arange(26), 28], np.arange(27 * 8, dtype=np.int64)),
+            (np.arange(27, dtype=np.int64), np.arange(27 * 8 - 1, dtype=np.int64)),
+            (np.arange(27, dtype=np.int32), np.arange(27 * 8, dtype=np.int32)),
+        ],
+    )
+    def test_consecutive_integer_range_falls_back(self, monkeypatch, values, comps):
+        monkeypatch.setattr(algos, "IS_ARM", True)
+        monkeypatch.setattr(algos.boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", True)
+
+        result = algos._isin_consecutive_integer_range(comps, values)
+
+        assert result is None
+
+    def test_consecutive_integer_range_arm_dispatch(self, monkeypatch):
+        monkeypatch.setattr(algos, "IS_ARM", True)
+        monkeypatch.setattr(algos.boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", True)
+        expected = np.array([True, False])
+        calls = []
+
+        def consecutive_range(comps, values):
+            calls.append((comps, values))
+            return expected
+
+        monkeypatch.setattr(algos, "_isin_consecutive_integer_range", consecutive_range)
+        values = np.arange(27, dtype=np.int64)
+        result = algos.isin(np.array([0, 27], dtype=np.int64), values)
+
+        assert len(calls) == 1
+        assert result is expected
+
+    @pytest.mark.parametrize("is_arm", [False, True])
+    def test_consecutive_integer_range_not_used_for_portable_or_small_values(
+        self, monkeypatch, is_arm
+    ):
+        monkeypatch.setattr(algos, "IS_ARM", is_arm)
+        monkeypatch.setattr(algos.boostkit_fastpaths, "USE_BOOSTKIT_FASTPATHS", True)
+        monkeypatch.setattr(algos, "_MINIMUM_COMP_ARR_LEN", 10)
+        monkeypatch.setattr(
+            algos,
+            "_isin_consecutive_integer_range",
+            lambda *args: pytest.fail("consecutive-range fast path called"),
+        )
+        values = np.arange(5, dtype=np.int64)
+        comps = np.arange(20, dtype=np.int64)
+
+        result = algos.isin(comps, values)
+
+        tm.assert_numpy_array_equal(result, np.isin(comps, values))
+
     def test_invalid(self):
         msg = (
             r"only list-like objects are allowed to be passed to isin\(\), "
