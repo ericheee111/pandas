@@ -8,7 +8,6 @@ from __future__ import annotations
 import datetime
 from functools import partial
 import operator
-import platform
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -73,9 +72,9 @@ if TYPE_CHECKING:
 # -----------------------------------------------------------------------------
 # Masking NA values and fallbacks for operations numpy does not support
 
-_USE_AARCH64_COMPARISON_FASTPATH = platform.machine() == "aarch64"
-_USE_AARCH64_FLOAT64_SCALAR_FASTPATH = platform.machine() == "aarch64"
-_USE_AARCH64_NUMEXPR_BYPASS = platform.machine() == "aarch64"
+_USE_AARCH64_COMPARISON_FASTPATH = IS_ARM
+_USE_AARCH64_FLOAT64_SCALAR_FASTPATH = IS_ARM
+_USE_AARCH64_NUMEXPR_BYPASS = IS_ARM
 
 
 def _maybe_cast_scalar_for_int64_comparison_aarch64(left: np.ndarray, right, op):
@@ -154,7 +153,6 @@ def _should_bypass_numexpr_aarch64(left: np.ndarray, right, op) -> bool:
         if op in {
             operator.add,
             operator.sub,
-            operator.truediv,
             operator.eq,
             operator.ne,
         }:
@@ -314,7 +312,10 @@ def _na_arithmetic_op(left: np.ndarray, right, op, is_cmp: bool = False):
         func = partial(
             expressions.evaluate,
             op,
-            use_numexpr=not _should_bypass_numexpr_aarch64(left, right, op),
+            use_numexpr=not (
+                _USE_AARCH64_NUMEXPR_BYPASS
+                and _should_bypass_numexpr_aarch64(left, right, op)
+            ),
         )
 
     try:

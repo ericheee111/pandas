@@ -6,7 +6,7 @@ import pytest
 from pandas.core.dtypes.missing import isna
 
 import pandas._testing as tm
-import pandas.core.ops.array_ops as array_ops
+from pandas.core.ops import array_ops
 from pandas.core.ops.array_ops import (
     arithmetic_op,
     comparison_op,
@@ -184,6 +184,7 @@ def test_float64_scalar_fastpath_excludes_bool(monkeypatch, scalar):
         (np.float64, True, operator.add, False),
         (np.float64, np.bool_(True), operator.eq, False),
         (np.int64, 2, operator.add, True),
+        (np.int64, 2, operator.truediv, False),
         (np.int64, np.int32(4), operator.mul, False),
         (np.int64, 3.0, operator.mul, True),
         (np.int64, np.float64(5.0), operator.ne, True),
@@ -201,3 +202,18 @@ def test_aarch64_numexpr_bypass(monkeypatch, dtype, scalar, op, expected):
     monkeypatch.setattr(array_ops, "_USE_AARCH64_NUMEXPR_BYPASS", False)
     result = array_ops._should_bypass_numexpr_aarch64(left, scalar, op)
     assert result is False
+
+
+def test_numexpr_bypass_not_consulted_when_disabled(monkeypatch):
+    left = np.array([1, 2, 3], dtype=np.int64)
+
+    monkeypatch.setattr(array_ops, "_USE_AARCH64_NUMEXPR_BYPASS", False)
+    monkeypatch.setattr(
+        array_ops,
+        "_should_bypass_numexpr_aarch64",
+        lambda *args: pytest.fail("non-ARM path consulted ARM numexpr bypass"),
+    )
+
+    result = array_ops._na_arithmetic_op(left, 2, operator.pow)
+    expected = np.array([1, 4, 9], dtype=np.int64)
+    tm.assert_numpy_array_equal(result, expected)
