@@ -40,7 +40,7 @@ def count_categorical_codes(
     codes: np.ndarray,
     ncategories: int,
     dropna: bool,
-) -> npt.NDArray[np.int64]: ...
+) -> tuple[npt.NDArray[np.int64], bool]: ...
 def kth_smallest(
     arr: np.ndarray,  # numeric[:]
     k: int,

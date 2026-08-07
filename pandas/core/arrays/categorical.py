@@ -1934,11 +1934,11 @@ class Categorical(NDArrayBackedExtensionArray, PandasObject, ObjectStringArrayMi
         if IS_ARM:
             ncat = len(cat)
             ix = np.arange(ncat)
-            count = libalgos.count_categorical_codes(code, ncat, dropna)
-            if not dropna and (code >= 0).all():
-                count = count[:-1]
-            elif not dropna:
+            count, has_na = libalgos.count_categorical_codes(code, ncat, dropna)
+            if not dropna and has_na:
                 ix = np.append(ix, -1)
+            elif not dropna:
+                count = count[:ncat]
         else:
             ncat, mask = (len(cat), code >= 0)
             ix, clean = np.arange(ncat), mask.all()
