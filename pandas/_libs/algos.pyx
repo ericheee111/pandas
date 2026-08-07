@@ -478,52 +478,21 @@ def count_categorical_codes(
     bint dropna,
 ):
     cdef:
-        Py_ssize_t i, code, limit
-        Py_ssize_t n = len(codes)
-        Py_ssize_t nslots = ncategories if dropna else ncategories + 1
-        int64_t[::1] counts = np.zeros(nslots, dtype=np.int64)
-        int64_t[::1] counts1 = np.zeros(nslots, dtype=np.int64)
-        int64_t[::1] counts2 = np.zeros(nslots, dtype=np.int64)
-        int64_t[::1] counts3 = np.zeros(nslots, dtype=np.int64)
+        Py_ssize_t i, code, n = len(codes)
+        Py_ssize_t na_slot = ncategories
+        int64_t[::1] counts = np.zeros(ncategories + 1, dtype=np.int64)
+        bint has_na
 
     with nogil:
-        limit = n - n % 4
-        for i in range(0, limit, 4):
+        for i in range(n):
             code = codes[i]
-            if code >= 0:
-                counts[code] += 1
-            elif not dropna:
-                counts[ncategories] += 1
+            code = na_slot if code < 0 else code
+            counts[code] += 1
 
-            code = codes[i + 1]
-            if code >= 0:
-                counts1[code] += 1
-            elif not dropna:
-                counts1[ncategories] += 1
-
-            code = codes[i + 2]
-            if code >= 0:
-                counts2[code] += 1
-            elif not dropna:
-                counts2[ncategories] += 1
-
-            code = codes[i + 3]
-            if code >= 0:
-                counts3[code] += 1
-            elif not dropna:
-                counts3[ncategories] += 1
-
-        for i in range(limit, n):
-            code = codes[i]
-            if code >= 0:
-                counts[code] += 1
-            elif not dropna:
-                counts[ncategories] += 1
-
-        for i in range(nslots):
-            counts[i] += counts1[i] + counts2[i] + counts3[i]
-
-    return counts.base
+    has_na = counts[na_slot] > 0
+    if dropna:
+        return counts.base[:ncategories], has_na
+    return counts.base, has_na
 
 
 cdef Py_ssize_t swap(numeric_t *a, numeric_t *b) noexcept nogil:
