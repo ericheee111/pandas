@@ -27,6 +27,7 @@ from pandas._libs import (
     swisstable_ismember,
 )
 from pandas._libs.missing import NA
+from pandas.compat._arch import IS_ARM
 from pandas._typing import (
     AnyArrayLike,
     ArrayLike,
@@ -494,7 +495,12 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         return values.unique()
 
     original = values
-    use_swiss = get_use_swisstable() and len(values) <= 1_000_000
+    # Masked SwissTable uniqueness regresses the nullable-integer case on ARM.
+    # Keep the legacy masked hashtable there, and do not make non-ARM callers
+    # pay for a BoostKit-specific dispatch.
+    use_swiss = (
+        IS_ARM and mask is None and get_use_swisstable() and len(values) <= 1_000_000
+    )
     hashtable, values = _get_hashtable_algo(values, use_swisstable=use_swiss)
     using_swisstable = use_swiss and hashtable in _swisstables.values()
 
@@ -519,6 +525,40 @@ unique1d = unique
 
 
 _MINIMUM_COMP_ARR_LEN = 1_000_000
+
+
+def _isin_consecutive_integer_range(
+    comps_array: np.ndarray, values: np.ndarray
+) -> npt.NDArray[np.bool_] | None:
+    """Match a long integer array against a much smaller consecutive range."""
+    if (
+        not IS_ARM
+        or not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+        or comps_array.ndim != 1
+        or values.ndim != 1
+        or values.dtype != comps_array.dtype
+        or values.dtype not in (np.dtype("int64"), np.dtype("uint64"))
+        or not values.dtype.isnative
+    ):
+        return None
+
+    n_values = len(values)
+    if n_values == 0 or len(comps_array) < 8 * n_values:
+        return None
+
+    first = values[0]
+    last = values[-1]
+    if int(last) - int(first) != n_values - 1:
+        return None
+    if n_values > 1 and not bool(np.all(values[1:] == values[:-1] + 1)):
+        return None
+
+    if values.dtype == np.dtype("int64"):
+        first_uint = first.view(np.uint64)
+    else:
+        first_uint = np.uint64(first)
+    offsets = comps_array.view(np.uint64) - first_uint
+    return offsets < np.uint64(n_values)
 
 
 def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
@@ -593,20 +633,25 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
     # GH60678
     # Ensure values don't contain <NA>, otherwise it throws exception with np.in1d
 
+    if IS_ARM and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        result = _isin_consecutive_integer_range(comps_array, values)
+        if result is not None:
+            return result
+
     if (
         len(comps_array) > _MINIMUM_COMP_ARR_LEN
         and len(values) <= 26
         and comps_array.dtype != object
         and (
             (values.dtype != object or not any(v is NA for v in values))
-            if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            if IS_ARM and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
             else not any(v is NA for v in values)
         )
     ):
         # If the values include nan we need to check for nan explicitly
         # since np.nan it not equal to np.nan
         if isna(values).any():
-            if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+            if IS_ARM and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
                 return np.logical_or(
                     np.isin(comps_array, values).ravel(), np.isnan(comps_array)
                 )
@@ -614,14 +659,14 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
             def f(c, v):
                 return np.logical_or(np.isin(c, v).ravel(), np.isnan(c))
 
-        elif boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+        elif IS_ARM and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
             return np.isin(comps_array, values).ravel()
         else:
             f = lambda a, b: np.isin(a, b).ravel()
 
     else:
         if (
-            not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            not (IS_ARM and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS)
             or values.dtype != comps_array.dtype
             or not values.dtype.isnative
             or values.dtype.name not in _hashtables
@@ -629,7 +674,10 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
             common = np_find_common_type(values.dtype, comps_array.dtype)
             values = values.astype(common, copy=False)
             comps_array = comps_array.astype(common, copy=False)
-        f = _get_ismember_func(comps_array.dtype, len(values))
+        if IS_ARM and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+            f = _get_ismember_func(comps_array.dtype, len(values))
+        else:
+            f = htable.ismember
 
     return f(comps_array, values)
 
@@ -637,7 +685,7 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
 def _get_ismember_func(dtype: np.dtype, values_size: int = 0):
     from pandas.core.config_init import get_use_swisstable
 
-    if get_use_swisstable() and dtype.kind in "iufc":
+    if IS_ARM and get_use_swisstable() and dtype.kind in "iufc":
         swisstable_funcs = {
             np.dtype("int64"): swisstable.ismember_int64,
             np.dtype("int32"): swisstable.ismember_int32,
