@@ -141,26 +141,18 @@ def _should_bypass_numexpr_aarch64(left: np.ndarray, right, op) -> bool:
         return False
 
     if left.dtype == np.float64:
-        return op in {
-            operator.add,
-            operator.sub,
-            operator.mul,
-            operator.truediv,
-            operator.eq,
-            operator.ne,
-        }
+        # _maybe_cast_int_scalar_for_float64_op_aarch64 (called upstream in
+        # _na_arithmetic_op and comparison_op) already converts int scalars
+        # to np.float64 before this function is reached, so numexpr always
+        # receives a matching float64+float64 operation. numexpr's
+        # multi-threaded evaluation is faster than numpy's single-threaded
+        # ufunc here, so bypass should never activate for float64.
+        return False
 
     if left.dtype == np.int64:
-        if op in {
-            operator.add,
-            operator.sub,
-            operator.truediv,
-            operator.eq,
-            operator.ne,
-        }:
-            return True
-        # Numexpr is faster for integer scalar multiplication on AArch64.
-        return op is operator.mul and isinstance(right, (float, np.floating))
+        # numexpr is faster for arithmetic (add/sub/mul), but numpy's ufunc
+        # is faster for comparisons (eq/ne).
+        return op in {operator.eq, operator.ne}
 
     return False
 
