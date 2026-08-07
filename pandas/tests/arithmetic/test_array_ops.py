@@ -179,14 +179,26 @@ def test_float64_scalar_fastpath_excludes_bool(monkeypatch, scalar):
 @pytest.mark.parametrize(
     "dtype, scalar, op, expected",
     [
-        (np.float64, 2, operator.add, True),
-        (np.float64, np.float64(5.0), operator.ne, True),
+        # float64: bypass never activates (upstream pre-casts int to
+        # np.float64 via _maybe_cast_int_scalar_for_float64_op_aarch64,
+        # and numexpr is faster for float64+float64)
+        (np.float64, 2, operator.add, False),
+        (np.float64, np.int32(4), operator.sub, False),
+        (np.float64, 3.0, operator.add, False),
+        (np.float64, np.float64(5.0), operator.ne, False),
+        (np.float64, 2, operator.truediv, False),
         (np.float64, True, operator.add, False),
         (np.float64, np.bool_(True), operator.eq, False),
-        (np.int64, 2, operator.add, True),
-        (np.int64, np.int32(4), operator.mul, False),
-        (np.int64, 3.0, operator.mul, True),
+        # int64: bypass only for comparisons
+        (np.int64, 2, operator.eq, True),
         (np.int64, np.float64(5.0), operator.ne, True),
+        (np.int64, np.int32(4), operator.eq, True),
+        # int64: no bypass for arithmetic (numexpr is faster)
+        (np.int64, 2, operator.add, False),
+        (np.int64, np.int32(4), operator.sub, False),
+        (np.int64, 3.0, operator.mul, False),
+        (np.int64, np.float64(5.0), operator.truediv, False),
+        # non-matching dtype: no bypass
         (np.int64, "5", operator.eq, False),
         (np.int32, 2, operator.add, False),
     ],
@@ -201,3 +213,24 @@ def test_aarch64_numexpr_bypass(monkeypatch, dtype, scalar, op, expected):
     monkeypatch.setattr(array_ops, "_USE_AARCH64_NUMEXPR_BYPASS", False)
     result = array_ops._should_bypass_numexpr_aarch64(left, scalar, op)
     assert result is False
+
+
+@pytest.mark.parametrize(
+    "op", [operator.add, operator.sub, operator.mul, operator.truediv]
+)
+@pytest.mark.parametrize("scalar", [2, np.int32(4), 3.0, np.float64(5.0)])
+def test_aarch64_float64_bypass_dead_code(monkeypatch, op, scalar):
+    # Verify that bypass never activates for float64 arrays through the
+    # full _na_arithmetic_op call chain, even when all AArch64 flags are
+    # enabled. This guards against the interaction issue where
+    # _maybe_cast_int_scalar_for_float64_op_aarch64 converts int scalars
+    # to np.float64 before _should_bypass_numexpr_aarch64 is called.
+    left = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+
+    monkeypatch.setattr(array_ops, "_USE_AARCH64_NUMEXPR_BYPASS", True)
+    monkeypatch.setattr(array_ops, "_USE_AARCH64_FLOAT64_SCALAR_FASTPATH", True)
+
+    with np.errstate(all="ignore"):
+        result = arithmetic_op(left, scalar, op)
+    expected = op(left, scalar)
+    tm.assert_numpy_array_equal(result, expected)
