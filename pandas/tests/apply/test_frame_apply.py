@@ -17,6 +17,8 @@ from pandas import (
     date_range,
 )
 import pandas._testing as tm
+from pandas.core import apply as apply_module
+from pandas.core import series as series_module
 from pandas.tests.apply.conftest import MockEngineDecorator
 from pandas.tests.frame.common import zip_frames
 from pandas.util.version import Version
@@ -420,6 +422,9 @@ def test_apply_axis1_label_lookup_uses_row_values_cache():
 
 
 def test_apply_axis1_string_label_lookup_bypasses_apply_if_callable(monkeypatch):
+    monkeypatch.setattr(apply_module, "IS_ARM", True)
+    monkeypatch.setattr(series_module, "IS_ARM", True)
+
     def raise_if_called(key, obj):
         raise AssertionError("cached string labels should avoid apply_if_callable")
 
@@ -430,6 +435,86 @@ def test_apply_axis1_string_label_lookup_bypasses_apply_if_callable(monkeypatch)
 
     expected = Series([11, 22])
     tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_non_arm_uses_portable_label_lookup(monkeypatch):
+    monkeypatch.setattr(apply_module, "IS_ARM", False)
+    monkeypatch.setattr(series_module, "IS_ARM", False)
+    monkeypatch.setattr(
+        Series,
+        "_get_row_apply_cached_value",
+        lambda *args: pytest.fail("non-ARM row apply used the label cache"),
+    )
+    df = DataFrame(
+        {
+            "amount": [10.0, 20.0],
+            "event_type": ["view", "purchase"],
+            "rating": [1, 2],
+        }
+    )
+
+    result = df.apply(lambda row: row["amount"] + row["rating"], axis=1)
+
+    expected = Series([11.0, 22.0])
+    tm.assert_series_equal(result, expected)
+
+
+def test_apply_axis1_arm_cache_matches_portable(monkeypatch):
+    df = DataFrame(
+        {
+            "amount": [10.0, 20.0],
+            "event_type": ["view", "purchase"],
+            "rating": [1, 2],
+        },
+        index=["first", "second"],
+    )
+
+    def score(row):
+        result = row.copy(deep=False)
+        result["score"] = row["amount"] + row["rating"]
+        result["row_name"] = row.name
+        return result
+
+    monkeypatch.setattr(apply_module, "IS_ARM", False)
+    monkeypatch.setattr(series_module, "IS_ARM", False)
+    expected = df.apply(score, axis=1)
+    calls = 0
+    original = Series._get_row_apply_cached_value
+
+    def tracked(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Series, "_get_row_apply_cached_value", tracked)
+    monkeypatch.setattr(apply_module, "IS_ARM", True)
+    monkeypatch.setattr(series_module, "IS_ARM", True)
+    result = df.apply(score, axis=1)
+
+    assert calls
+    tm.assert_frame_equal(result, expected)
+
+
+def test_apply_axis1_arm_cache_preserves_exception_order(monkeypatch):
+    df = DataFrame({"value": [1, 2, 3]}, index=["a", "b", "c"])
+
+    def run(is_arm):
+        seen = []
+
+        def func(row):
+            seen.append(row.name)
+            if row.name == "b":
+                raise RuntimeError("row failure")
+            return row["value"]
+
+        monkeypatch.setattr(apply_module, "IS_ARM", is_arm)
+        monkeypatch.setattr(series_module, "IS_ARM", is_arm)
+        with pytest.raises(RuntimeError, match="row failure"):
+            df.apply(func, axis=1)
+        return seen
+
+    assert run(False) == ["a", "b"]
+    assert run(True) == ["a", "b"]
 
 
 def test_apply_axis1_callable_key_still_respected():
