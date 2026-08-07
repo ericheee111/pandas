@@ -2387,19 +2387,20 @@ def get_join_indexers(
         lkey = left_keys[0]
         rkey = right_keys[0]
 
-    # IS_ARM fast path: single-column inner join on numeric keys goes straight
-    # to the hash-join (which is now pre-allocated & nogil-compressed in
+    # IS_ARM fast path: single-column inner join on integer or boolean keys goes
+    # straight to the hash-join (which is now pre-allocated & nogil-compressed in
     # hash_inner_join). We intentionally do NOT check is_monotonic_increasing
     # first: the optimized hash-join is faster than Index.join's two-pointer
     # for these sizes, and the monotonic scan would tax every non-monotonic
     # merge. Monotonic+unique inputs that would benefit from the two-pointer
-    # are rare and fall through to the general else-branch below on non-ARM.
+    # are rare and fall through to the general branch below. Floating keys also
+    # retain that ordered fallback because it is faster for monotonic masked EAs.
     if IS_ARM and (
         how == "inner"
         and not sort
         and len(left_keys) == 1
         and hasattr(lkey, "dtype")
-        and lkey.dtype.kind in "iufb"
+        and lkey.dtype.kind in "iub"
     ):
         lidx, ridx = get_join_indexers_non_unique(lkey, rkey, sort, how)
     else:

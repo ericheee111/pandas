@@ -276,6 +276,33 @@ def test_merge_masked_ea_arm_matches_legacy(monkeypatch, dtype):
     tm.assert_frame_equal(result, expected)
 
 
+def test_merge_masked_float_monotonic_arm_uses_ordered_join(monkeypatch):
+    left = pd.DataFrame(
+        {"key": pd.Series([1.0, 1.0, 2.0], dtype="Float64"), "left": range(3)}
+    )
+    right = pd.DataFrame(
+        {"key": pd.Series([1.0, 2.0], dtype="Float64"), "right": range(2)}
+    )
+
+    monkeypatch.setattr(merge, "IS_ARM", True)
+    monkeypatch.setattr(
+        merge,
+        "_masked_hash_inner_join_fastpath",
+        lambda *args: pytest.fail("ordered Float64 merge used masked hash join"),
+    )
+
+    result = pd.merge(left, right, on="key", how="inner", sort=False)
+
+    expected = pd.DataFrame(
+        {
+            "key": pd.Series([1.0, 1.0, 2.0], dtype="Float64"),
+            "left": [0, 1, 2],
+            "right": [0, 0, 1],
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
 def test_multiindex_unique_non_arm_avoids_packed_codes(monkeypatch):
     monkeypatch.setattr(multi, "IS_ARM", False)
     monkeypatch.setattr(
