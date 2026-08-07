@@ -527,6 +527,40 @@ unique1d = unique
 _MINIMUM_COMP_ARR_LEN = 1_000_000
 
 
+def _isin_consecutive_integer_range(
+    comps_array: np.ndarray, values: np.ndarray
+) -> npt.NDArray[np.bool_] | None:
+    """Match an integer array against a much smaller consecutive range."""
+    if (
+        not IS_ARM
+        or not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+        or comps_array.ndim != 1
+        or values.ndim != 1
+        or values.dtype != comps_array.dtype
+        or values.dtype not in (np.dtype("int64"), np.dtype("uint64"))
+        or not values.dtype.isnative
+    ):
+        return None
+
+    n_values = len(values)
+    if n_values <= 26 or len(comps_array) < 8 * n_values:
+        return None
+
+    first = values[0]
+    last = values[-1]
+    if int(last) - int(first) != n_values - 1:
+        return None
+    if not bool(np.all(values[1:] == values[:-1] + 1)):
+        return None
+
+    if values.dtype == np.dtype("int64"):
+        first_uint = first.view(np.uint64)
+    else:
+        first_uint = np.uint64(first)
+    offsets = comps_array.view(np.uint64) - first_uint
+    return offsets < np.uint64(n_values)
+
+
 def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
     """
     Compute the isin boolean array.
@@ -598,6 +632,15 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
 
     # GH60678
     # Ensure values don't contain <NA>, otherwise it throws exception with np.in1d
+
+    if (
+        IS_ARM
+        and boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+        and len(values) > 26
+    ):
+        result = _isin_consecutive_integer_range(comps_array, values)
+        if result is not None:
+            return result
 
     if (
         len(comps_array) > _MINIMUM_COMP_ARR_LEN
