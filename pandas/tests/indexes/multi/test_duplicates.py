@@ -16,6 +16,7 @@ from pandas import (
     Series,
 )
 import pandas._testing as tm
+from pandas.core.indexes import multi as multi_module
 
 
 @pytest.fixture
@@ -58,6 +59,55 @@ def test_unique(names):
     mi = MultiIndex.from_arrays([[], []], names=names)
     res = mi.unique()
     tm.assert_index_equal(mi, res)
+
+
+def test_unique_non_arm_uses_portable_path(monkeypatch):
+    monkeypatch.setattr(multi_module, "IS_ARM", False)
+    monkeypatch.setattr(
+        multi_module.np,
+        "unique",
+        lambda *args, **kwargs: pytest.fail(
+            "non-ARM MultiIndex.unique used packed codes"
+        ),
+    )
+    index = MultiIndex.from_arrays(
+        [
+            Series([1, None, 1, 2, None], dtype="Int64"),
+            ["a", "b", "a", "c", "b"],
+        ]
+    )
+
+    result = index.unique()
+
+    expected = index[[0, 1, 3]]
+    tm.assert_index_equal(result, expected)
+
+
+def test_unique_arm_matches_portable_path(monkeypatch):
+    index = MultiIndex.from_arrays(
+        [
+            Series([1, None, 1, 2, None], dtype="Int64"),
+            ["a", "b", "a", "c", "b"],
+        ],
+        names=["number", "label"],
+    )
+
+    monkeypatch.setattr(multi_module, "IS_ARM", False)
+    expected = index.unique()
+    calls = 0
+    original = multi_module.np.unique
+
+    def tracked(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(multi_module.np, "unique", tracked)
+    monkeypatch.setattr(multi_module, "IS_ARM", True)
+    result = index.unique()
+
+    assert calls == 1
+    tm.assert_index_equal(result, expected)
 
 
 def test_unique_datetimelike():

@@ -32,6 +32,7 @@ from pandas import (
     TimedeltaIndex,
 )
 import pandas._testing as tm
+import pandas.core.reshape.merge as merge_module
 from pandas.core.reshape.concat import concat
 from pandas.core.reshape.merge import (
     MergeError,
@@ -3328,6 +3329,94 @@ class TestMergeMaskedEAFastPath:
         assert result_inner["key"].notna().sum() == 2
         assert result_inner["key"].isna().sum() == 1
         assert len(result_left) == 4
+
+    def test_inner_join_masked_ea_non_arm_uses_portable_path(self, monkeypatch):
+        monkeypatch.setattr(merge_module, "IS_ARM", False)
+        monkeypatch.setattr(
+            merge_module,
+            "_masked_hash_inner_join_fastpath",
+            lambda *args: pytest.fail("non-ARM merge used the masked hash path"),
+        )
+        left = DataFrame(
+            {
+                "key": Series([1, None, 2, 1], dtype="Int64"),
+                "left": range(4),
+            }
+        )
+        right = DataFrame(
+            {"key": Series([1, None, 3], dtype="Int64"), "right": range(3)}
+        )
+
+        result = merge(left, right, on="key", how="inner", sort=False)
+
+        expected = DataFrame(
+            {
+                "key": Series([1, None, 1], dtype="Int64"),
+                "left": [0, 1, 3],
+                "right": [0, 1, 0],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", ["Int64", "Float64"])
+    def test_inner_join_masked_ea_arm_matches_portable(
+        self, monkeypatch, dtype
+    ):
+        left = DataFrame(
+            {"key": Series([1, None, 2, 1], dtype=dtype), "left": range(4)}
+        )
+        right = DataFrame(
+            {"key": Series([1, None, 3], dtype=dtype), "right": range(3)}
+        )
+
+        monkeypatch.setattr(merge_module, "IS_ARM", False)
+        expected = merge(left, right, on="key", how="inner", sort=False)
+        calls = 0
+        original = merge_module._masked_hash_inner_join_fastpath
+
+        def tracked(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            merge_module, "_masked_hash_inner_join_fastpath", tracked
+        )
+        monkeypatch.setattr(merge_module, "IS_ARM", True)
+        result = merge(left, right, on="key", how="inner", sort=False)
+
+        assert calls == 1
+        tm.assert_frame_equal(result, expected)
+
+    def test_inner_join_masked_float_monotonic_uses_ordered_path(
+        self, monkeypatch
+    ):
+        left = DataFrame(
+            {
+                "key": Series([1.0, 1.0, 2.0], dtype="Float64"),
+                "left": range(3),
+            }
+        )
+        right = DataFrame(
+            {"key": Series([1.0, 2.0], dtype="Float64"), "right": range(2)}
+        )
+        monkeypatch.setattr(merge_module, "IS_ARM", True)
+        monkeypatch.setattr(
+            merge_module,
+            "_masked_hash_inner_join_fastpath",
+            lambda *args: pytest.fail("ordered Float64 merge used masked hash join"),
+        )
+
+        result = merge(left, right, on="key", how="inner", sort=False)
+
+        expected = DataFrame(
+            {
+                "key": Series([1.0, 1.0, 2.0], dtype="Float64"),
+                "left": [0, 1, 2],
+                "right": [0, 0, 1],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
 
 
 class TestMergeCommonColsFastPath:
