@@ -60,6 +60,14 @@ cdef extern from "swisstable/swisstable_class.hpp" namespace "pandas::swisstable
 
         int64_t unique_batch(const K *keys, size_t n, K *uniques_out)
 
+        int64_t unique_with_mask_batch(
+            const K *keys,
+            size_t n,
+            const uint8_t *mask,
+            K *uniques_out,
+            uint8_t *result_mask_out
+        )
+
         int64_t unique_with_inverse(
             const K *keys,
             size_t n,

@@ -1550,6 +1550,37 @@ public:
         return static_cast<int64_t>(count);
     }
 
+    int64_t unique_with_mask_batch(
+        const Key *keys, size_t n, const uint8_t *mask,
+        Key *uniques_out, uint8_t *result_mask_out
+    ) noexcept
+    {
+        if (!reserve(n)) {
+            return -1;
+        }
+        size_t count = 0;
+        bool seen_na = false;
+
+        for (size_t i = 0; i < n; i++) {
+            if (mask[i]) {
+                if (!seen_na) {
+                    uniques_out[count] = keys[i];
+                    result_mask_out[count] = 1;
+                    seen_na = true;
+                    count++;
+                }
+            } else {
+                uint64_t hash = HashFn::hash(keys[i]);
+                if (insert_key_only_with_hash_unchecked(keys[i], hash) > 0) {
+                    uniques_out[count] = keys[i];
+                    result_mask_out[count] = 0;
+                    count++;
+                }
+            }
+        }
+        return static_cast<int64_t>(count);
+    }
+
     int64_t unique_with_inverse(const Key *keys, size_t n, Key *uniques_out, int64_t *labels_out) noexcept
     {
         // Reserve capacity upfront
