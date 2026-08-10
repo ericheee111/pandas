@@ -83,6 +83,7 @@ from pandas.core.dtypes.missing import (
 )
 
 from pandas.core import boostkit_fastpaths
+from pandas.core.config_init import get_use_swisstable
 from pandas.core.array_algos.take import take_nd
 from pandas.core.construction import (
     array as pd_array,
@@ -481,7 +482,6 @@ def nunique_ints(values: ArrayLike) -> int:
 
 def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
     """See algorithms.unique for docs. Takes a mask for masked arrays."""
-    from pandas.core.config_init import get_use_swisstable
 
     values = _ensure_arraylike(values, func_name="unique")
 
@@ -518,6 +518,14 @@ unique1d = unique
 
 
 _MINIMUM_COMP_ARR_LEN = 1_000_000
+
+# Below this number of lookup values the SwissTable ismember path has higher
+# per-lookup instruction overhead than the legacy klib hashtable (SIMD group
+# load + neon_movemask vs. scalar bit-test).  The lookup table fits in L1
+# cache at this size, so SwissTable's cache-friendly layout provides no
+# benefit.  Benchmark data on aarch64 (Kunpeng 920B) shows the crossover
+# between 1000 and 2000 values; 1024 is the nearest power-of-two.
+_SWISSTABLE_ISMEMBER_MIN_VALUES = 1024
 
 
 def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
@@ -619,22 +627,17 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
             f = lambda a, b: np.isin(a, b).ravel()
 
     else:
-        if (
-            not boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
-            or values.dtype != comps_array.dtype
-            or not values.dtype.isnative
-            or values.dtype.name not in _hashtables
-        ):
-            common = np_find_common_type(values.dtype, comps_array.dtype)
-            values = values.astype(common, copy=False)
-            comps_array = comps_array.astype(common, copy=False)
+        common = np_find_common_type(values.dtype, comps_array.dtype)
+        values = values.astype(common, copy=False)
+        comps_array = comps_array.astype(common, copy=False)
         f = _get_ismember_func(comps_array.dtype, len(values))
 
     return f(comps_array, values)
 
 
 def _get_ismember_func(dtype: np.dtype, values_size: int = 0):
-    from pandas.core.config_init import get_use_swisstable
+    if values_size < _SWISSTABLE_ISMEMBER_MIN_VALUES:
+        return htable.ismember
 
     if get_use_swisstable() and dtype.kind in "iufc":
         swisstable_funcs = {
@@ -704,7 +707,6 @@ def factorize_array(
     codes : ndarray[np.intp]
     uniques : ndarray
     """
-    from pandas.core.config_init import get_use_swisstable
 
     original = values
     # AArch64-only fast path for object arrays that are entirely exact Python
@@ -1099,7 +1101,6 @@ def duplicated(
     -------
     duplicated : ndarray[bool]
     """
-    from pandas.core.config_init import get_use_swisstable
 
     values = _ensure_data(values)
 
