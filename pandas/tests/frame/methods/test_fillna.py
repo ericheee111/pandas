@@ -16,6 +16,7 @@ from pandas import (
     to_datetime,
 )
 import pandas._testing as tm
+from pandas.core import generic
 from pandas.core.internals import BlockManager
 from pandas.tests.frame.common import _check_mixed_float
 
@@ -26,6 +27,7 @@ class TestFillNA:
     def test_fillna_complete_dict_homogeneous_manager_batch(
         self, monkeypatch, dtype, inplace
     ):
+        monkeypatch.setattr(generic, "IS_ARM", True)
         df = DataFrame(
             [[np.nan, 2.0], [3.0, np.nan], [np.nan, np.nan]],
             columns=["a", "b"],
@@ -53,6 +55,49 @@ class TestFillNA:
             result = df
         tm.assert_frame_equal(result, expected)
 
+    def test_fillna_complete_dict_non_arm_uses_per_column_path(self, monkeypatch):
+        monkeypatch.setattr(generic, "IS_ARM", False)
+        original = BlockManager.fillna
+
+        def reject_2d_values(self, value, limit, inplace):
+            if isinstance(value, np.ndarray) and value.ndim == 2:
+                pytest.fail("non-ARM fillna used the homogeneous manager fast path")
+            return original(self, value=value, limit=limit, inplace=inplace)
+
+        monkeypatch.setattr(BlockManager, "fillna", reject_2d_values)
+        df = DataFrame({"a": [1.0, np.nan], "b": [np.nan, 2.0]})
+
+        result = df.fillna({"a": 0.0, "b": 1.0})
+
+        expected = DataFrame({"a": [1.0, 0.0], "b": [1.0, 2.0]})
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", ["float32", "float64", "object"])
+    def test_fillna_complete_dict_arm_matches_portable(self, monkeypatch, dtype):
+        df = DataFrame(
+            np.array([[1.0, np.nan], [np.nan, 2.0]], dtype=dtype),
+            columns=["a", "b"],
+        )
+        values = {"a": 0, "b": 1}
+
+        monkeypatch.setattr(generic, "IS_ARM", False)
+        expected = df.fillna(values)
+        batch_calls = 0
+        original = BlockManager.fillna
+
+        def tracked(self, value, limit, inplace):
+            nonlocal batch_calls
+            if isinstance(value, np.ndarray) and value.ndim == 2:
+                batch_calls += 1
+            return original(self, value=value, limit=limit, inplace=inplace)
+
+        monkeypatch.setattr(BlockManager, "fillna", tracked)
+        monkeypatch.setattr(generic, "IS_ARM", True)
+        result = df.fillna(values)
+
+        assert batch_calls == 1
+        tm.assert_frame_equal(result, expected)
+
     def test_fillna_partial_dict_does_not_use_manager_batch(self, monkeypatch):
         df = DataFrame({"a": [np.nan, 1.0], "b": [np.nan, 2.0]})
 
@@ -76,6 +121,7 @@ class TestFillNA:
     def test_fillna_complete_dict_inplace_uses_2d_manager_value(
         self, monkeypatch
     ):
+        monkeypatch.setattr(generic, "IS_ARM", True)
         df = DataFrame({"a": [np.nan, np.nan], "b": [1.0, 2.0]})
         original = BlockManager.fillna
         value_shapes = []

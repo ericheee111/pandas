@@ -21,6 +21,7 @@ from pandas import (
     Series,
 )
 import pandas._testing as tm
+from pandas.core import frame as frame_module
 from pandas.core.computation import expressions as expr
 from pandas.tests.frame.common import (
     _check_mixed_float,
@@ -762,6 +763,57 @@ class TestFrameFlexArithmetic:
         right.index = index
         expected = getattr(df, op)(right)
 
+        tm.assert_frame_equal(result, expected)
+
+    def test_arith_frame_multiindex_level_non_arm_uses_portable_path(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(frame_module, "IS_ARM", False)
+
+        def fail_if_called(*args, **kwargs):
+            pytest.fail("non-ARM arithmetic used the MultiIndex fast path")
+
+        monkeypatch.setattr(
+            DataFrame, "_arith_method_with_multiindex_level", fail_if_called
+        )
+        index = MultiIndex.from_product(
+            [["a", "b"], [0, 1]], names=["group", "position"]
+        )
+        left = DataFrame({"value": [1.0, 2.0, 3.0, 4.0]}, index=index)
+        right = DataFrame({"value": [10.0, 20.0]}, index=Index(["a", "b"]))
+
+        result = left.add(right, level="group")
+
+        expected = DataFrame({"value": [11.0, 12.0, 23.0, 24.0]}, index=index)
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("op", ["add", "sub", "mul", "div"])
+    def test_arith_frame_multiindex_level_arm_matches_portable(
+        self, monkeypatch, op
+    ):
+        index = MultiIndex.from_product(
+            [["a", "b"], [0, 1]], names=["group", "position"]
+        )
+        left = DataFrame({"value": [1.0, 2.0, 3.0, 4.0]}, index=index)
+        right = DataFrame({"value": [10.0, 20.0]}, index=Index(["a", "b"]))
+
+        monkeypatch.setattr(frame_module, "IS_ARM", False)
+        expected = getattr(left, op)(right, level="group")
+        calls = 0
+        original = DataFrame._arith_method_with_multiindex_level
+
+        def tracked(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            DataFrame, "_arith_method_with_multiindex_level", tracked
+        )
+        monkeypatch.setattr(frame_module, "IS_ARM", True)
+        result = getattr(left, op)(right, level="group")
+
+        assert calls == 1
         tm.assert_frame_equal(result, expected)
 
     def test_arith_frame_multiindex_level_broadcast_unused_level(self):
