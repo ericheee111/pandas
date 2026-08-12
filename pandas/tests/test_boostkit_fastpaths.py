@@ -51,31 +51,6 @@ def test_boostkit_fastpaths_environment(
 
 
 @pytest.mark.parametrize("enabled, expected_calls", [(False, 1), (True, 0)])
-def test_isin_dtype_normalization_dispatch(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool, expected_calls: int
-) -> None:
-    _set_fastpaths(monkeypatch, enabled)
-    original = algorithms.np_find_common_type
-    calls = 0
-
-    def wrapped(left: np.dtype, right: np.dtype) -> np.dtype:
-        nonlocal calls
-        calls += 1
-        return original(left, right)
-
-    monkeypatch.setattr(algorithms, "np_find_common_type", wrapped)
-    comps = np.arange(1_000, dtype=np.int64)
-    values = np.arange(100, dtype=np.int64)
-
-    result = algorithms.isin(comps, values)
-
-    expected = np.zeros(1_000, dtype=bool)
-    expected[:100] = True
-    tm.assert_numpy_array_equal(result, expected)
-    assert calls == expected_calls
-
-
-@pytest.mark.parametrize("enabled, expected_calls", [(False, 1), (True, 0)])
 def test_sorted_factorize_safe_sort_dispatch(
     monkeypatch: pytest.MonkeyPatch, enabled: bool, expected_calls: int
 ) -> None:

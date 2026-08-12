@@ -192,6 +192,17 @@ cdef class Swiss{{name}}Map(HashTable):
             mask_view = mask if mask.dtype == np.uint8 else mask.view(np.uint8)
             result_mask_arr = np.empty(n, dtype=np.uint8)
 
+            if not return_inverse and n > 0 and values.strides[0] == sizeof({{c_type}}) and mask_view.strides[0] == sizeof(np_uint8_t):
+                with nogil:
+                    count = self.table.unique_with_mask_batch(
+                        &values[0], <size_t>n, &mask_view[0],
+                        &uniques_arr[0], &result_mask_arr[0]
+                    )
+                if count == -1:
+                    raise MemoryError("Failed to insert into Swiss table")
+                uniques = np.asarray(uniques_arr)[:count].copy()
+                return uniques, np.asarray(result_mask_arr)[:count].copy()
+
         if return_inverse:
             labels = np.empty(n, dtype=np.intp)
             with nogil:
