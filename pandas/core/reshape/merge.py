@@ -562,26 +562,37 @@ def _cross_merge_arm(
             )
         pa_arr = getattr(val, "_pa_array", None)
         if pa_arr is not None:
-            # pyarrow-backed ExtensionArray (e.g. ArrowStringArray): the
-            # expansion can be done with ZERO element/data copies by
-            # reusing the underlying Arrow buffers.
+            # pyarrow-backed ExtensionArray (e.g. ArrowStringArray). The
+            # expansion reuses the underlying Arrow buffers:
             #  - right (tile): a ChunkedArray of n_other references to the
-            #    same chunk -> the whole array tiled n_other times.
-            #  - left (repeat): a ChunkedArray of one constant chunk per
-            #    source element, each referencing that element's value ->
-            #    each value repeated n_other times.
+            #    same chunk -> the whole array tiled n_other times, zero-copy.
+            #  - left (repeat): two strategies, picked by n_other. The
+            #    measured cost crossover is between 512 and 1024 repeats
+            #    (loop cost ~ len(chunk) python calls; take cost ~
+            #    len(chunk) * n_other gathered elements).
             import pyarrow as pa
 
             if pa_arr.num_chunks != 1:
                 chunk = pa_arr.combine_chunks()
             else:
                 chunk = pa_arr.chunk(0)
-            if is_left:
+            if not is_left:
+                new_ca = pa.chunked_array([chunk] * n_other)
+            elif n_other <= 512:
+                # single vectorized gather: one C-level take instead of a
+                # per-element Python loop over pa.repeat (which dominated
+                # the runtime for string columns with a small right side)
+                take_idx = np.repeat(
+                    np.arange(len(chunk), dtype=np.intp), n_other
+                )
+                new_ca = pa.chunked_array([chunk.take(take_idx)])
+            else:
+                # zero-copy chunked repeat: each chunk shares the source
+                # values buffer, only per-chunk offsets are written; a
+                # contiguous gather would copy len*n_other values
                 new_ca = pa.chunked_array(
                     [pa.repeat(chunk[i], n_other) for i in range(len(chunk))]
                 )
-            else:
-                new_ca = pa.chunked_array([chunk] * n_other)
             return type(val)._from_sequence(new_ca, dtype=val.dtype)
         raise ValueError("column type not directly expandable")
 

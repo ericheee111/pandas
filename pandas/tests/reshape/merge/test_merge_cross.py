@@ -214,6 +214,30 @@ def test_cross_merge_arm_pyarrow_multi_chunk():
     tm.assert_frame_equal(result, expected)
 
 
+@pytest.mark.parametrize("n_right", [8, 600])
+def test_cross_merge_arm_pyarrow_crossover(n_right):
+    # exercise both sides of the n_other <= 512 take/chunked-repeat
+    # crossover in the pyarrow expansion path
+    pytest.importorskip("pyarrow")
+    from pandas.core.reshape.merge import _cross_merge_arm
+
+    left = DataFrame({"a": pd.array(["x", "y", "z"], dtype="string[pyarrow]")})
+    right = DataFrame(
+        {"b": pd.array([f"r{i}" for i in range(n_right)], dtype="string[pyarrow]")}
+    )
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.array(np.repeat(["x", "y", "z"], n_right), dtype="string[pyarrow]"),
+            "b": pd.array(
+                np.tile([f"r{i}" for i in range(n_right)], 3),
+                dtype="string[pyarrow]",
+            ),
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
 def test_cross_merge_arm_masked_array_fallback_direct():
     from pandas.core.reshape.merge import _cross_merge_arm
 
