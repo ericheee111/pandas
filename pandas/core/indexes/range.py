@@ -24,7 +24,6 @@ from pandas._libs import (
     lib,
 )
 from pandas._libs.lib import no_default
-from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.util._decorators import (
     cache_readonly,
@@ -518,17 +517,6 @@ class RangeIndex(Index):
         """
         if is_integer(key) or (is_float(key) and key.is_integer()):
             new_key = int(key)
-            if IS_ARM:
-                # O(1) arithmetic instead of range.index's linear scan.
-                start, stop, step = self.start, self.stop, self.step
-                if step > 0:
-                    in_range = start <= new_key < stop
-                else:
-                    in_range = stop < new_key <= start
-                if in_range and (new_key - start) % step == 0:
-                    return (new_key - start) // step
-                raise KeyError(key)
-            # non-ARM: original linear scan
             try:
                 return self._range.index(new_key)
             except ValueError as err:
