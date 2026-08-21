@@ -1,9 +1,9 @@
 """
 Direct libgroupby tests for ``group_last``.
 
-These exercise the AArch64 reverse-scan fastpath as well as the generic
-fallback path.  Every case is cross-checked against an independent reference
-and, where both paths are reachable, against the fallback path itself.
+Every case is cross-checked against an independent reference, including
+skipna/keep-NaN variants, masked inputs, min_count semantics and negative
+labels.
 """
 
 import numpy as np
@@ -354,19 +354,19 @@ def test_last_with_mask_all_masked_group():
 # ---------------------------------------------------------------------------
 
 
-def test_last_fastpath_equals_fallback():
-    """Compare the K==1 float fastpath with the min_count fallback."""
+def test_last_min_count_leaves_observed_values():
+    """min_count only gates NaN output; observed values stay identical."""
     rng = np.random.default_rng(13)
     n, ngroups = 500, 17
     col = rng.standard_normal(n).astype(np.float64)
     col[::7] = np.nan
     labels = rng.integers(0, ngroups, size=n).astype(np.intp)
 
-    # Fastpath-eligible.
     out1, counts1, _ = _run_group_last(col, labels, ngroups)
 
-    # min_count > 1 forces the generic path.  Every group has well over two
-    # valid observations, so the expected values are unchanged.
+    # min_count > 1 only replaces below-min-count groups with NaN.  Every
+    # group has well over two valid observations, so the observed values
+    # are unchanged.
     out2, counts2, _ = _run_group_last(col, labels, ngroups, min_count=2)
 
     tm.assert_numpy_array_equal(counts1, counts2)
