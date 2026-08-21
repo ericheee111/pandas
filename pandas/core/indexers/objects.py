@@ -576,6 +576,58 @@ class GroupbyIndexer(BaseIndexer):
             **kwargs,
         )
 
+    def _get_window_bounds_legacy(
+        self,
+        num_values: int = 0,
+        min_periods: int | None = None,
+        center: bool | None = None,
+        closed: str | None = None,
+        step: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        start_arrays = []
+        end_arrays = []
+        window_indices_start = 0
+        for indices in self.groupby_indices.values():
+            index_array: np.ndarray | None
+
+            if self.index_array is not None:
+                index_array = self.index_array.take(ensure_platform_int(indices))
+            else:
+                index_array = self.index_array
+            indexer = self.window_indexer(
+                index_array=index_array,
+                window_size=self.window_size,
+                **self.indexer_kwargs,
+            )
+            start, end = indexer.get_window_bounds(
+                len(indices), min_periods, center, closed, step
+            )
+            start = start.astype(np.int64)
+            end = end.astype(np.int64)
+            assert len(start) == len(end), (
+                "these should be equal in length from get_window_bounds"
+            )
+            # Cannot use groupby_indices as they might not be monotonic with the object
+            # we're rolling over
+            window_indices = np.arange(
+                window_indices_start, window_indices_start + len(indices)
+            )
+            window_indices_start += len(indices)
+            # Extend as we'll be slicing window like [start, end)
+            if len(window_indices) == 0:
+                window_indices = np.array([window_indices_start], dtype=np.int64)
+            else:
+                window_indices = np.append(
+                    window_indices, [window_indices[-1] + 1]
+                ).astype(np.int64, copy=False)
+            start_arrays.append(window_indices.take(ensure_platform_int(start)))
+            end_arrays.append(window_indices.take(ensure_platform_int(end)))
+        if len(start_arrays) == 0:
+            return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        start = np.concatenate(start_arrays)
+        end = np.concatenate(end_arrays)
+        return start, end
+
     def get_window_bounds(
         self,
         num_values: int = 0,
@@ -615,6 +667,17 @@ class GroupbyIndexer(BaseIndexer):
         if len(self.groupby_indices) == 0:
             return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
 
+        use_grouped_bounds = (
+            IS_ARM
+            and step is None
+            and self.window_indexer
+            in (ExpandingIndexer, FixedWindowIndexer, VariableWindowIndexer)
+        )
+        if not use_grouped_bounds:
+            return self._get_window_bounds_legacy(
+                num_values, min_periods, center, closed, step
+            )
+
         group_indices = list(self.groupby_indices.values())
         group_sizes = np.fromiter(
             (len(indices) for indices in group_indices),
@@ -624,14 +687,12 @@ class GroupbyIndexer(BaseIndexer):
         group_ends = group_sizes.cumsum()
         group_starts = np.concatenate(([0], group_ends[:-1]))
 
-        use_grouped_bounds = IS_ARM and step is None
-
-        if use_grouped_bounds and self.window_indexer is ExpandingIndexer:
+        if self.window_indexer is ExpandingIndexer:
             start = np.repeat(group_starts, group_sizes)
             end = np.arange(1, group_ends[-1] + 1, dtype=np.int64)
             return start, end
 
-        if use_grouped_bounds and self.window_indexer is FixedWindowIndexer:
+        if self.window_indexer is FixedWindowIndexer:
             repeated_group_starts = np.repeat(group_starts, group_sizes)
             repeated_group_ends = np.repeat(group_ends, group_sizes)
             if center or self.window_size == 0:
@@ -654,7 +715,7 @@ class GroupbyIndexer(BaseIndexer):
             end = np.clip(end, repeated_group_starts, repeated_group_ends)
             return start, end
 
-        if use_grouped_bounds and self.window_indexer is VariableWindowIndexer:
+        if self.window_indexer is VariableWindowIndexer:
             assert self.index_array is not None
             if (index_length := len(self.index_array)) < num_values:
                 raise ValueError(
@@ -676,43 +737,7 @@ class GroupbyIndexer(BaseIndexer):
                 group_boundaries,
             )
 
-        start_arrays = []
-        end_arrays = []
-        window_indices_start = 0
-        for indices in group_indices:
-            index_array: np.ndarray | None
-
-            if self.index_array is not None:
-                index_array = self.index_array.take(ensure_platform_int(indices))
-            else:
-                index_array = self.index_array
-            indexer = self.window_indexer(
-                index_array=index_array,
-                window_size=self.window_size,
-                **self.indexer_kwargs,
-            )
-            start, end = indexer.get_window_bounds(
-                len(indices), min_periods, center, closed, step
-            )
-            start = start.astype(np.int64)
-            end = end.astype(np.int64)
-            assert len(start) == len(end), (
-                "these should be equal in length from get_window_bounds"
-            )
-            # Cannot use groupby_indices as they might not be monotonic with the object
-            # we're rolling over
-            window_indices = np.arange(
-                window_indices_start,
-                window_indices_start + len(indices) + 1,
-                dtype=np.int64,
-            )
-            window_indices_start += len(indices)
-            # Extend as we'll be slicing window like [start, end)
-            start_arrays.append(window_indices.take(ensure_platform_int(start)))
-            end_arrays.append(window_indices.take(ensure_platform_int(end)))
-        start = np.concatenate(start_arrays)
-        end = np.concatenate(end_arrays)
-        return start, end
+        raise AssertionError("unexpected grouped window indexer")
 
 
 class ExponentialMovingWindowIndexer(BaseIndexer):
