@@ -29,6 +29,7 @@ from pandas._libs import (
     lib,
 )
 import pandas._libs.groupby as libgroupby
+import pandas._libs.groupby_neon as libgroupby_neon
 from pandas._typing import (
     ArrayLike,
     AxisInt,
@@ -448,16 +449,36 @@ class WrappedCythonOp:
             elif self.how in ["sem", "std", "var", "ohlc", "prod"]:
                 if self.how in ["std", "sem"]:
                     kwargs["is_datetimelike"] = is_datetimelike
-                func(
-                    result,
-                    counts,
-                    values,
-                    comp_ids,
-                    min_count=min_count,
-                    mask=mask,
-                    result_mask=result_mask,
-                    **kwargs,
+                # AArch64 NEON prod entry lives in its own translation
+                # unit: a dispatch inside the fused group_prod perturbs
+                # the code generation of its generic loop
+                handled = (
+                    self.how == "prod"
+                    and _IS_AARCH64
+                    and mask is None
+                    and values.dtype.kind == "f"
+                    and kwargs.get("skipna", True)
+                    and min_count <= 0
+                    and libgroupby_neon.group_prod_native_float(
+                        result,
+                        counts,
+                        values,
+                        comp_ids,
+                        min_count,
+                        kwargs.get("skipna", True),
+                    )
                 )
+                if not handled:
+                    func(
+                        result,
+                        counts,
+                        values,
+                        comp_ids,
+                        min_count=min_count,
+                        mask=mask,
+                        result_mask=result_mask,
+                        **kwargs,
+                    )
             elif self.how in ["any", "all"]:
                 func(
                     out=result,
