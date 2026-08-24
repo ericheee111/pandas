@@ -70,7 +70,7 @@ def _run_group_last(
 
 
 # ---------------------------------------------------------------------------
-# Basic correctness on the fastpath-eligible shape (1-D native float, skipna)
+# Basic correctness (1-D float, skipna)
 # ---------------------------------------------------------------------------
 
 
@@ -260,7 +260,7 @@ def test_last_min_count_2_blocks_sparse_group():
 
 
 # ---------------------------------------------------------------------------
-# skipna=False forces fallback (fastpath requires skipna=True)
+# skipna=False propagates NaN
 # ---------------------------------------------------------------------------
 
 
@@ -314,7 +314,7 @@ def test_last_multi_column_with_nan():
 
 
 # ---------------------------------------------------------------------------
-# Mask path forces fallback (fastpath requires not uses_mask)
+# Masked inputs
 # ---------------------------------------------------------------------------
 
 
@@ -350,7 +350,7 @@ def test_last_with_mask_all_masked_group():
 
 
 # ---------------------------------------------------------------------------
-# Fastpath vs fallback public-result equality on ARM
+# min_count semantics on large random inputs
 # ---------------------------------------------------------------------------
 
 

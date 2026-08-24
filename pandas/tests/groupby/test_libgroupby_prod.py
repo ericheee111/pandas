@@ -13,6 +13,7 @@ from pandas import DataFrame
 from pandas.compat import is_platform_arm
 
 from pandas._libs.groupby import group_prod
+from pandas._libs.groupby_neon import group_prod_native_float
 
 import pandas._testing as tm
 
@@ -392,3 +393,49 @@ def test_prod_native_entry_equals_fallback(ncols):
     expected = df.groupby("key").prod(min_count=1)
 
     tm.assert_frame_equal(result, expected)
+
+
+def test_prod_native_entry_rejects_ineligible_calls():
+    # entry contract: skipna=False / min_count > 0 / masked input must
+    # return False (caller falls back to the fused group_prod) on every
+    # platform; a mask argument cannot be passed here (the entry takes
+    # none), so eligibility for masks is enforced by the caller.
+    rng = np.random.default_rng(13)
+    values = (rng.standard_normal((30, 2)) + 2.0).reshape(-1, 2)
+    values[::7] = np.nan
+    labels = rng.integers(0, 3, size=30).astype(np.intp)
+
+    out = np.zeros((3, 2), dtype=np.float64)
+    counts = np.zeros(3, dtype=np.int64)
+
+    assert not group_prod_native_float(
+        out, counts, values, labels, 0, False
+    )  # skipna=False
+    assert not group_prod_native_float(
+        out, counts, values, labels, 1, True
+    )  # min_count > 0
+
+
+@pytest.mark.parametrize("ncols", [1, 2, 3, 8])
+def test_prod_native_entry_direct(ncols):
+    # direct call: on AArch64 the entry handles eligible calls and must
+    # match the NumPy reference; elsewhere it returns False and the
+    # buffers stay untouched (fallback responsibility).
+    rng = np.random.default_rng(29)
+    n, ngroups = 500, 17
+    values = (rng.standard_normal((n, ncols)) + 2.0).astype(np.float64)
+    values[::7] = np.nan
+    labels = rng.integers(0, ngroups, size=n).astype(np.intp)
+
+    out = np.zeros((ngroups, ncols), dtype=np.float64)
+    counts = np.zeros(ngroups, dtype=np.int64)
+
+    handled = group_prod_native_float(out, counts, values, labels, 0, True)
+    if not is_platform_arm():
+        assert not handled
+        return
+
+    assert handled
+    expected_out, expected_counts = _reference_prod(values, labels, ngroups)
+    tm.assert_almost_equal(out, expected_out, rtol=1e-5)
+    tm.assert_numpy_array_equal(counts, expected_counts)
