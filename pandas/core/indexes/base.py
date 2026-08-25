@@ -33,6 +33,7 @@ from pandas._libs import (
     lib,
     writers,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.internals import BlockValuesRefs
 import pandas._libs.join as libjoin
 from pandas._libs.lib import (
@@ -3730,7 +3731,11 @@ class Index(IndexOpsMixin, PandasObject):
         if len(target) == 0:
             return np.array([], dtype=np.intp)
 
-        if not self._should_compare(target) and not self._should_partial_index(target):
+        if (
+            not (IS_ARM and self.dtype == target.dtype)
+            and not self._should_compare(target)
+            and not self._should_partial_index(target)
+        ):
             # IntervalIndex get special treatment bc numeric scalars can be
             #  matched to Interval scalars
             return self._get_indexer_non_comparable(target, method=method, unique=True)
@@ -3740,7 +3745,38 @@ class Index(IndexOpsMixin, PandasObject):
             #  (could improve perf by doing _should_compare check earlier?)
             assert self.dtype == target.dtype
 
-            indexer = self._engine.get_indexer(target.codes)
+            target_codes = target.codes
+            if IS_ARM and self.is_monotonic_increasing and not self.hasnans:
+                codes = self.codes
+                n = len(codes)
+                if len(target_codes) >= n:
+                    # Bulk lookup: a single vectorized ``searchsorted`` on the
+                    # strictly-increasing unique codes replaces per-element
+                    # hash-table lookups (and avoids building the hash table).
+                    if n == 0:
+                        indexer = np.full(len(target_codes), -1, dtype=np.intp)
+                    else:
+                        pos = np.searchsorted(codes, target_codes, side="left")
+                        np.clip(pos, 0, n - 1, out=pos)
+                        indexer = np.where(
+                            codes[pos] == target_codes, pos, -1
+                        ).astype(np.intp, copy=False)
+                elif (
+                    codes.dtype.kind == "i"
+                    and target_codes.dtype.kind == "i"
+                    and codes.dtype == target_codes.dtype
+                ):
+                    # Small target on a large monotonic-unique index: a single
+                    # fused Cython binary search beats cached hash-table
+                    # lookups (no per-call numpy overhead, no hash-table
+                    # build/lookup).
+                    indexer = libalgos.get_indexer_sorted_unique(
+                        codes, target_codes
+                    )
+                else:
+                    indexer = self._engine.get_indexer(target_codes)
+            else:
+                indexer = self._engine.get_indexer(target_codes)
             if self.hasnans and target.hasnans:
                 # After _maybe_cast_listlike_indexer, target elements which do not
                 # belong to some category are changed to NaNs
@@ -4673,7 +4709,7 @@ class Index(IndexOpsMixin, PandasObject):
     @final
     def _join_non_unique(
         self, other: Index, how: JoinHow = "left", sort: bool = False
-    ) -> tuple[Index, npt.NDArray[np.intp], npt.NDArray[np.intp]]:
+    ) -> tuple[Index, npt.NDArray[np.intp] | None, npt.NDArray[np.intp] | None]:
         from pandas.core.reshape.merge import get_join_indexers_non_unique
 
         # We only get here if dtypes match
@@ -4684,9 +4720,9 @@ class Index(IndexOpsMixin, PandasObject):
         )
 
         if how == "right":
-            join_index = other.take(right_idx)
+            join_index = other.take(right_idx) if right_idx is not None else other[:]
         else:
-            join_index = self.take(left_idx)
+            join_index = self.take(left_idx) if left_idx is not None else self[:]
 
         if how == "outer":
             mask = left_idx == -1
@@ -5392,6 +5428,24 @@ class Index(IndexOpsMixin, PandasObject):
         corresponding `Index` subclass.
 
         """
+        if IS_ARM and (
+            isinstance(key, np.ndarray)
+            and key.dtype == np.bool_
+            and key.ndim != 0
+            and isinstance(self._data, np.ndarray)
+        ):
+            if len(key) != len(self):
+                raise ValueError(
+                    "The length of the boolean indexer does not match "
+                    "the length of the Index."
+                )
+            if self._data.dtype == object:
+                result = lib.fast_bool_index_objarray(self._data, key.view(np.uint8))
+            else:
+                result = self._data.compress(key)
+            cls = type(self)
+            return cls._simple_new(result, name=self._name)
+
         getitem = self._data.__getitem__
 
         key = lib.item_from_zerodim(key)
@@ -5404,6 +5458,20 @@ class Index(IndexOpsMixin, PandasObject):
             # This case is separated from the conditional above to avoid
             # pessimization com.is_bool_indexer and ndim checks.
             return self._getitem_slice(key)
+
+        # Fast path for boolean Series indexing
+        if IS_ARM and isinstance(key, ABCSeries) and key.dtype == np.bool_:
+            mask = key._values
+            if len(mask) != len(self):
+                raise ValueError(
+                    "The length of the boolean indexer does not match "
+                    "the length of the Index."
+                )
+            if isinstance(self._data, np.ndarray):
+                result = lib.fast_bool_mask_indexer(self._data, mask)
+            else:
+                result = self._data[mask]
+            return type(self)._simple_new(result, name=self._name)
 
         if com.is_bool_indexer(key):
             # if we have list[bools, length=1e5] then doing this check+convert
@@ -5958,15 +6026,30 @@ class Index(IndexOpsMixin, PandasObject):
         >>> idx.sort_values(ascending=False, return_indexer=True)
         (Index([1000, 100, 10, 1], dtype='int64'), array([3, 1, 0, 2]))
         """
-        if key is None and (
-            (ascending and self.is_monotonic_increasing)
-            or (not ascending and self.is_monotonic_decreasing)
-        ):
-            if return_indexer:
-                indexer = np.arange(len(self), dtype=np.intp)
-                return self.copy(), indexer
-            else:
-                return self.copy()
+        if key is None:
+            if (ascending and self.is_monotonic_increasing) or (
+                not ascending and self.is_monotonic_decreasing
+            ):
+                if return_indexer:
+                    indexer = np.arange(len(self), dtype=np.intp)
+                    return self.copy(), indexer
+                else:
+                    return self.copy()
+
+            elif (
+                IS_ARM
+                and not ascending
+                and self.is_monotonic_increasing
+                and self.is_unique
+            ):
+                # ARM-only fastpath: reversing a unique monotonic-increasing
+                # index yields a correctly sorted descending index in O(n)
+                # instead of an O(n log n) argsort.
+                indexer = np.arange(len(self), dtype=np.intp)[::-1]
+                if return_indexer:
+                    return self[::-1], indexer
+                else:
+                    return self[::-1]
 
         # GH 35584. Sort missing values according to na_position kwarg
         # ignore na_position for MultiIndex

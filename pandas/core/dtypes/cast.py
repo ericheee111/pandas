@@ -29,6 +29,7 @@ from pandas._libs import (
     Period,
     lib,
 )
+from pandas.compat._arch import IS_ARM
 from pandas._libs.missing import (
     NA,
     NAType,
@@ -1431,10 +1432,23 @@ def construct_1d_arraylike_from_scalar(
     elif dtype.kind in "mM":
         value = _maybe_box_and_unbox_datetimelike(value, dtype)
 
-    subarr = np.empty(length, dtype=dtype)
-    if length:
-        # GH 47391: numpy > 1.24 will raise filling np.nan into int dtypes
-        subarr.fill(value)
+    if IS_ARM:
+        if length:
+            # GH 47391: numpy > 1.24 will raise filling np.nan into int dtypes
+            if dtype == np.object_:
+                # np.full with object dtype may not preserve numpy scalar types
+                # (e.g. np.timedelta64), so use empty + fill for correctness
+                subarr = np.empty(length, dtype=dtype)
+                subarr.fill(value)
+            else:
+                subarr = np.full(length, value, dtype=dtype)
+        else:
+            subarr = np.empty(length, dtype=dtype)
+    else:
+        subarr = np.empty(length, dtype=dtype)
+        if length:
+            # GH 47391: numpy > 1.24 will raise filling np.nan into int dtypes
+            subarr.fill(value)
 
     return subarr
 

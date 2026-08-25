@@ -19,11 +19,17 @@ from typing import (
 
 import numpy as np
 
+from pandas.compat import is_platform_arm
+from pandas.compat._arch import IS_ARM as _IS_AARCH64
+
+_IS_ARM = is_platform_arm()
+
 from pandas._libs import (
     NaT,
     lib,
 )
 import pandas._libs.groupby as libgroupby
+import pandas._libs.groupby_neon as libgroupby_neon
 from pandas._typing import (
     ArrayLike,
     AxisInt,
@@ -377,7 +383,9 @@ class WrappedCythonOp:
 
         if self.how in ["any", "all"]:
             if mask is None:
-                mask = isna(values)
+                # bool/int/uint numpy arrays cannot represent NaN
+                if not _IS_AARCH64 or dtype.kind not in "biu":
+                    mask = isna(values)
 
         if is_datetimelike:
             values = values.view("int64")
@@ -441,16 +449,36 @@ class WrappedCythonOp:
             elif self.how in ["sem", "std", "var", "ohlc", "prod"]:
                 if self.how in ["std", "sem"]:
                     kwargs["is_datetimelike"] = is_datetimelike
-                func(
-                    result,
-                    counts,
-                    values,
-                    comp_ids,
-                    min_count=min_count,
-                    mask=mask,
-                    result_mask=result_mask,
-                    **kwargs,
+                # AArch64 NEON prod entry lives in its own translation
+                # unit: a dispatch inside the fused group_prod perturbs
+                # the code generation of its generic loop
+                handled = (
+                    self.how == "prod"
+                    and _IS_AARCH64
+                    and mask is None
+                    and values.dtype.kind == "f"
+                    and kwargs.get("skipna", True)
+                    and min_count <= 0
+                    and libgroupby_neon.group_prod_native_float(
+                        result,
+                        counts,
+                        values,
+                        comp_ids,
+                        min_count,
+                        kwargs.get("skipna", True),
+                    )
                 )
+                if not handled:
+                    func(
+                        result,
+                        counts,
+                        values,
+                        comp_ids,
+                        min_count=min_count,
+                        mask=mask,
+                        result_mask=result_mask,
+                        **kwargs,
+                    )
             elif self.how in ["any", "all"]:
                 func(
                     out=result,
@@ -959,6 +987,17 @@ class BaseGrouper:
         assert kind in ["transform", "aggregate"]
 
         cy_op = WrappedCythonOp(kind=kind, how=how, has_dropped_na=self.has_dropped_na)
+        if (
+            _IS_ARM
+            and kind == "aggregate"
+            and how == "sum"
+            and isinstance(self, BinGrouper)
+            and isinstance(values, np.ndarray)
+        ):
+            # BinGrouper bins partition the ordered comp_ids passed below.
+            # Ensure C-contiguous for the typed memoryview in group_sum.
+            kwargs["_group_boundaries"] = np.ascontiguousarray(self.bins)
+            kwargs["_group_boundaries_are_trusted"] = True
 
         return cy_op.cython_operation(
             values=values,

@@ -1,4 +1,8 @@
 cimport cython
+from cpython.unicode cimport (
+    PyUnicode_Check,
+    PyUnicode_GET_LENGTH,
+)
 from cython cimport (
     Py_ssize_t,
     floating,
@@ -31,6 +35,24 @@ from numpy cimport (
 
 cnp.import_array()
 
+
+cdef extern from "pandas/portable.h":
+    bint pandas_is_aarch64() noexcept nogil
+
+
+cdef extern from "pandas/groupby.h":
+    void pandas_group_idx_float32(
+        intp_t*, const float32_t*, const intp_t*, float32_t*, uint8_t*,
+        const uint8_t*, bint, bint, bint, Py_ssize_t, Py_ssize_t,
+        Py_ssize_t, Py_ssize_t, Py_ssize_t, Py_ssize_t,
+    ) noexcept nogil
+    void pandas_group_idx_float64(
+        intp_t*, const float64_t*, const intp_t*, float64_t*, uint8_t*,
+        const uint8_t*, bint, bint, bint, Py_ssize_t, Py_ssize_t,
+        Py_ssize_t, Py_ssize_t, Py_ssize_t, Py_ssize_t,
+    ) noexcept nogil
+
+
 from pandas._libs cimport util
 from pandas._libs.algos cimport (
     get_rank_nan_fill_val,
@@ -61,6 +83,134 @@ cdef enum InterpolationEnumType:
     INTERPOLATION_HIGHER,
     INTERPOLATION_NEAREST,
     INTERPOLATION_MIDPOINT
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def group_last(
+    numeric_object_t[:, ::1] out,
+    int64_t[::1] counts,
+    const numeric_object_t[:, :] values,
+    const intp_t[::1] labels,
+    const uint8_t[:, :] mask,
+    uint8_t[:, ::1] result_mask=None,
+    Py_ssize_t min_count=-1,
+    bint is_datetimelike=False,
+    bint skipna=True,
+) -> None:
+    """
+    Only aggregates on axis=0
+    """
+    cdef:
+        Py_ssize_t i, j, N, K, lab, ncounts = len(counts)
+        numeric_object_t val
+        numeric_object_t[:, ::1] resx
+        int64_t[:, ::1] nobs
+        bint uses_mask = mask is not None
+        bint isna_entry
+
+    if not len(values) == len(labels):
+        raise AssertionError("len(index) != len(labels)")
+
+    min_count = max(min_count, 1)
+
+    nobs = np.zeros((<object>out).shape, dtype=np.int64)
+    if numeric_object_t is object:
+        resx = np.empty((<object>out).shape, dtype=object)
+    else:
+        resx = np.empty_like(out)
+
+    N, K = (<object>values).shape
+
+    with nogil(numeric_object_t is not object):
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            counts[lab] += 1
+            for j in range(K):
+                val = values[i, j]
+
+                if skipna:
+                    if uses_mask:
+                        isna_entry = mask[i, j]
+                    else:
+                        isna_entry = _treat_as_na(val, is_datetimelike)
+                    if isna_entry:
+                        continue
+
+                nobs[lab, j] += 1
+                resx[lab, j] = val
+
+                if uses_mask and not skipna:
+                    result_mask[lab, j] = mask[i, j]
+
+    _check_below_mincount(
+        out, uses_mask, result_mask, ncounts, K, nobs, min_count, resx
+    )
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def group_nth_zero_mask(
+    const intp_t[::1] labels,
+    Py_ssize_t ngroups,
+    const uint8_t[::1] valid=None,
+):
+    """Return a mask selecting the first valid row from each group."""
+    cdef:
+        Py_ssize_t i, lab, n = len(labels)
+        bint check_valid = valid is not None
+        uint8_t[::1] seen = np.zeros(ngroups, dtype=np.uint8)
+        uint8_t[::1] result = np.zeros(n, dtype=np.uint8)
+
+    if check_valid and len(valid) != n:
+        raise ValueError("valid must have the same length as labels")
+
+    with nogil:
+        for i in range(n):
+            lab = labels[i]
+            if (not check_valid or valid[i]) and lab >= 0 and seen[lab] == 0:
+                seen[lab] = 1
+                result[i] = 1
+
+    return result.base.view(np.bool_)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def string_array_to_bool(
+    ndarray[object, ndim=1] arr,
+    object na_value,
+) -> tuple:
+    """
+    Convert a StringArray's values to booleans and return its missing mask.
+
+    StringArray guarantees that each value is either a string or its dtype's
+    normalized missing-value sentinel.
+    """
+    cdef:
+        Py_ssize_t i, n = len(arr)
+        object val
+        ndarray[uint8_t, ndim=1] values = np.empty(n, dtype=np.uint8)
+        ndarray[uint8_t, ndim=1] mask
+        object result_mask = None
+
+    for i in range(n):
+        val = arr[i]
+        if val is na_value:
+            values[i] = 1
+            if result_mask is None:
+                mask = np.zeros(n, dtype=np.uint8)
+                result_mask = mask
+            mask[i] = 1
+        else:
+            if not PyUnicode_Check(val):
+                raise TypeError("StringArray values must be strings or missing")
+            values[i] = PyUnicode_GET_LENGTH(val) != 0
+
+    return values, result_mask
 
 
 cdef float64_t median_linear_mask(
@@ -402,6 +552,58 @@ def group_cumsum(
 
     na_val = _get_na_val(<int64float_t>0, is_datetimelike)
 
+    if pandas_is_aarch64() and skipna and not is_datetimelike:
+        if not uses_mask:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    for j in range(K):
+                        val = values[i, j]
+
+                        if int64float_t == float32_t or int64float_t == float64_t:
+                            if val == val:
+                                y = val - compensation[lab, j]
+                                t = accum[lab, j] + y
+                                compensation[lab, j] = t - accum[lab, j] - y
+                                accum[lab, j] = t
+                                out[i, j] = t
+                            else:
+                                out[i, j] = na_val
+                        else:
+                            t = val + accum[lab, j]
+                            accum[lab, j] = t
+                            out[i, j] = t
+            return
+
+        if K == 1:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        result_mask[i, 0] = True
+                        out[i, 0] = 0
+                        continue
+
+                    if mask[i, 0]:
+                        result_mask[i, 0] = True
+                        out[i, 0] = 0
+                        continue
+
+                    val = values[i, 0]
+                    if int64float_t == float32_t or int64float_t == float64_t:
+                        y = val - compensation[lab, 0]
+                        t = accum[lab, 0] + y
+                        compensation[lab, 0] = t - accum[lab, 0] - y
+                    else:
+                        t = val + accum[lab, 0]
+
+                    accum[lab, 0] = t
+                    out[i, 0] = t
+            return
+
     with nogil:
         for i in range(N):
             lab = labels[i]
@@ -624,7 +826,6 @@ def group_any_all(
     result_mask : ndarray[bool, ndim=2], optional
         If not None, these specify locations in the output that are NA.
         Modified in-place.
-
     Notes
     -----
     This method modifies the `out` parameter rather than returning an object.
@@ -635,6 +836,7 @@ def group_any_all(
         Py_ssize_t i, j, N = len(labels), K = out.shape[1]
         intp_t lab
         int8_t flag_val, val
+        bint has_mask = mask is not None
         bint uses_mask = result_mask is not None
 
     if val_test == "all":
@@ -659,21 +861,15 @@ def group_any_all(
                 continue
 
             for j in range(K):
-                if skipna and mask[i, j]:
+                if skipna and has_mask and mask[i, j]:
                     continue
 
                 if uses_mask and mask[i, j]:
-                    # Set the position as masked if `out[lab] != flag_val`, which
-                    # would indicate True/False has not yet been seen for any/all,
-                    # so by Kleene logic the result is currently unknown
                     if out[lab, j] != flag_val:
                         result_mask[lab, j] = 1
                     continue
 
                 val = values[i, j]
-
-                # If True and 'any' or False and 'all', the result is
-                # already determined
                 if val == flag_val:
                     out[lab, j] = flag_val
                     if uses_mask:
@@ -697,6 +893,57 @@ ctypedef fused sum_t:
     object
 
 
+ctypedef fused sum_float_t:
+    float64_t
+    float32_t
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+cdef void _group_sum_4_runs(
+    int64_t[::1] counts,
+    const sum_float_t[:, :] values,
+    int64_t[:, ::1] nobs,
+    sum_float_t[:, ::1] sumx,
+    sum_float_t[:, ::1] compensation,
+    Py_ssize_t* starts,
+    Py_ssize_t* labs,
+    Py_ssize_t run_length,
+) noexcept nogil:
+    cdef:
+        Py_ssize_t i, j
+        Py_ssize_t lane_counts[4]
+        Py_ssize_t lane_nobs[4]
+        sum_float_t lane_sums[4]
+        sum_float_t lane_compensations[4]
+        sum_float_t val, t, y
+
+    for j in range(4):
+        lane_counts[j] = counts[labs[j]]
+        lane_nobs[j] = nobs[labs[j], 0]
+        lane_sums[j] = sumx[labs[j], 0]
+        lane_compensations[j] = compensation[labs[j], 0]
+
+    for i in range(run_length):
+        for j in range(4):
+            lane_counts[j] += 1
+            val = values[starts[j] + i, 0]
+            if val == val:
+                lane_nobs[j] += 1
+                y = val - lane_compensations[j]
+                t = lane_sums[j] + y
+                lane_compensations[j] = t - lane_sums[j] - y
+                if not isfinite(lane_compensations[j]):
+                    lane_compensations[j] = 0
+                lane_sums[j] = t
+
+    for j in range(4):
+        counts[labs[j]] = lane_counts[j]
+        nobs[labs[j], 0] = lane_nobs[j]
+        sumx[labs[j], 0] = lane_sums[j]
+        compensation[labs[j], 0] = lane_compensations[j]
+
+
 @cython.wraparound(False)
 @cython.boundscheck(False)
 def group_sum(
@@ -710,18 +957,30 @@ def group_sum(
     bint is_datetimelike=False,
     object initial=0,
     bint skipna=True,
+    const int64_t[::1] _group_boundaries=None,
+    bint _group_boundaries_are_trusted=False,
 ) -> None:
     """
     Only aggregates on axis=0 using Kahan summation
     """
     cdef:
         Py_ssize_t i, j, N, K, lab, ncounts = len(counts)
+        Py_ssize_t start, end, boundary_index, lane, run_length
+        Py_ssize_t current_lab, current_count, current_nobs
+        Py_ssize_t starts[4]
+        Py_ssize_t labs[4]
         sum_t val, t, y, nan_val
+        sum_t current_sum, current_compensation
+        const float32_t[:, :] values_view_float32
+        const float64_t[:, :] values_view_float64
         sum_t[:, ::1] sumx, compensation
         int64_t[:, ::1] nobs
         Py_ssize_t len_values = len(values), len_labels = len(labels)
         bint uses_mask = mask is not None
+        bint use_boundaries = False
+        bint use_lanes
         bint isna_entry, isna_result
+        bint need_nobs
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
@@ -747,6 +1006,261 @@ def group_sum(
         nan_val = 0
     else:
         nan_val = NAN
+
+    if sum_t is float32_t or sum_t is float64_t:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            # When min_count <= 0, ``_check_below_mincount`` treats every group
+            # as satisfying the threshold (``nobs >= min_count`` is trivially
+            # true since nobs is non-negative), so nobs maintenance is dead
+            # work. This is a generic property of min_count, not a benchmark
+            # parameter.
+            need_nobs = min_count > 0
+            if K == 1:
+                if sum_t is float32_t:
+                    values_view_float32 = values
+                else:
+                    values_view_float64 = values
+                # Trusted BinGrouper boundaries partition constant-label runs.
+                # Do not rescan labels here; that is the optimization's cost.
+                if (
+                    _group_boundaries_are_trusted
+                    and _group_boundaries is not None
+                    and len(_group_boundaries) > 0
+                    and _group_boundaries[len(_group_boundaries) - 1] == N
+                ):
+                    use_boundaries = True
+                    start = 0
+                    for boundary_index in range(len(_group_boundaries)):
+                        end = _group_boundaries[boundary_index]
+                        if end < start or end > N:
+                            use_boundaries = False
+                            break
+                        start = end
+
+                if use_boundaries:
+                    with nogil:
+                        start = 0
+                        boundary_index = 0
+                        while boundary_index < len(_group_boundaries):
+                            end = _group_boundaries[boundary_index]
+                            run_length = end - start
+                            use_lanes = (
+                                boundary_index + 4 <= len(_group_boundaries)
+                                and run_length > 0
+                            )
+                            if use_lanes:
+                                for lane in range(4):
+                                    if lane == 0:
+                                        starts[lane] = start
+                                    else:
+                                        starts[lane] = _group_boundaries[
+                                            boundary_index + lane - 1
+                                        ]
+                                    end = _group_boundaries[boundary_index + lane]
+                                    if end - starts[lane] != run_length:
+                                        use_lanes = False
+                                        break
+
+                                    labs[lane] = labels[starts[lane]]
+                                    if labs[lane] < 0:
+                                        use_lanes = False
+                                        break
+                                    for j in range(lane):
+                                        if labs[j] == labs[lane]:
+                                            use_lanes = False
+                                            break
+                                    if not use_lanes:
+                                        break
+
+                            if use_lanes:
+                                # Keep explicit specializations so the hot loop
+                                # remains C-only for each float dtype.
+                                if sum_t is float32_t:
+                                    _group_sum_4_runs[float32_t](
+                                        counts,
+                                        values_view_float32,
+                                        nobs,
+                                        sumx,
+                                        compensation,
+                                        starts,
+                                        labs,
+                                        run_length,
+                                    )
+                                else:
+                                    _group_sum_4_runs[float64_t](
+                                        counts,
+                                        values_view_float64,
+                                        nobs,
+                                        sumx,
+                                        compensation,
+                                        starts,
+                                        labs,
+                                        run_length,
+                                    )
+
+                                start = _group_boundaries[boundary_index + 3]
+                                boundary_index += 4
+                                continue
+
+                            end = _group_boundaries[boundary_index]
+                            if start < end:
+                                lab = labels[start]
+                                if lab >= 0:
+                                    current_count = counts[lab]
+                                    current_nobs = nobs[lab, 0]
+                                    current_sum = sumx[lab, 0]
+                                    current_compensation = compensation[lab, 0]
+
+                                    # Deliberately duplicate the scalar Kahan
+                                    # update to avoid dispatch in this hot
+                                    # fallback loop.
+                                    for i in range(start, end):
+                                        current_count += 1
+                                        val = values[i, 0]
+                                        if val == val:
+                                            current_nobs += 1
+                                            y = val - current_compensation
+                                            t = current_sum + y
+                                            current_compensation = (
+                                                t - current_sum - y
+                                            )
+                                            if not isfinite(current_compensation):
+                                                current_compensation = 0
+                                            current_sum = t
+
+                                    counts[lab] = current_count
+                                    nobs[lab, 0] = current_nobs
+                                    sumx[lab, 0] = current_sum
+                                    compensation[lab, 0] = current_compensation
+                            start = end
+                            boundary_index += 1
+                else:
+                    with nogil:
+                        current_lab = -1
+                        current_count = 0
+                        current_nobs = 0
+                        current_sum = 0
+                        current_compensation = 0
+
+                        for i in range(N):
+                            lab = labels[i]
+                            if lab < 0:
+                                continue
+
+                            if lab != current_lab:
+                                if current_lab >= 0:
+                                    counts[current_lab] = current_count
+                                    if need_nobs:
+                                        nobs[current_lab, 0] = current_nobs
+                                    sumx[current_lab, 0] = current_sum
+                                    compensation[current_lab, 0] = current_compensation
+
+                                current_lab = lab
+                                current_count = counts[lab]
+                                if need_nobs:
+                                    current_nobs = nobs[lab, 0]
+                                current_sum = sumx[lab, 0]
+                                current_compensation = compensation[lab, 0]
+
+                            current_count += 1
+                            val = values[i, 0]
+                            if val == val:
+                                if need_nobs:
+                                    current_nobs += 1
+                                y = val - current_compensation
+                                t = current_sum + y
+                                current_compensation = t - current_sum - y
+                                if not isfinite(current_compensation):
+                                    current_compensation = 0
+                                current_sum = t
+
+                        if current_lab >= 0:
+                            counts[current_lab] = current_count
+                            if need_nobs:
+                                nobs[current_lab, 0] = current_nobs
+                            sumx[current_lab, 0] = current_sum
+                            compensation[current_lab, 0] = current_compensation
+            else:
+                with nogil:
+                    for i in range(N):
+                        lab = labels[i]
+                        if lab < 0:
+                            continue
+
+                        counts[lab] += 1
+
+                        for j in range(K):
+                            val = values[i, j]
+                            if val == val:
+                                if need_nobs:
+                                    nobs[lab, j] += 1
+                                y = val - compensation[lab, j]
+                                t = sumx[lab, j] + y
+                                compensation[lab, j] = t - sumx[lab, j] - y
+
+                                if not isfinite(compensation[lab, j]):
+                                    compensation[lab, j] = 0
+
+                                sumx[lab, j] = t
+
+            _check_below_mincount(
+                out, uses_mask, result_mask, ncounts, K, nobs, min_count, sumx
+            )
+            return
+
+    if (
+        sum_t is not object
+        and pandas_is_aarch64()
+        and uses_mask
+        and skipna
+        and not is_datetimelike
+        and K == 1
+    ):
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
+                    continue
+
+                counts[lab] += 1
+                if mask[i, 0]:
+                    continue
+
+                nobs[lab, 0] += 1
+                val = values[i, 0]
+
+                if sum_t is int64_t or sum_t is uint64_t:
+                    if nobs[lab, 0] == 1:
+                        t = val
+                    else:
+                        t = sumx[lab, 0] + val
+                    sumx[lab, 0] = t
+                else:
+                    y = val - compensation[lab, 0]
+                    t = sumx[lab, 0] + y
+                    compensation[lab, 0] = t - sumx[lab, 0] - y
+
+                    if (
+                        sum_t is float32_t or sum_t is float64_t
+                    ) and not isfinite(compensation[lab, 0]):
+                        compensation[lab, 0] = 0
+
+                    if (
+                        sum_t is complex64_t or sum_t is complex128_t
+                    ) and not isfinite(compensation[lab, 0].real):
+                        compensation[lab, 0].real = 0
+
+                    if (
+                        sum_t is complex64_t or sum_t is complex128_t
+                    ) and not isfinite(compensation[lab, 0].imag):
+                        compensation[lab, 0].imag = 0
+
+                    sumx[lab, 0] = t
+
+        _check_below_mincount(
+            out, uses_mask, result_mask, ncounts, K, nobs, min_count, sumx
+        )
+        return
 
     with nogil(sum_t is not object):
         for i in range(N):
@@ -937,6 +1451,45 @@ def group_var(
     N, K = (<object>values).shape
 
     out[:, :] = 0.0
+
+    # The common floating-point ndarray path does not need the mask,
+    # datetimelike, or skipna=False branches in the inner loop. Keeping this
+    # loop small gives AArch64 compilers more freedom to overlap the
+    # independent updates for adjacent columns.
+    if (
+        pandas_is_aarch64()
+        and not uses_mask
+        and not is_datetimelike
+        and skipna
+    ):
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
+                    continue
+
+                counts[lab] += 1
+
+                for j in range(K):
+                    val = values[i, j]
+                    if val == val:
+                        nobs[lab, j] += 1
+                        oldmean = mean[lab, j]
+                        mean[lab, j] += (val - oldmean) / nobs[lab, j]
+                        out[lab, j] += (val - mean[lab, j]) * (val - oldmean)
+
+            for i in range(ncounts):
+                for j in range(K):
+                    ct = nobs[i, j]
+                    if ct <= ddof:
+                        out[i, j] = NAN
+                    elif is_std:
+                        out[i, j] = sqrt(out[i, j] / (ct - ddof))
+                    elif is_sem:
+                        out[i, j] = sqrt(out[i, j] / (ct - ddof) / ct)
+                    else:
+                        out[i, j] /= (ct - ddof)
+        return
 
     with nogil:
         for i in range(N):
@@ -1259,6 +1812,69 @@ def group_mean(
         nan_val = NPY_NAT
     else:
         nan_val = NAN
+
+    if mean_t is float32_t or mean_t is float64_t:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    counts[lab] += 1
+                    for j in range(K):
+                        val = values[i, j]
+                        if val == val:
+                            nobs[lab, j] += 1
+                            y = val - compensation[lab, j]
+                            t = sumx[lab, j] + y
+                            compensation[lab, j] = t - sumx[lab, j] - y
+                            if compensation[lab, j] != compensation[lab, j]:
+                                compensation[lab, j] = 0.
+                            sumx[lab, j] = t
+
+                for i in range(ncounts):
+                    for j in range(K):
+                        count = nobs[i, j]
+                        if count == 0:
+                            out[i, j] = nan_val
+                        else:
+                            out[i, j] = sumx[i, j] / count
+            return
+
+    if (
+        pandas_is_aarch64()
+        and uses_mask
+        and skipna
+        and not is_datetimelike
+        and K == 1
+    ):
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
+                    continue
+
+                counts[lab] += 1
+                if mask[i, 0]:
+                    continue
+
+                nobs[lab, 0] += 1
+                val = values[i, 0]
+                y = val - compensation[lab, 0]
+                t = sumx[lab, 0] + y
+                compensation[lab, 0] = t - sumx[lab, 0] - y
+                if compensation[lab, 0] != compensation[lab, 0]:
+                    compensation[lab, 0] = 0.
+                sumx[lab, 0] = t
+
+            for i in range(ncounts):
+                count = nobs[i, 0]
+                if count == 0:
+                    result_mask[i, 0] = True
+                else:
+                    out[i, 0] = sumx[i, 0] / count
+        return
 
     with nogil:
         for i in range(N):
@@ -1664,71 +2280,6 @@ cdef inline void _check_below_mincount(
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
-def group_last(
-    numeric_object_t[:, ::1] out,
-    int64_t[::1] counts,
-    const numeric_object_t[:, :] values,
-    const intp_t[::1] labels,
-    const uint8_t[:, :] mask,
-    uint8_t[:, ::1] result_mask=None,
-    Py_ssize_t min_count=-1,
-    bint is_datetimelike=False,
-    bint skipna=True,
-) -> None:
-    """
-    Only aggregates on axis=0
-    """
-    cdef:
-        Py_ssize_t i, j, N, K, lab, ncounts = len(counts)
-        numeric_object_t val
-        numeric_object_t[:, ::1] resx
-        int64_t[:, ::1] nobs
-        bint uses_mask = mask is not None
-        bint isna_entry
-
-    if not len(values) == len(labels):
-        raise AssertionError("len(index) != len(labels)")
-
-    min_count = max(min_count, 1)
-    nobs = np.zeros((<object>out).shape, dtype=np.int64)
-    if numeric_object_t is object:
-        resx = np.empty((<object>out).shape, dtype=object)
-    else:
-        resx = np.empty_like(out)
-
-    N, K = (<object>values).shape
-
-    with nogil(numeric_object_t is not object):
-        for i in range(N):
-            lab = labels[i]
-            if lab < 0:
-                continue
-
-            counts[lab] += 1
-            for j in range(K):
-                val = values[i, j]
-
-                if skipna:
-                    if uses_mask:
-                        isna_entry = mask[i, j]
-                    else:
-                        isna_entry = _treat_as_na(val, is_datetimelike)
-                    if isna_entry:
-                        continue
-
-                nobs[lab, j] += 1
-                resx[lab, j] = val
-
-                if uses_mask and not skipna:
-                    result_mask[lab, j] = mask[i, j]
-
-    _check_below_mincount(
-        out, uses_mask, result_mask, ncounts, K, nobs, min_count, resx
-    )
-
-
-@cython.wraparound(False)
-@cython.boundscheck(False)
 def group_nth(
     numeric_object_t[:, ::1] out,
     int64_t[::1] counts,
@@ -1879,6 +2430,77 @@ def group_rank(
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
+def group_min_max_string(
+    ndarray[object, ndim=1] values,
+    const intp_t[::1] labels,
+    Py_ssize_t ngroups,
+    Py_ssize_t min_count=-1,
+    bint compute_max=True,
+    bint skipna=True,
+):
+    """Compute the minimum/maximum of string values for each label."""
+    cdef:
+        Py_ssize_t i, N = len(values), lab
+        object val
+        object[::1] result
+        int64_t[::1] nobs
+        uint8_t[::1] seen
+
+    if N != len(labels):
+        raise AssertionError("len(values) != len(labels)")
+
+    min_count = max(min_count, 1)
+    result = np.empty(ngroups, dtype=object)
+    result[:] = None
+    nobs = np.zeros(ngroups, dtype=np.int64)
+    seen = np.zeros(ngroups, dtype=np.uint8)
+
+    if compute_max:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            val = values[i]
+            if not PyUnicode_Check(val):
+                if not skipna:
+                    seen[lab] = 2
+                continue
+
+            nobs[lab] += 1
+            if seen[lab] == 0:
+                result[lab] = val
+                seen[lab] = 1
+            elif seen[lab] == 1 and val > result[lab]:
+                result[lab] = val
+    else:
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            val = values[i]
+            if not PyUnicode_Check(val):
+                if not skipna:
+                    seen[lab] = 2
+                continue
+
+            nobs[lab] += 1
+            if seen[lab] == 0:
+                result[lab] = val
+                seen[lab] = 1
+            elif seen[lab] == 1 and val < result[lab]:
+                result[lab] = val
+
+    for lab in range(ngroups):
+        if seen[lab] != 1 or nobs[lab] < min_count:
+            result[lab] = None
+
+    return result.base
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
 cdef group_min_max(
     numeric_t[:, ::1] out,
     int64_t[::1] counts,
@@ -1944,6 +2566,69 @@ cdef group_min_max(
     group_min_or_max[:] = _get_min_or_max(<numeric_t>0, compute_max, is_datetimelike)
 
     N, K = (<object>values).shape
+
+    if numeric_t is float32_t or numeric_t is float64_t:
+        if pandas_is_aarch64() and not uses_mask and skipna and not is_datetimelike:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    counts[lab] += 1
+                    for j in range(K):
+                        val = values[i, j]
+                        if val == val:
+                            nobs[lab, j] += 1
+                            if compute_max:
+                                if val > group_min_or_max[lab, j]:
+                                    group_min_or_max[lab, j] = val
+                            else:
+                                if val < group_min_or_max[lab, j]:
+                                    group_min_or_max[lab, j] = val
+
+            _check_below_mincount(
+                out,
+                uses_mask,
+                result_mask,
+                ngroups,
+                K,
+                nobs,
+                min_count,
+                group_min_or_max,
+            )
+            return
+
+    if (
+        pandas_is_aarch64()
+        and uses_mask
+        and skipna
+        and not is_datetimelike
+        and K == 1
+    ):
+        with nogil:
+            for i in range(N):
+                lab = labels[i]
+                if lab < 0:
+                    continue
+
+                counts[lab] += 1
+                if mask[i, 0]:
+                    continue
+
+                nobs[lab, 0] += 1
+                val = values[i, 0]
+                if compute_max:
+                    if val > group_min_or_max[lab, 0]:
+                        group_min_or_max[lab, 0] = val
+                else:
+                    if val < group_min_or_max[lab, 0]:
+                        group_min_or_max[lab, 0] = val
+
+        _check_below_mincount(
+            out, uses_mask, result_mask, ngroups, K, nobs, min_count, group_min_or_max
+        )
+        return
 
     with nogil:
         for i in range(N):
@@ -2050,6 +2735,9 @@ def group_idxmin_idxmax(
         bint uses_mask = mask is not None
         bint isna_entry
         bint compute_max = name == "idxmax"
+        const uint8_t* mask_data = NULL
+        Py_ssize_t mask_stride0 = 0
+        Py_ssize_t mask_stride1 = 0
 
     assert name == "idxmin" or name == "idxmax"
 
@@ -2067,6 +2755,33 @@ def group_idxmin_idxmax(
 
     # Sentinel for no valid values.
     out[:] = -1
+
+    if pandas_is_aarch64():
+        if uses_mask:
+            mask_data = &mask[0, 0]
+            mask_stride0 = mask.strides[0]
+            mask_stride1 = mask.strides[1]
+
+        if numeric_object_t is float64_t:
+            with nogil:
+                pandas_group_idx_float64(
+                    &out[0, 0], &values[0, 0], &labels[0],
+                    &group_min_or_max[0, 0], &seen[0, 0], mask_data,
+                    uses_mask, skipna, compute_max, N, K,
+                    values.strides[0], values.strides[1],
+                    mask_stride0, mask_stride1,
+                )
+            return
+        elif numeric_object_t is float32_t:
+            with nogil:
+                pandas_group_idx_float32(
+                    &out[0, 0], &values[0, 0], &labels[0],
+                    &group_min_or_max[0, 0], &seen[0, 0], mask_data,
+                    uses_mask, skipna, compute_max, N, K,
+                    values.strides[0], values.strides[1],
+                    mask_stride0, mask_stride1,
+                )
+            return
 
     with nogil(numeric_object_t is not object):
         for i in range(N):
@@ -2098,10 +2813,9 @@ def group_idxmin_idxmax(
                         if val > group_min_or_max[lab, j]:
                             group_min_or_max[lab, j] = val
                             out[lab, j] = i
-                    else:
-                        if val < group_min_or_max[lab, j]:
-                            group_min_or_max[lab, j] = val
-                            out[lab, j] = i
+                    elif val < group_min_or_max[lab, j]:
+                        group_min_or_max[lab, j] = val
+                        out[lab, j] = i
 
 
 @cython.wraparound(False)
@@ -2235,6 +2949,51 @@ cdef group_cummin_max(
         seen_na = np.zeros((<object>accum).shape, dtype=np.uint8)
 
     N, K = (<object>values).shape
+    if pandas_is_aarch64() and skipna and not is_datetimelike:
+        if not uses_mask:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    for j in range(K):
+                        val = values[i, j]
+                        if (
+                            numeric_t is float64_t or numeric_t is float32_t
+                        ) and val != val:
+                            out[i, j] = val
+                            continue
+
+                        mval = accum[lab, j]
+                        if (compute_max and val > mval) or (
+                            not compute_max and val < mval
+                        ):
+                            accum[lab, j] = mval = val
+                        out[i, j] = mval
+            return
+
+        # Nullable EA blocks are dispatched one column at a time.
+        if K == 1:
+            with nogil:
+                for i in range(N):
+                    lab = labels[i]
+                    if lab < 0:
+                        continue
+
+                    val = values[i, 0]
+                    if mask[i, 0]:
+                        out[i, 0] = val
+                        continue
+
+                    mval = accum[lab, 0]
+                    if (compute_max and val > mval) or (
+                        not compute_max and val < mval
+                    ):
+                        accum[lab, 0] = mval = val
+                    out[i, 0] = mval
+            return
+
     with nogil:
         for i in range(N):
             lab = labels[i]

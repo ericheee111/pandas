@@ -95,6 +95,22 @@ from .timestamps cimport _Timestamp
 from .timestamps import Timestamp
 
 # ---------------------------------------------------------------------
+# Architecture Detection
+
+cdef extern from *:
+    """
+    static inline int pandas_is_aarch64(void) {
+    #if defined(__aarch64__)
+        return 1;
+    #else
+        return 0;
+    #endif
+    }
+    """
+    bint pandas_is_aarch64() noexcept nogil
+
+
+# ---------------------------------------------------------------------
 # Misc Helpers
 
 cdef bint is_offset_object(object obj):
@@ -131,6 +147,16 @@ def apply_wraps(func):
             return func(self, other)
         elif cnp.is_datetime64_object(other) or PyDate_Check(other):
             # PyDate_Check includes date, datetime
+            # Fast path (ARM only): naive datetime (not Timestamp), no normalize needed
+            if (pandas_is_aarch64()
+                    and PyDateTime_Check(other)
+                    and not isinstance(other, _Timestamp)
+                    and other.tzinfo is None
+                    and not self.normalize):
+                result = func(self, other)
+                if isinstance(result, _Timestamp):
+                    return result
+                return Timestamp(result)
             other = Timestamp(other)
         else:
             # This will end up returning NotImplemented back in __add__
@@ -513,6 +539,15 @@ cdef class BaseOffset:
         return type(self)(n=1, normalize=self.normalize, **self.kwds)
 
     def __add__(self, other):
+        if pandas_is_aarch64():
+            if PyDateTime_Check(other) or isinstance(other, _Timestamp):
+                return self._apply(other)
+            if cnp.is_datetime64_object(other) or PyDate_Check(other):
+                return self._apply(other)
+            if PyDelta_Check(other) or cnp.is_timedelta64_object(other):
+                return self._apply(other)
+            if other is NaT:
+                return NaT
         if util.is_array(other) and other.dtype == object:
             return np.array([self + x for x in other])
 
@@ -522,6 +557,9 @@ cdef class BaseOffset:
             return NotImplemented
 
     def __radd__(self, other):
+        if pandas_is_aarch64():
+            if PyDateTime_Check(other) or isinstance(other, _Timestamp):
+                return self._apply(other)
         return self.__add__(other)
 
     def __sub__(self, other):
@@ -1377,6 +1415,8 @@ cdef class Day(SingleConstructorOffset):
         if isinstance(other, Day):
             # TODO: why isn't this handled in __add__?
             return Day(self._n + other.n)
+        if pandas_is_aarch64() and PyDateTime_Check(other) and not isinstance(other, _Timestamp):
+            return other + timedelta(days=self._n)
         return other + np.timedelta64(self._n, "D")
 
     def _apply_array(self, dtarr):
@@ -5874,19 +5914,57 @@ cdef class _CustomBusinessMonth(BusinessMixin):
 
     @apply_wraps
     def _apply(self, other: datetime) -> datetime:
-        # First move to month offset
-        cur_month_offset_date = self.month_roll(other)
+        cdef:
+            bint is_start = self._prefix.endswith("S")
+            str roll_dir
+            object np_dt, rolled, new_np, d
 
-        # Find this custom month offset
-        compare_date = self.cbday_roll(cur_month_offset_date)
-        n = roll_convention(other.day, self._n, compare_date.day)
+        if pandas_is_aarch64():
+            # ARM optimized path
+            roll_dir = "forward" if is_start else "backward"
 
-        new = cur_month_offset_date + n * self.m_offset
-        result = self.cbday_roll(new)
+            cur_month_offset_date = shift_month(
+                other, 0, "start" if is_start else "end"
+            )
 
-        if self.offset:
-            result = result + self.offset
-        return result
+            d = cur_month_offset_date.date()
+            np_dt = np.datetime64(d)
+            rolled = np.busday_offset(
+                np_dt, 0, roll=roll_dir, busdaycal=self._calendar
+            )
+            compare_day = rolled.astype(datetime).day
+            n = roll_convention(other.day, self._n, compare_day)
+
+            new = shift_month(
+                cur_month_offset_date, n, "start" if is_start else "end"
+            )
+            d = new.date()
+            new_np = np.datetime64(d)
+            if np.is_busday(new_np, busdaycal=self._calendar):
+                result_dt = d
+            else:
+                result_dt = np.busday_offset(
+                    new_np, 0,
+                    roll=roll_dir, busdaycal=self._calendar
+                ).astype(datetime)
+
+            result = datetime.combine(result_dt, other.time())
+
+            if self.offset:
+                result = result + self.offset
+            return result
+        else:
+            # Original x86 path
+            cur_month_offset_date = self.month_roll(other)
+            compare_date = self.cbday_roll(cur_month_offset_date)
+            n = roll_convention(other.day, self._n, compare_date.day)
+
+            new = cur_month_offset_date + n * self.m_offset
+            result = self.cbday_roll(new)
+
+            if self.offset:
+                result = result + self.offset
+            return result
 
 
 cdef class CustomBusinessMonthEnd(_CustomBusinessMonth):

@@ -20,8 +20,10 @@ from pandas._config import (
 )
 
 from pandas._libs import (
+    hashtable as libhashtable,
     lib,
     missing as libmissing,
+    ops as libops,
 )
 from pandas._libs.arrays import NDArrayBacked
 from pandas._libs.lib import ensure_string_array
@@ -29,6 +31,7 @@ from pandas.compat import (
     HAS_PYARROW,
     PYARROW_MIN_VERSION,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import Pandas4Warning
 from pandas.util._decorators import (
@@ -699,8 +702,12 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
             dtype = StringDtype()
         values = extract_array(values)
 
-        super().__init__(values, copy=copy)
-        if not isinstance(values, type(self)):
+        normalize_na = isinstance(values, type(self)) and (
+            (values.dtype.na_value is libmissing.NA)
+            != (dtype.na_value is libmissing.NA)
+        )
+        super().__init__(values, copy=copy or normalize_na)
+        if not isinstance(values, type(self)) or normalize_na:
             self._validate(dtype)
         NDArrayBacked.__init__(
             self,
@@ -740,7 +747,7 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
                     "StringArray requires a sequence of strings "
                     "or NaN. Got '{self._ndarray.dtype}' dtype instead."
                 )
-            # TODO validate or force NA/None to NaN
+            self._ndarray[isna(self._ndarray)] = dtype.na_value
 
     def _validate_scalar(self, value):
         # used by NDArrayBackedExtensionIndex.insert
@@ -752,6 +759,62 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
                 f"string or missing value, got '{type(value).__name__}' instead."
             )
         return value
+
+    def _groupby_op(
+        self,
+        *,
+        how: str,
+        has_dropped_na: bool,
+        min_count: int,
+        ngroups: int,
+        ids: npt.NDArray[np.intp],
+        **kwargs,
+    ):
+        if (
+            IS_ARM
+            and how in ["min", "max"]
+            and kwargs.get("skipna", True)
+            and min_count <= 1
+        ):
+            from pandas._libs import groupby as libgroupby
+
+            result = libgroupby.group_min_max_string(
+                self._ndarray,
+                ids,
+                ngroups,
+                min_count=min_count,
+                compute_max=how == "max",
+                skipna=kwargs.get("skipna", True),
+            )
+            return type(self)._from_sequence(result, dtype=self.dtype)
+
+        if IS_ARM and how in ["any", "all"]:
+            from pandas._libs import groupby as libgroupby
+
+            from pandas.core.groupby.ops import WrappedCythonOp
+
+            values, mask = libgroupby.string_array_to_bool(
+                self._ndarray, self.dtype.na_value
+            )
+            kind = WrappedCythonOp.get_kind_from_how(how)
+            op = WrappedCythonOp(how=how, kind=kind, has_dropped_na=has_dropped_na)
+            return op._cython_op_ndim_compat(
+                values,
+                min_count=min_count,
+                ngroups=ngroups,
+                comp_ids=ids,
+                mask=mask,
+                **kwargs,
+            )
+
+        return super()._groupby_op(
+            how=how,
+            has_dropped_na=has_dropped_na,
+            min_count=min_count,
+            ngroups=ngroups,
+            ids=ids,
+            **kwargs,
+        )
 
     @classmethod
     def _from_sequence(
@@ -828,6 +891,26 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
 
         return arr, self.dtype.na_value
 
+    def factorize(
+        self,
+        use_na_sentinel: bool = True,
+    ) -> tuple[np.ndarray, ExtensionArray]:
+        if not IS_ARM or not use_na_sentinel:
+            return super().factorize(use_na_sentinel=use_na_sentinel)
+
+        table = libhashtable.StringHashTable(len(self))
+        try:
+            uniques, codes = table.factorize(
+                self._ndarray,
+                na_sentinel=-1,
+                na_value=self.dtype.na_value,
+                ignore_na=True,
+                string_array=True,
+            )
+        except UnicodeEncodeError:
+            return super().factorize(use_na_sentinel=use_na_sentinel)
+        return codes, self._from_factorized(uniques, self)
+
     def _maybe_convert_setitem_value(self, value):
         """Maybe convert value to be pyarrow compatible."""
         if lib.is_scalar(value):
@@ -879,6 +962,58 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
                     value[isna(value)] = self.dtype.na_value
 
         super().__setitem__(key, value)
+
+    def fillna(
+        self,
+        value=None,
+        limit: int | None = None,
+        copy: bool = True,
+    ) -> Self:
+        if not IS_ARM:
+            return super().fillna(value=value, limit=limit, copy=copy)
+
+        mask = self.isna()
+        if limit is not None and limit < len(self):
+            modify = mask.cumsum() > limit
+            if modify.any():
+                mask = mask.copy()
+                mask[modify] = False
+
+        if not mask.any():
+            if copy:
+                return self.copy()
+            return self[:]
+
+        if lib.is_scalar(value):
+            if isna(value):
+                value = self.dtype.na_value
+            elif not isinstance(value, str):
+                raise TypeError(
+                    f"Invalid value '{value}' for dtype '{self.dtype}'. Value should "
+                    f"be a string or missing value, got '{type(value).__name__}' "
+                    "instead."
+                )
+            if copy:
+                new_data = np.where(mask, value, self._ndarray)
+            else:
+                if self._readonly:
+                    raise ValueError("Cannot modify read-only array")
+                new_data = self._ndarray
+                new_data[mask] = value
+            return type(self)(new_data, dtype=self.dtype, copy=False)
+
+        if hasattr(value, "__len__") and len(value) != len(self):
+            raise ValueError("Length of 'value' does not match.")
+
+        if copy:
+            new_values = self.copy()
+        else:
+            new_values = self[:]
+        if hasattr(value, "__len__"):
+            new_values[mask] = value[mask]
+        else:
+            new_values[mask] = value
+        return new_values
 
     def _putmask(self, mask: npt.NDArray[np.bool_], value) -> None:
         # the super() method NDArrayBackedExtensionArray._putmask uses
@@ -1180,6 +1315,22 @@ class StringArray(BaseStringArray, NumpyExtensionArray):  # type: ignore[misc]
 
         if isinstance(other, StringArray):
             other = other._ndarray
+
+        if (
+            type(other) is str
+            and self.dtype.na_value is np.nan
+            and op
+            in (
+                operator.eq,
+                operator.ne,
+                operator.lt,
+                operator.le,
+                operator.gt,
+                operator.ge,
+            )
+        ):
+            # Avoid allocating masks and filtered arrays for scalar comparisons.
+            return libops.scalar_compare(self._ndarray, other, op)
 
         mask = isna(self) | isna(other)
         valid = ~mask

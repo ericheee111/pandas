@@ -9,10 +9,12 @@ from typing import (
 
 import numpy as np
 
+from pandas._libs import groupby as libgroupby
 from pandas.util._decorators import (
     cache_readonly,
     doc,
 )
+from pandas.compat._arch import IS_ARM
 
 from pandas.core.dtypes.common import (
     is_integer,
@@ -151,6 +153,15 @@ class GroupByIndexingMixin:
 
     def _make_mask_from_int(self, arg: int) -> np.ndarray:
         if arg >= 0:
+            if IS_ARM and arg == 0:
+                if TYPE_CHECKING:
+                    groupby_self = cast(groupby.GroupBy, self)
+                else:
+                    groupby_self = self
+                return libgroupby.group_nth_zero_mask(
+                    groupby_self._grouper.ids,
+                    groupby_self._grouper.ngroups,
+                )
             return self._ascending_count == arg
         else:
             return self._descending_count == (-arg - 1)

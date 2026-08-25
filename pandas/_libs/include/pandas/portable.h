@@ -10,6 +10,7 @@ The full license is in the LICENSE file, distributed with this software.
 #pragma once
 
 #include <string.h>
+#include <stdint.h>
 
 #if defined(_MSC_VER)
 #  define strcasecmp(s1, s2) _stricmp(s1, s2)
@@ -23,6 +24,14 @@ The full license is in the LICENSE file, distributed with this software.
 #define isspace_ascii(c) (((c) == ' ') || (((unsigned)(c) - '\t') < 5))
 #define toupper_ascii(c) ((((unsigned)(c) - 'a') < 26) ? ((c) & 0x5f) : (c))
 #define tolower_ascii(c) ((((unsigned)(c) - 'A') < 26) ? ((c) | 0x20) : (c))
+
+static inline int pandas_is_aarch64(void) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+  return 1;
+#else
+  return 0;
+#endif
+}
 
 #if defined(_WIN32)
 #  define PD_FALLTHROUGH                                                       \
@@ -82,4 +91,25 @@ The full license is in the LICENSE file, distributed with this software.
 #else
 _Static_assert(0,
                "Overflow checking not detected; please try a newer compiler");
+#endif
+
+#if defined(_MSC_VER)
+#  include <intrin.h>
+static inline int pandas_ctz(uint32_t x) {
+  if (x == 0) return 32;
+  unsigned long index;
+  _BitScanForward(&index, x);
+  return (int)index;
+}
+#elif (defined(__has_builtin) && __has_builtin(__builtin_ctz)) || defined(__GNUC__)
+static inline int pandas_ctz(uint32_t x) {
+  return x ? __builtin_ctz(x) : 32;
+}
+#else
+static inline int pandas_ctz(uint32_t x) {
+  if (x == 0) return 32;
+  int n = 0;
+  while (!(x & 1)) { x >>= 1; ++n; }
+  return n;
+}
 #endif

@@ -36,6 +36,7 @@ from pandas.compat import (
     PYARROW_MIN_VERSION,
     pa_version_under21p0,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.errors import Pandas4Warning
 from pandas.util._decorators import (
     doc,
@@ -2507,6 +2508,25 @@ class ArrowExtensionArray(
         )
         return self._from_pyarrow_array(self._box_pa_array(pa.array(data, mask=mask)))
 
+    def _where(self, mask: npt.NDArray[np.bool_], value) -> Self:
+        if IS_ARM and is_scalar(value):
+            value = self._maybe_convert_setitem_value(value)
+            result = self._if_else(mask, self._pa_array, value)
+            return self._from_pyarrow_array(result)
+
+        return super()._where(mask, value)
+
+    def _putmask(self, mask: npt.NDArray[np.bool_], value) -> None:
+        if IS_ARM and is_scalar(value):
+            if self._readonly:
+                raise ValueError("Cannot modify read-only array")
+            value = self._maybe_convert_setitem_value(value)
+            result = self._if_else(mask, value, self._pa_array)
+            self._pa_array = self._from_pyarrow_array(result)._pa_array
+            return
+
+        super()._putmask(mask, value)
+
     @classmethod
     def _if_else(
         cls,
@@ -2624,6 +2644,50 @@ class ArrowExtensionArray(
         **kwargs,
     ):
         if isinstance(self.dtype, StringDtype):
+            if (
+                IS_ARM
+                and how in ["min", "max"]
+                and kwargs.get("skipna", True)
+                and min_count <= 1
+            ):
+                from pandas._libs import groupby as libgroupby
+
+                values = self.to_numpy(dtype=object, na_value=None)
+                result = libgroupby.group_min_max_string(
+                    values,
+                    ids,
+                    ngroups,
+                    min_count=min_count,
+                    compute_max=how == "max",
+                    skipna=kwargs.get("skipna", True),
+                )
+                return type(self)._from_sequence(result, dtype=self.dtype)
+
+            if IS_ARM and how in ["any", "all"]:
+                from pandas.core.groupby.ops import WrappedCythonOp
+
+                truth_values = pc.not_equal(pc.binary_length(self._pa_array), 0)
+                # With skipna=False and no result mask, the kernel consumes
+                # masked positions. True preserves object-string truthiness,
+                # where bool(np.nan) is True.
+                truth_values = pc.fill_null(truth_values, True)
+                values = truth_values.to_numpy(zero_copy_only=False)
+
+                mask = None
+                if self._pa_array.null_count:
+                    mask = self.isna()
+
+                kind = WrappedCythonOp.get_kind_from_how(how)
+                op = WrappedCythonOp(how=how, kind=kind, has_dropped_na=has_dropped_na)
+                return op._cython_op_ndim_compat(
+                    values,
+                    min_count=min_count,
+                    ngroups=ngroups,
+                    comp_ids=ids,
+                    mask=mask,
+                    **kwargs,
+                )
+
             if how in [
                 "prod",
                 "mean",

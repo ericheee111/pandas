@@ -45,6 +45,7 @@ from pandas._typing import (
     Shape,
     npt,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.compat.numpy import function as nv
 from pandas.errors import (
     InvalidIndexError,
@@ -2065,6 +2066,38 @@ class MultiIndex(Index):
         else:
             level = self._get_level_number(level)
             return self._get_level_values(level=level, unique=True)
+
+    def drop_duplicates(self, *, keep: DropKeep = "first") -> Self:
+        """Return MultiIndex with duplicate values removed (order of appearance)."""
+        if keep != "first" or not IS_ARM:
+            return super().drop_duplicates(keep=keep)
+
+        # Short-circuit: is_unique builds/caches the engine and is cheap on
+        # subsequent calls. Essential for set-op results that are already
+        # unique (e.g. Index._intersection), where the original count-only
+        # is_unique check is faster than np.unique(return_index=True).
+        if self.is_unique:
+            return self._view()
+
+        # Fast path: a single np.unique on the engine's already-computed,
+        # bit-packed integer codes (``_engine.values``, cached as a uint
+        # ndarray by the is_unique check above) yields the first-occurrence
+        # indices. This replaces ``get_group_index`` (pure-Python stride
+        # arithmetic) + the swisstable per-element ``duplicated`` loop with
+        # one radix/counting sort, which is ~2x faster here. A boolean-mask
+        # scatter (``mask[first_idx] = True``) keeps first-occurrence order
+        # without an extra ``first_idx.sort()`` (which would re-sort ~N
+        # indices and erase the win).
+        # Only for the fixed-width engines (lev_bits <= 64); the
+        # MultiIndexPyIntEngine (>64 bits, object dtype) falls back.
+        lab = self._engine.values
+        if lab.dtype.kind not in "iu":
+            return super().drop_duplicates(keep=keep)
+
+        first_idx = np.unique(lab, return_index=True)[1]
+        mask = np.zeros(len(lab), dtype=bool)
+        mask[first_idx] = True
+        return self[mask]
 
     def to_frame(
         self,

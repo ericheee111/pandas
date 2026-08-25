@@ -1,8 +1,14 @@
+import numpy as np
+import pytest
+
+from pandas._libs import algos
+
 from pandas import (
     DataFrame,
     Series,
 )
 import pandas._testing as tm
+from pandas.core import frame as frame_module
 
 
 class TestDataFrameCount:
@@ -37,3 +43,75 @@ class TestDataFrameCount:
 
         tm.assert_series_equal(dm.count(), df.count())
         tm.assert_series_equal(dm.count(1), df.count(1))
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+def test_count_float_block_uses_nancount(monkeypatch, axis):
+    monkeypatch.setattr(frame_module, "IS_ARM", True)
+    df = DataFrame([[1.0, np.nan, 3.0], [np.nan, 2.0, 4.0]])
+    original = algos.nancount_2d
+    called = False
+
+    def wrapped(values, op_axis):
+        nonlocal called
+        called = True
+        assert op_axis == axis
+        return original(values, op_axis)
+
+    monkeypatch.setattr(algos, "nancount_2d", wrapped)
+    result = df.count(axis=axis)
+    assert called
+    expected = (
+        Series([1, 1, 2], index=df.columns, dtype="int64")
+        if axis == 0
+        else Series([2, 2], index=df.index, dtype="int64")
+    )
+    tm.assert_series_equal(result, expected)
+
+
+def test_count_float_block_non_arm_uses_portable_path(monkeypatch):
+    monkeypatch.setattr(frame_module, "IS_ARM", False)
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("non-ARM count used the float-block fast path")
+
+    monkeypatch.setattr(DataFrame, "_nancount_float_block", fail_if_called)
+    df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
+
+    result = df.count(axis=1)
+
+    expected = Series([1, 1])
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_count_float_block_arm_matches_portable(monkeypatch, axis, dtype):
+    df = DataFrame(np.array([[1.0, np.nan], [np.nan, 2.0]], dtype=dtype))
+
+    monkeypatch.setattr(frame_module, "IS_ARM", False)
+    expected = df.count(axis=axis)
+    calls = 0
+    original = DataFrame._nancount_float_block
+
+    def tracked(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(DataFrame, "_nancount_float_block", tracked)
+    monkeypatch.setattr(frame_module, "IS_ARM", True)
+    result = df.count(axis=axis)
+
+    assert calls == 1
+    tm.assert_series_equal(result, expected)
+
+
+def test_count_nullable_float_does_not_use_nancount(monkeypatch):
+    df = DataFrame({"a": Series([1, None], dtype="Float64")})
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("nancount_2d must not receive an ExtensionBlock")
+
+    monkeypatch.setattr(algos, "nancount_2d", fail_if_called)
+    tm.assert_series_equal(df.count(), Series([1], index=["a"]))

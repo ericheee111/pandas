@@ -54,6 +54,7 @@ SIZE_HINT_LIMIT = (1 << 20) + 7
 
 cdef Py_ssize_t _INIT_VEC_CAP = 128
 
+
 include "hashtable_class_helper.pxi"
 include "hashtable_func_helper.pxi"
 

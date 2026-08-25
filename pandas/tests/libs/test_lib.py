@@ -9,12 +9,58 @@ from pandas._libs import (
     writers as libwriters,
 )
 from pandas.compat import IS64
+from pandas.compat._arch import IS_ARM
 
 from pandas import Index
 import pandas._testing as tm
 
 
+@pytest.mark.parametrize(
+    "sorter,group_index,keys,expected",
+    [
+        (
+            [2, 0, 3, 1, 4],
+            [-1, 0, 0, 1, 1],
+            Index(["a", "b"]),
+            {"a": [0, 3], "b": [1, 4]},
+        ),
+        ([], [], Index([], dtype=object), {}),
+        ([0, 1], [-1, -1], Index(["unused"]), {}),
+    ],
+)
+def test_indices_fast_single(sorter, group_index, keys, expected):
+    sorter = np.array(sorter, dtype=np.intp)
+    group_index = np.array(group_index, dtype=np.int64)
+
+    result = lib.indices_fast_single(sorter, group_index, keys)
+
+    assert list(result) == list(expected)
+    for key, positions in expected.items():
+        expected_positions = np.array(positions, dtype=np.intp)
+        tm.assert_numpy_array_equal(result[key], expected_positions)
+
+
 class TestMisc:
+    def test_fast_string_kernels(self):
+        values = np.array(["Sha", "SGP", "fra"], dtype=object)
+
+        result = lib.fast_string_upper(values)
+        expected = np.array(["SHA", "SGP", "FRA"], dtype=object)
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = lib.fast_string_contains(values, "a")
+        expected = np.array([True, False, True])
+        tm.assert_numpy_array_equal(result, expected)
+
+        result = lib.fast_string_len(values)
+        expected = np.array([3, 3, 3], dtype=np.int64)
+        tm.assert_numpy_array_equal(result, expected)
+
+        mixed = np.array(["foo", None], dtype=object)
+        assert lib.fast_string_upper(mixed) is None
+        assert lib.fast_string_contains(mixed, "o") is None
+        assert lib.fast_string_len(mixed) is None
+
     def test_max_len_string_array(self):
         arr = a = np.array(["foo", "b", np.nan], dtype="object")
         assert libwriters.max_len_string_array(arr) == 3
@@ -72,6 +118,26 @@ class TestMisc:
         expected = lib.fast_multiget(mapping1, oindex)
         result = lib.fast_multiget(mapping2, oindex)
         tm.assert_numpy_array_equal(result, expected)
+
+    def test_fast_multiget_lookup_count(self):
+        class CountingKey:
+            calls = 0
+
+            def __hash__(self):
+                type(self).calls += 1
+                return 1
+
+            def __eq__(self, other):
+                return self is other
+
+        key = CountingKey()
+        mapping = {key: "value"}
+        CountingKey.calls = 0
+
+        result = lib.fast_multiget(mapping, np.array([key], dtype=object))
+
+        assert result[0] == "value"
+        assert CountingKey.calls == (1 if IS_ARM else 2)
 
 
 class TestIndexing:
@@ -306,6 +372,31 @@ def test_ensure_string_array_list_of_lists():
 
     # Each item in result should still be a list, not a stringified version
     expected = np.array(["['t', 'e', 's', 't']", "['w', 'o', 'r', 'd']"], dtype=object)
+    tm.assert_numpy_array_equal(result, expected)
+
+
+def test_ensure_string_array_large_unicode():
+    values = np.resize(np.array(["SHA", "SGP", "FRA"], dtype="U3"), 100_000)
+
+    result = lib.ensure_string_array(values)
+
+    expected = values.astype(object)
+    tm.assert_numpy_array_equal(result, expected)
+
+    non_native = values.astype(values.dtype.newbyteorder("S"))
+    result = lib.ensure_string_array(non_native)
+    expected = non_native.astype(object)
+    tm.assert_numpy_array_equal(result, expected)
+
+
+def test_ensure_string_array_large_unicode_embedded_null():
+    values = np.resize(
+        np.array(["a\0b", "a\0c", "\0ab"], dtype="U3"), 100_000
+    )
+
+    result = lib.ensure_string_array(values)
+
+    expected = values.astype(object)
     tm.assert_numpy_array_equal(result, expected)
 
 

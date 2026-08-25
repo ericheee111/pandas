@@ -8,6 +8,7 @@ import pytest
 from pandas import (
     NA,
     DataFrame,
+    Index,
     MultiIndex,
     Series,
     array,
@@ -17,6 +18,7 @@ from pandas import (
 import pandas._testing as tm
 from pandas.core.algorithms import safe_sort
 import pandas.core.common as com
+from pandas.core import sorting
 from pandas.core.sorting import (
     _decons_group_index,
     get_group_index,
@@ -24,6 +26,35 @@ from pandas.core.sorting import (
     lexsort_indexer,
     nargsort,
 )
+
+
+def test_get_indexer_dict_aarch64_single_key(monkeypatch):
+    labels = np.array([1, 0, -1, 1, 0], dtype=np.int64)
+    keys = [Index(["a", "b"])]
+    calls = 0
+    original = sorting.lib.indices_fast_single
+
+    def wrapped(*args):
+        nonlocal calls
+        calls += 1
+        return original(*args)
+
+    monkeypatch.setattr(sorting.lib, "indices_fast_single", wrapped)
+    monkeypatch.setattr(sorting, "IS_ARM", True)
+
+    result = sorting.get_indexer_dict([labels], keys)
+
+    assert calls == 1
+    assert list(result) == ["a", "b"]
+    tm.assert_numpy_array_equal(result["a"], np.array([1, 4], dtype=np.intp))
+    tm.assert_numpy_array_equal(result["b"], np.array([0, 3], dtype=np.intp))
+
+    monkeypatch.setattr(sorting, "IS_ARM", False)
+    result = sorting.get_indexer_dict([labels], keys)
+
+    assert calls == 1
+    tm.assert_numpy_array_equal(result["a"], np.array([1, 4], dtype=np.intp))
+    tm.assert_numpy_array_equal(result["b"], np.array([0, 3], dtype=np.intp))
 
 
 @pytest.fixture

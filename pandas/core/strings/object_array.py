@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+from pandas.compat import is_platform_arm
 import re
 import textwrap
 from typing import (
@@ -19,6 +20,8 @@ from pandas.util._validators import validate_na_arg
 
 from pandas.core.dtypes.common import pandas_dtype
 from pandas.core.dtypes.missing import isna
+
+_IS_ARM = is_platform_arm()
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -151,13 +154,48 @@ class ObjectStringArrayMixin:
 
             pat = re.compile(pat, flags=flags)
 
+            from pandas.core.arrays.string_ import BaseStringArray
+
+            if _IS_ARM and isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
+                return self._str_contains_fast_path(lib.map_contains_regex, pat, na)
+
             f = lambda x: pat.search(x) is not None
         elif case:
+            from pandas.core.arrays.string_ import BaseStringArray
+
+            if _IS_ARM and isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
+                return self._str_contains_fast_path(lib.map_contains, pat, na)
+            if _IS_ARM and (
+                self.dtype == np.dtype(object)
+                or (
+                    getattr(self.dtype, "storage", None) == "python"
+                )
+            ):
+                result = lib.fast_string_contains(
+                    np.asarray(self, dtype=object), pat
+                )
+                if result is not None:
+                    return result
             f = lambda x: pat in x
         else:
             upper_pat = pat.upper()
             f = lambda x: upper_pat in x.upper()
         return self._str_map(f, na, dtype=np.dtype("bool"))
+
+    def _str_contains_fast_path(self, map_fn, pat, na):
+        arr = np.asarray(self)
+        mask = isna(arr)
+        if na is lib.no_default:
+            na = self.dtype.na_value
+        na_is_na = isna(na)
+        if na_is_na:
+            na = False
+        result = map_fn(arr, pat, mask.view("uint8"), na_value=na)
+        from pandas.arrays import BooleanArray
+
+        if not na_is_na:
+            mask = np.zeros_like(mask)
+        return BooleanArray(result, mask)
 
     def _str_startswith(self, pat, na=lib.no_default):
         validate_na_arg(na, name="na")
@@ -330,6 +368,23 @@ class ObjectStringArrayMixin:
         return self._str_map(lambda x: x.rpartition(sep), dtype="object")
 
     def _str_len(self):
+        if _IS_ARM and len(self) > 0 and (
+            self.dtype == np.dtype(object)
+            or (
+                getattr(self.dtype, "storage", None) == "python"
+            )
+        ):
+            result = lib.fast_string_len(np.asarray(self, dtype=object))
+            if result is not None:
+                from pandas.core.arrays.string_ import BaseStringArray
+
+                if isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
+                    from pandas.arrays import IntegerArray
+
+                    return IntegerArray(
+                        result, np.zeros(len(result), dtype=np.bool_)
+                    )
+                return result
         return self._str_map(len, dtype="int64")
 
     def _str_slice(self, start=None, stop=None, step=None):
@@ -437,6 +492,21 @@ class ObjectStringArrayMixin:
         return dummies, tags2
 
     def _str_upper(self):
+        if _IS_ARM and len(self) > 0 and (
+            self.dtype == np.dtype(object)
+            or (
+                getattr(self.dtype, "storage", None) == "python"
+            )
+        ):
+            result = lib.fast_string_upper(np.asarray(self, dtype=object))
+            if result is not None:
+                from pandas.core.arrays.string_ import BaseStringArray
+
+                if isinstance(self, BaseStringArray) and self.dtype.na_value is not np.nan:
+                    return type(self)._from_sequence(
+                        result, dtype=self.dtype
+                    )
+                return result
         return self._str_map(lambda x: x.upper())
 
     def _str_isalnum(self):

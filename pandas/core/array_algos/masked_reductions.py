@@ -6,6 +6,7 @@ for missing values.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from pandas.compat import is_platform_arm
 import warnings
 
 import numpy as np
@@ -13,6 +14,8 @@ import numpy as np
 from pandas._libs import missing as libmissing
 
 from pandas.core.nanops import check_below_min_count
+
+_IS_ARM = is_platform_arm()
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,6 +60,13 @@ def _reductions(
         else:
             return func(values, axis=axis, **kwargs)
     else:
+        if _IS_ARM and not mask.any():
+            if check_below_min_count(values.shape, None, min_count) and (
+                axis is None or values.ndim == 1
+            ):
+                return libmissing.NA
+            return func(values, axis=axis, **kwargs)
+
         if check_below_min_count(values.shape, mask, min_count) and (
             axis is None or values.ndim == 1
         ):

@@ -27,6 +27,7 @@ from pandas import (
 import pandas._testing as tm
 from pandas.core.arrays import BooleanArray
 import pandas.core.common as com
+from pandas.core.groupby import grouper as grouper_module
 
 pytestmark = pytest.mark.filterwarnings("ignore:Mean of empty slice:RuntimeWarning")
 
@@ -1952,6 +1953,50 @@ def test_groupby_groups_in_BaseGrouper():
     result = df.groupby(["beta", Grouper(level="alpha")])
     expected = df.groupby(["beta", "alpha"])
     assert result.groups == expected.groups
+
+
+def test_groups_for_range_index():
+    codes = np.array([1, 0, -1, 1, 0], dtype=np.intp)
+    uniques = Index(["a", "b"])
+    index = RangeIndex(10, 20, 2, name="rows")
+
+    result = grouper_module._groups_for_range_index(codes, uniques, index)
+
+    expected = {
+        "a": Index([12, 18], name="rows"),
+        "b": Index([10, 16], name="rows"),
+    }
+    assert list(result) == list(expected)
+    for key, value in expected.items():
+        tm.assert_index_equal(result[key], value)
+    assert all(value.dtype == np.dtype(np.intp) for value in result.values())
+
+
+@pytest.mark.parametrize(
+    "index,expected",
+    [
+        (
+            RangeIndex(5, name="rows"),
+            {"b": Index([0, 3], name="rows"), "a": Index([1, 4], name="rows")},
+        ),
+        (
+            RangeIndex(10, 20, 2, name="rows"),
+            {"b": Index([10, 16], name="rows"), "a": Index([12, 18], name="rows")},
+        ),
+        (
+            RangeIndex(10, 5, -1, name="rows"),
+            {"b": Index([10, 7], name="rows"), "a": Index([9, 6], name="rows")},
+        ),
+    ],
+)
+def test_groups_range_index(index, expected):
+    ser = Series(["b", "a", None, "b", "a"], index=index)
+
+    result = ser.groupby(ser, sort=False).groups
+
+    assert list(result) == list(expected)
+    for key, value in expected.items():
+        tm.assert_index_equal(result[key], value)
 
 
 def test_groups_sort_dropna(sort, dropna):

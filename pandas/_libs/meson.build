@@ -28,6 +28,18 @@ _hashtable_func_helper = custom_target(
     input: 'hashtable_func_helper.pxi.in',
     command: [py, tempita, '@INPUT@', '-o', '@OUTDIR@'],
 )
+_swisstable_class_helper = custom_target(
+    'swisstable_class_helper_pxi',
+    output: 'swisstable_class_helper.pxi',
+    input: 'swisstable_class_helper.pxi.in',
+    command: [py, tempita, '@INPUT@', '-o', '@OUTDIR@'],
+)
+_swisstable_ismember_helper = custom_target(
+    'swisstable_ismember_pxi',
+    output: 'swisstable_ismember.pxi',
+    input: 'swisstable_ismember.pxi.in',
+    command: [py, tempita, '@INPUT@', '-o', '@OUTDIR@'],
+)
 _index_class_helper = custom_target(
     'index_class_helper_pxi',
     output: 'index_class_helper.pxi',
@@ -75,7 +87,14 @@ libs_sources = {
         'deps': [_khash_primitive_helper_dep, m_dep],
     },
     'arrays': {'sources': ['arrays.pyx']},
-    'groupby': {'sources': ['groupby.pyx'], 'deps': [m_dep]},
+    'groupby': {
+        'sources': ['groupby.pyx', 'src/groupby.c'],
+        'deps': [m_dep],
+    },
+    'groupby_neon': {
+        'sources': ['groupby_neon.pyx', 'src/groupby_neon.c'],
+        'deps': [m_dep],
+    },
     'hashing': {'sources': ['hashing.pyx']},
     'hashtable': {
         'sources': [
@@ -174,6 +193,36 @@ foreach ext_name, ext_dict : libs_sources
     )
 endforeach
 
+swisstable_cpp_args = []
+if host_machine.cpu_family() == 'aarch64'
+    swisstable_cpp_args += ['-march=armv8-a+crc']
+endif
+
+py.extension_module(
+    'swisstable',
+    [
+        'swisstable.pyx',
+        _swisstable_class_helper,
+    ],
+    cython_args: cython_args,
+    include_directories: [inc_np, inc_pd],
+    subdir: 'pandas/_libs',
+    cpp_args: swisstable_cpp_args,
+    override_options: ['cython_language=cpp', 'cpp_std=c++17'],
+    install: true,
+)
+
+py.extension_module(
+    'swisstable_ismember',
+    ['swisstable_ismember.pyx', _swisstable_ismember_helper],
+    cython_args: cython_args,
+    include_directories: [inc_np, inc_pd],
+    subdir: 'pandas/_libs',
+    cpp_args: swisstable_cpp_args,
+    override_options: ['cython_language=cpp', 'cpp_std=c++17'],
+    install: true,
+)
+
 # Basically just __init__.py and the .pyi files
 sources_to_install = [
     '__init__.py',
@@ -181,6 +230,7 @@ sources_to_install = [
     'arrays.pyi',
     'byteswap.pyi',
     'groupby.pyi',
+    'groupby_neon.pyi',
     'hashing.pyi',
     'hashtable.pyi',
     'index.pyi',

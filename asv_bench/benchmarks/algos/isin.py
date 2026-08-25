@@ -318,6 +318,50 @@ class IsInLongSeriesValuesDominate:
         self.series.isin(self.values)
 
 
+class IsInLongNumericGeneral:
+    params = [
+        ["int64", "float64"],
+        ["unique", "repeated"],
+        ["hits", "misses", "mixed"],
+    ]
+    param_names = ["dtype", "cardinality", "lookup"]
+
+    def setup(self, dtype, cardinality, lookup):
+        rng = np.random.default_rng(42)
+        n_values = 2_000_000
+        n_comps = 1_000_000
+
+        if dtype == "int64":
+            if cardinality == "unique":
+                values = rng.integers(1, 2**62, n_values, dtype=np.int64)
+            else:
+                values = rng.integers(1, 10_001, n_values, dtype=np.int64)
+        elif cardinality == "unique":
+            values = rng.random(n_values) * 1e12 + 1
+        else:
+            vocabulary = rng.random(10_000) * 1e12 + 1
+            values = rng.choice(vocabulary, n_values)
+
+        if lookup == "hits":
+            comps = rng.choice(values, n_comps)
+        elif lookup == "misses":
+            comps = -rng.choice(values, n_comps)
+        else:
+            comps = np.concatenate(
+                [
+                    rng.choice(values, n_comps // 2),
+                    -rng.choice(values, n_comps - n_comps // 2),
+                ]
+            )
+            rng.shuffle(comps)
+
+        self.values = values.astype(dtype, copy=False)
+        self.series = Series(comps.astype(dtype, copy=False))
+
+    def time_isin(self, dtype, cardinality, lookup):
+        self.series.isin(self.values)
+
+
 class IsInWithLongTupples:
     def setup(self):
         t = tuple(range(1000))

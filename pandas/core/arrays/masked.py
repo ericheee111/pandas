@@ -27,6 +27,7 @@ from pandas.compat import (
     IS64,
     is_platform_windows,
 )
+from pandas.compat._arch import IS_ARM
 from pandas.errors import AbstractMethodError
 
 from pandas.core.dtypes.astype import astype_is_view
@@ -315,19 +316,52 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
                 mask = mask.copy()
                 mask[modify] = False
 
-        value = missing.check_value_size(value, mask, len(self))
+        if not IS_ARM:
+            value = missing.check_value_size(value, mask, len(self))
+            if mask.any():
+                if copy:
+                    new_values = self.copy()
+                else:
+                    new_values = self[:]
+                new_values[mask] = value
+            elif copy:
+                new_values = self.copy()
+            else:
+                new_values = self[:]
+            return new_values
 
-        if mask.any():
-            # fill with value
+        if not mask.any():
             if copy:
                 new_values = self.copy()
             else:
                 new_values = self[:]
-            new_values[mask] = value
-        elif copy:
+            return new_values
+
+        value = missing.check_value_size(value, mask, len(self))
+
+        # Fast path for scalar non-NA fill: use np.where for single-pass operation
+        # instead of copy + masked assignment (which requires two passes)
+        if is_scalar(value) and not is_valid_na_for_dtype(value, self.dtype):
+            value = self._validate_setitem_value(value)
+            if copy:
+                new_data = np.where(mask, value, self._data)
+                new_mask = self._mask.copy()
+                new_mask[mask] = False
+            else:
+                if self._readonly:
+                    raise ValueError("Cannot modify read-only array")
+                new_data = self._data
+                new_data[mask] = value
+                new_mask = self._mask
+                new_mask[mask] = False
+            return self._simple_new(new_data, new_mask)
+
+        # fill with value (array-like or NA scalar path)
+        if copy:
             new_values = self.copy()
         else:
             new_values = self[:]
+        new_values[mask] = value
         return new_values
 
     @classmethod
@@ -361,6 +395,31 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         # Note: without the "str" here, the f-string rendering raises in
         #  py38 builds.
         raise TypeError(f"Invalid value '{value!s}' for dtype '{self.dtype}'")
+
+    def _where(self, mask: npt.NDArray[np.bool_], value) -> Self:
+        if IS_ARM and is_scalar(value) and not is_valid_na_for_dtype(value, self.dtype):
+            value = self._validate_setitem_value(value)
+            data = self._data.copy()
+            data[~mask] = value
+            result_mask = self._mask & mask
+            return self._simple_new(data, result_mask)
+
+        return super()._where(mask, value)
+
+    def _putmask(self, mask: npt.NDArray[np.bool_], value) -> None:
+        if (
+            IS_ARM
+            and self._data.dtype == np.dtype("float64")
+            and is_scalar(value)
+            and not is_valid_na_for_dtype(value, self.dtype)
+        ):
+            if self._readonly:
+                raise ValueError("Cannot modify read-only array")
+            value = self._validate_setitem_value(value)
+            libalgos.putmask_masked_float64(self._data, self._mask, mask, value)
+            return
+
+        super()._putmask(mask, value)
 
     def __setitem__(self, key, value) -> None:
         if self._readonly:
@@ -1319,13 +1378,22 @@ class BaseMaskedArray(OpsMixin, ExtensionArray):
         arr = self._data
         mask = self._mask
 
+        if IS_ARM and self.dtype.kind == "b" and len(arr) > 100_000:
+            codes, uniques, uniques_mask = libalgos.factorize_bool_masked(
+                arr, mask, use_na_sentinel
+            )
+            uniques_ea = self._simple_new(uniques, uniques_mask)
+            return codes, uniques_ea
+
+        has_na = mask.any()
+        if IS_ARM and not has_na:
+            mask = None
         # Use a sentinel for na; recode and add NA to uniques if necessary below
         codes, uniques = factorize_array(arr, use_na_sentinel=True, mask=mask)
 
         # check that factorize_array correctly preserves dtype.
         assert uniques.dtype == self.dtype.numpy_dtype, (uniques.dtype, self.dtype)
 
-        has_na = mask.any()
         if use_na_sentinel or not has_na:
             size = len(uniques)
         else:

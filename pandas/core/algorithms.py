@@ -23,6 +23,8 @@ from pandas._libs import (
     hashtable as htable,
     iNaT,
     lib,
+    swisstable,
+    swisstable_ismember,
 )
 from pandas._libs.missing import NA
 from pandas._typing import (
@@ -80,6 +82,8 @@ from pandas.core.dtypes.missing import (
     na_value_for_dtype,
 )
 
+from pandas.core import boostkit_fastpaths
+from pandas.core.config_init import get_use_swisstable
 from pandas.core.array_algos.take import take_nd
 from pandas.core.construction import (
     array as pd_array,
@@ -271,8 +275,25 @@ _hashtables = {
 }
 
 
+_swisstables = {
+    "float64": swisstable.SwissFloat64Map,
+    "float32": swisstable.SwissFloat32Map,
+    "uint64": swisstable.SwissUInt64Map,
+    "uint32": swisstable.SwissUInt32Map,
+    "uint16": swisstable.SwissUInt16Map,
+    "uint8": swisstable.SwissUInt8Map,
+    "int64": swisstable.SwissInt64Map,
+    "int32": swisstable.SwissInt32Map,
+    "int16": swisstable.SwissInt16Map,
+    "int8": swisstable.SwissInt8Map,
+    "complex128": swisstable.SwissComplex128Map,
+    "complex64": swisstable.SwissComplex64Map,
+}
+
+
 def _get_hashtable_algo(
     values: np.ndarray,
+    use_swisstable: bool = False,
 ) -> tuple[type[htable.HashTable], np.ndarray]:
     """
     Parameters
@@ -287,6 +308,9 @@ def _get_hashtable_algo(
     values = _ensure_data(values)
 
     ndtype = _check_object_for_strings(values)
+    if use_swisstable and ndtype in _swisstables:
+        return _swisstables[ndtype], values
+
     hashtable = _hashtables[ndtype]
     return hashtable, values
 
@@ -458,6 +482,7 @@ def nunique_ints(values: ArrayLike) -> int:
 
 def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
     """See algorithms.unique for docs. Takes a mask for masked arrays."""
+
     values = _ensure_arraylike(values, func_name="unique")
 
     if isinstance(values.dtype, ExtensionDtype):
@@ -469,7 +494,9 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         return values.unique()
 
     original = values
-    hashtable, values = _get_hashtable_algo(values)
+    use_swiss = get_use_swisstable() and len(values) <= 1_000_000
+    hashtable, values = _get_hashtable_algo(values, use_swisstable=use_swiss)
+    using_swisstable = use_swiss and hashtable in _swisstables.values()
 
     table = hashtable(len(values))
     if mask is None:
@@ -478,16 +505,28 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         return uniques
 
     else:
-        uniques, mask = table.unique(values, mask=mask)
+        if using_swisstable:
+            mask_uint8 = mask.view(np.uint8)
+            uniques, result_mask = table.unique(values, mask=mask_uint8)
+        else:
+            uniques, result_mask = table.unique(values, mask=mask)
         uniques = _reconstruct_data(uniques, original.dtype, original)
-        assert mask is not None  # for mypy
-        return uniques, mask.astype("bool")
+        assert result_mask is not None  # for mypy
+        return uniques, result_mask.astype("bool")
 
 
 unique1d = unique
 
 
 _MINIMUM_COMP_ARR_LEN = 1_000_000
+
+# Below this number of lookup values the SwissTable ismember path has higher
+# per-lookup instruction overhead than the legacy klib hashtable (SIMD group
+# load + neon_movemask vs. scalar bit-test).  The lookup table fits in L1
+# cache at this size, so SwissTable's cache-friendly layout provides no
+# benefit.  Benchmark data on aarch64 (Kunpeng 920B) shows the crossover
+# between 1000 and 2000 values; 1024 is the nearest power-of-two.
+_SWISSTABLE_ISMEMBER_MIN_VALUES = 1024
 
 
 def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
@@ -566,15 +605,25 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
         len(comps_array) > _MINIMUM_COMP_ARR_LEN
         and len(values) <= 26
         and comps_array.dtype != object
-        and not any(v is NA for v in values)
+        and (
+            (values.dtype != object or not any(v is NA for v in values))
+            if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            else not any(v is NA for v in values)
+        )
     ):
         # If the values include nan we need to check for nan explicitly
         # since np.nan it not equal to np.nan
         if isna(values).any():
+            if boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+                return np.logical_or(
+                    np.isin(comps_array, values).ravel(), np.isnan(comps_array)
+                )
 
             def f(c, v):
                 return np.logical_or(np.isin(c, v).ravel(), np.isnan(c))
 
+        elif boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS:
+            return np.isin(comps_array, values).ravel()
         else:
             f = lambda a, b: np.isin(a, b).ravel()
 
@@ -582,9 +631,45 @@ def isin(comps: ListLike, values: ListLike) -> npt.NDArray[np.bool_]:
         common = np_find_common_type(values.dtype, comps_array.dtype)
         values = values.astype(common, copy=False)
         comps_array = comps_array.astype(common, copy=False)
-        f = htable.ismember
+        f = _get_ismember_func(comps_array.dtype, len(values))
 
     return f(comps_array, values)
+
+
+def _get_ismember_func(dtype: np.dtype, values_size: int = 0):
+    if values_size < _SWISSTABLE_ISMEMBER_MIN_VALUES:
+        return htable.ismember
+
+    if get_use_swisstable() and dtype.kind in "iufc":
+        swisstable_funcs = {
+            np.dtype("int64"): swisstable.ismember_int64,
+            np.dtype("int32"): swisstable.ismember_int32,
+            np.dtype("int16"): swisstable.ismember_int16,
+            np.dtype("int8"): swisstable.ismember_int8,
+            np.dtype("uint64"): swisstable.ismember_uint64,
+            np.dtype("uint32"): swisstable.ismember_uint32,
+            np.dtype("uint16"): swisstable.ismember_uint16,
+            np.dtype("uint8"): swisstable.ismember_uint8,
+            np.dtype("float64"): swisstable.ismember_float64,
+            np.dtype("float32"): swisstable.ismember_float32,
+            np.dtype("complex128"): swisstable.ismember_complex128,
+            np.dtype("complex64"): swisstable.ismember_complex64,
+        }
+        if values_size >= 65_536:
+            large_integer_funcs = {
+                np.dtype("int64"): swisstable_ismember.ismember_int64,
+                np.dtype("int32"): swisstable_ismember.ismember_int32,
+                np.dtype("uint64"): swisstable_ismember.ismember_uint64,
+                np.dtype("uint32"): swisstable_ismember.ismember_uint32,
+            }
+            func = large_integer_funcs.get(dtype)
+            if func is not None:
+                return func
+        func = swisstable_funcs.get(dtype)
+        if func is not None:
+            return func
+
+    return htable.ismember
 
 
 def factorize_array(
@@ -623,7 +708,16 @@ def factorize_array(
     codes : ndarray[np.intp]
     uniques : ndarray
     """
+
     original = values
+    # AArch64-only fast path for object arrays that are entirely exact Python
+    # ints. Masks or explicit NA sentinels stay on the object path so missing
+    # value semantics are unchanged; non-matching arrays silently fall back.
+    if values.dtype == object and mask is None and na_value is None:
+        maybe_int64 = lib.maybe_convert_object_int64(values)
+        if maybe_int64 is not None:
+            values = maybe_int64
+
     if values.dtype.kind in "mM":
         # _get_hashtable_algo will cast dt64/td64 to i8 via _ensure_data, so we
         #  need to do the same to na_value. We are assuming here that the passed
@@ -631,16 +725,28 @@ def factorize_array(
         # e.g. test_where_datetimelike_categorical
         na_value = iNaT
 
-    hash_klass, values = _get_hashtable_algo(values)
+    use_swiss = get_use_swisstable() and mask is None
+    hash_klass, values = _get_hashtable_algo(values, use_swisstable=use_swiss)
+    using_swisstable = use_swiss and hash_klass in _swisstables.values()
 
     table = hash_klass(size_hint or len(values))
-    uniques, codes = table.factorize(
-        values,
-        na_sentinel=-1,
-        na_value=na_value,
-        mask=mask,
-        ignore_na=use_na_sentinel,
-    )
+    if using_swisstable:
+        mask_uint8 = mask.view(np.uint8) if mask is not None else None
+        uniques, codes = table.factorize(
+            values,
+            na_sentinel=-1,
+            na_value=na_value,
+            mask=mask_uint8,
+            ignore_na=use_na_sentinel,
+        )
+    else:
+        uniques, codes = table.factorize(
+            values,
+            na_sentinel=-1,
+            na_value=na_value,
+            mask=mask,
+            ignore_na=use_na_sentinel,
+        )
 
     # re-cast e.g. i8->dt64/td64, uint8->bool
     uniques = _reconstruct_data(uniques, original.dtype, original)
@@ -825,13 +931,21 @@ def factorize(
         )
 
     if sort and len(uniques) > 0:
-        uniques, codes = safe_sort(
-            uniques,
-            codes,
-            use_na_sentinel=use_na_sentinel,
-            assume_unique=True,
-            verify=False,
+        already_sorted = (
+            boostkit_fastpaths.USE_BOOSTKIT_FASTPATHS
+            and isinstance(uniques, np.ndarray)
+            and uniques.dtype == np.float64
+            and uniques[0] <= uniques[-1]
+            and algos.is_monotonic(uniques, timelike=False)[0]
         )
+        if not already_sorted:
+            uniques, codes = safe_sort(
+                uniques,
+                codes,
+                use_na_sentinel=use_na_sentinel,
+                assume_unique=True,
+                verify=False,
+            )
 
     uniques = _reconstruct_data(uniques, original.dtype, original)
 
@@ -981,7 +1095,7 @@ def duplicated(
           occurrence.
         - ``last`` : Mark duplicates as ``True`` except for the last
           occurrence.
-        - False : Mark all duplicates as ``True``.
+        - ``False`` : Mark all duplicates as ``True``.
     mask : ndarray[bool], optional
         array indicating which elements to exclude from checking
 
@@ -989,7 +1103,29 @@ def duplicated(
     -------
     duplicated : ndarray[bool]
     """
+
     values = _ensure_data(values)
+
+    if get_use_swisstable():
+        duplicated_funcs = {
+            np.dtype("int64"): swisstable.duplicated_int64,
+            np.dtype("int32"): swisstable.duplicated_int32,
+            np.dtype("int16"): swisstable.duplicated_int16,
+            np.dtype("int8"): swisstable.duplicated_int8,
+            np.dtype("uint64"): swisstable.duplicated_uint64,
+            np.dtype("uint32"): swisstable.duplicated_uint32,
+            np.dtype("uint16"): swisstable.duplicated_uint16,
+            np.dtype("uint8"): swisstable.duplicated_uint8,
+            np.dtype("float64"): swisstable.duplicated_float64,
+            np.dtype("float32"): swisstable.duplicated_float32,
+            np.dtype("complex128"): swisstable.duplicated_complex128,
+            np.dtype("complex64"): swisstable.duplicated_complex64,
+        }
+        func = duplicated_funcs.get(values.dtype)
+        if func is not None:
+            mask_uint8 = mask.view(np.uint8) if mask is not None else None
+            return func(values, keep=keep, mask=mask_uint8)
+
     return htable.duplicated(values, keep=keep, mask=mask)
 
 

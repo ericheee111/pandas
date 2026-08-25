@@ -16,6 +16,7 @@ from pandas import (
     Series,
 )
 import pandas._testing as tm
+from pandas.core.indexes import multi as multi_module
 
 
 @pytest.fixture
@@ -58,6 +59,55 @@ def test_unique(names):
     mi = MultiIndex.from_arrays([[], []], names=names)
     res = mi.unique()
     tm.assert_index_equal(mi, res)
+
+
+def test_unique_non_arm_uses_portable_path(monkeypatch):
+    monkeypatch.setattr(multi_module, "IS_ARM", False)
+    monkeypatch.setattr(
+        multi_module.np,
+        "unique",
+        lambda *args, **kwargs: pytest.fail(
+            "non-ARM MultiIndex.unique used packed codes"
+        ),
+    )
+    index = MultiIndex.from_arrays(
+        [
+            Series([1, None, 1, 2, None], dtype="Int64"),
+            ["a", "b", "a", "c", "b"],
+        ]
+    )
+
+    result = index.unique()
+
+    expected = index[[0, 1, 3]]
+    tm.assert_index_equal(result, expected)
+
+
+def test_unique_arm_matches_portable_path(monkeypatch):
+    index = MultiIndex.from_arrays(
+        [
+            Series([1, None, 1, 2, None], dtype="Int64"),
+            ["a", "b", "a", "c", "b"],
+        ],
+        names=["number", "label"],
+    )
+
+    monkeypatch.setattr(multi_module, "IS_ARM", False)
+    expected = index.unique()
+    calls = 0
+    original = multi_module.np.unique
+
+    def tracked(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(multi_module.np, "unique", tracked)
+    monkeypatch.setattr(multi_module, "IS_ARM", True)
+    result = index.unique()
+
+    assert calls == 1
+    tm.assert_index_equal(result, expected)
 
 
 def test_unique_datetimelike():
@@ -355,3 +405,63 @@ def test_midx_unique_ea_dtype():
     exp_vals_b = np.array([1, 2, 3])
     expected = MultiIndex.from_arrays([exp_vals_a, exp_vals_b], names=["a", "b"])
     tm.assert_index_equal(result, expected)
+
+
+class TestDropDuplicatesFastPath:
+    """Coverage for the np.unique fast path in MultiIndex.drop_duplicates."""
+
+    def test_drop_duplicates_empty(self):
+        mi = MultiIndex.from_arrays([[], []], names=["a", "b"])
+        result = mi.drop_duplicates()
+        tm.assert_index_equal(result, mi)
+
+    def test_drop_duplicates_single_element(self):
+        mi = MultiIndex.from_arrays([[1], [2]], names=["a", "b"])
+        result = mi.drop_duplicates()
+        tm.assert_index_equal(result, mi)
+
+    def test_drop_duplicates_already_unique(self):
+        mi = MultiIndex.from_arrays([[1, 2, 3], [4, 5, 6]], names=["a", "b"])
+        result = mi.drop_duplicates()
+        tm.assert_index_equal(result, mi)
+
+    def test_drop_duplicates_basic(self):
+        mi = MultiIndex.from_arrays([[1, 2, 1, 2], [3, 4, 3, 4]], names=["a", "b"])
+        result = mi.drop_duplicates()
+        expected = MultiIndex.from_arrays([[1, 2], [3, 4]], names=["a", "b"])
+        tm.assert_index_equal(result, expected)
+
+    def test_drop_duplicates_first_occurrence_order(self):
+        mi = MultiIndex.from_arrays([[3, 1, 2, 1, 3], [1, 2, 3, 2, 1]])
+        result = mi.drop_duplicates()
+        expected = MultiIndex.from_arrays([[3, 1, 2], [1, 2, 3]])
+        tm.assert_index_equal(result, expected)
+
+    def test_drop_duplicates_object_dtype_fallback(self):
+        mi = MultiIndex.from_arrays(
+            [["a", "b", "a", "c"], [1, 2, 1, 3]], names=["x", "y"]
+        )
+        result = mi.drop_duplicates()
+        expected = MultiIndex.from_arrays([["a", "b", "c"], [1, 2, 3]], names=["x", "y"])
+        tm.assert_index_equal(result, expected)
+
+    def test_drop_duplicates_keep_last(self):
+        mi = MultiIndex.from_arrays([[1, 2, 1], [3, 4, 3]])
+        result = mi.drop_duplicates(keep="last")
+        expected = MultiIndex.from_arrays([[2, 1], [4, 3]])
+        tm.assert_index_equal(result, expected)
+
+    def test_drop_duplicates_keep_false(self):
+        mi = MultiIndex.from_arrays([[1, 2, 1, 3], [3, 4, 3, 5]])
+        result = mi.drop_duplicates(keep=False)
+        expected = MultiIndex.from_arrays([[2, 3], [4, 5]])
+        tm.assert_index_equal(result, expected)
+
+    def test_drop_duplicates_large_codes_fallback(self):
+        n_levels = 10
+        n_per_level = 3
+        arrays = [np.arange(n_per_level) for _ in range(n_levels)]
+        mi = MultiIndex.from_product(arrays)
+        mi_dup = mi.append(mi)
+        result = mi_dup.drop_duplicates()
+        tm.assert_index_equal(result, mi)

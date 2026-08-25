@@ -13,6 +13,7 @@ import warnings
 
 import numpy as np
 
+from pandas.compat._arch import IS_ARM
 from pandas._libs.indexing import NDFrameIndexerBase
 from pandas._libs.lib import item_from_zerodim
 from pandas.compat import CHAINED_WARNING_DISABLED
@@ -922,6 +923,8 @@ class _LocationIndexer(NDFrameIndexerBase):
                     _chained_assignment_msg, ChainedAssignmentError, stacklevel=2
                 )
 
+        if isinstance(self.obj, ABCSeries):
+            self.obj._invalidate_row_apply_cache()
         check_dict_or_set_indexers(key)
         if isinstance(key, tuple):
             key = (list(x) if is_iterator(x) else x for x in key)
@@ -1191,6 +1194,8 @@ class _LocationIndexer(NDFrameIndexerBase):
 
     @final
     def __getitem__(self, key):
+        if IS_ARM and type(key) is int:
+            return self._getitem_axis(key, axis=self.axis or 0)
         check_dict_or_set_indexers(key)
         if type(key) is tuple:
             key = (list(x) if is_iterator(x) else x for x in key)
@@ -1738,6 +1743,14 @@ class _iLocIndexer(_LocationIndexer):
             raise IndexError("positional indexers are out-of-bounds") from err
 
     def _getitem_axis(self, key, axis: AxisInt):
+        if IS_ARM and type(key) is int:
+            n = len(self.obj._get_axis(axis))
+            if key < 0:
+                key += n
+            if key < 0 or key >= n:
+                raise IndexError("single positional indexer is out-of-bounds")
+            return self.obj._ixs(key, axis=axis)
+
         if key is Ellipsis:
             key = slice(None)
         elif isinstance(key, ABCDataFrame):
@@ -2527,6 +2540,8 @@ class _ScalarAccessIndexer(NDFrameIndexerBase):
         return self.obj._get_value(*key, takeable=self._takeable)
 
     def __setitem__(self, key, value) -> None:
+        if isinstance(self.obj, ABCSeries):
+            self.obj._invalidate_row_apply_cache()
         if isinstance(key, tuple):
             key = tuple(com.apply_if_callable(x, self.obj) for x in key)
         else:
@@ -2689,6 +2704,10 @@ def check_bool_indexer(index: Index, key) -> np.ndarray:
     if is_object_dtype(key):
         # key might be object-dtype bool, check_array_indexer needs bool array
         result = np.asarray(result, dtype=bool)
+    elif IS_ARM and type(result) is list:
+        # np.fromiter skips the intermediate object-dtype array that
+        # np.asarray creates for Python lists (~40% faster on AArch64).
+        result = np.fromiter(result, dtype=bool, count=len(result))
     elif not is_array_like(result):
         # GH 33924
         # key may contain nan elements, check_array_indexer needs bool array

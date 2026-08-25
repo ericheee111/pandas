@@ -1,5 +1,9 @@
+from unittest import mock
+
+import numpy as np
 import pytest
 
+import pandas as pd
 from pandas import (
     DataFrame,
     Series,
@@ -107,3 +111,181 @@ def test_merge_cross_series():
 
     expected = merge(ls.to_frame(), rs.to_frame(), how="cross")
     tm.assert_frame_equal(res, expected)
+
+
+def test_merge_cross_pyarrow_columns():
+    pytest.importorskip("pyarrow")
+    left = DataFrame({"a": pd.array(["x", "y"], dtype="string[pyarrow]")})
+    right = DataFrame({"b": pd.array(["m", "n"], dtype="string[pyarrow]")})
+    result = merge(left, right, how="cross")
+    expected = DataFrame(
+        {
+            "a": pd.array(["x", "x", "y", "y"], dtype="string[pyarrow]"),
+            "b": pd.array(["m", "n", "m", "n"], dtype="string[pyarrow]"),
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_merge_cross_masked_array_fallback():
+    left = DataFrame({"a": pd.array([1, 2], dtype="Int64")})
+    right = DataFrame({"b": [3, 4]})
+    result = merge(left, right, how="cross")
+    expected = DataFrame(
+        {
+            "a": pd.array([1, 1, 2, 2], dtype="Int64"),
+            "b": [3, 4, 3, 4],
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_merge_cross_arm_exception_fallback():
+    # Verify that when the ARM fast path raises an exception, the code
+    # falls back to the generic synthetic-column path. We mock IS_ARM=True
+    # to ensure the fast path is actually entered (otherwise on x86 the
+    # mock would never be called and the test would be a false positive).
+    left = DataFrame({"a": [1, 2]})
+    right = DataFrame({"b": [3, 4]})
+    with (
+        mock.patch("pandas.core.reshape.merge.IS_ARM", True),
+        mock.patch(
+            "pandas.core.reshape.merge._cross_merge_arm",
+            side_effect=RuntimeError("forced"),
+        ),
+    ):
+        with tm.assert_produces_warning(RuntimeWarning, match="ARM cross-merge"):
+            result = merge(left, right, how="cross")
+    expected = DataFrame({"a": [1, 1, 2, 2], "b": [3, 4, 3, 4]})
+    tm.assert_frame_equal(result, expected)
+
+
+def test_cross_merge_arm_pyarrow_direct():
+    pa = pytest.importorskip("pyarrow")
+    from pandas.core.reshape.merge import _cross_merge_arm
+
+    left = DataFrame({"a": pd.array(["x", "y"], dtype="string[pyarrow]")})
+    right = DataFrame({"b": pd.array(["m", "n"], dtype="string[pyarrow]")})
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.array(["x", "x", "y", "y"], dtype="string[pyarrow]"),
+            "b": pd.array(["m", "n", "m", "n"], dtype="string[pyarrow]"),
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_cross_merge_arm_pyarrow_single_chunk():
+    pa = pytest.importorskip("pyarrow")
+    from pandas.core.reshape.merge import _cross_merge_arm
+    from pandas.core.dtypes.dtypes import ArrowDtype
+
+    left_arr = pa.chunked_array([["x", "y"]])
+    right_arr = pa.chunked_array([["m", "n"]])
+    left = DataFrame({"a": pd.arrays.ArrowExtensionArray(left_arr)})
+    right = DataFrame({"b": pd.arrays.ArrowExtensionArray(right_arr)})
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.array(["x", "x", "y", "y"], dtype=ArrowDtype(pa.string())),
+            "b": pd.array(["m", "n", "m", "n"], dtype=ArrowDtype(pa.string())),
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_cross_merge_arm_pyarrow_multi_chunk():
+    pa = pytest.importorskip("pyarrow")
+    from pandas.core.reshape.merge import _cross_merge_arm
+    from pandas.core.dtypes.dtypes import ArrowDtype
+
+    left_arr = pa.chunked_array([["x"], ["y"]])
+    right_arr = pa.chunked_array([["m"], ["n"]])
+    left = DataFrame({"a": pd.arrays.ArrowExtensionArray(left_arr)})
+    right = DataFrame({"b": pd.arrays.ArrowExtensionArray(right_arr)})
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.array(["x", "x", "y", "y"], dtype=ArrowDtype(pa.string())),
+            "b": pd.array(["m", "n", "m", "n"], dtype=ArrowDtype(pa.string())),
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("n_right", [8, 600])
+def test_cross_merge_arm_pyarrow_crossover(n_right):
+    # exercise both sides of the n_other <= 512 take/chunked-repeat
+    # crossover in the pyarrow expansion path
+    pytest.importorskip("pyarrow")
+    from pandas.core.reshape.merge import _cross_merge_arm
+
+    left = DataFrame({"a": pd.array(["x", "y", "z"], dtype="string[pyarrow]")})
+    right = DataFrame(
+        {"b": pd.array([f"r{i}" for i in range(n_right)], dtype="string[pyarrow]")}
+    )
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.array(np.repeat(["x", "y", "z"], n_right), dtype="string[pyarrow]"),
+            "b": pd.array(
+                np.tile([f"r{i}" for i in range(n_right)], 3),
+                dtype="string[pyarrow]",
+            ),
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_cross_merge_arm_masked_array_fallback_direct():
+    from pandas.core.reshape.merge import _cross_merge_arm
+
+    left = DataFrame({"a": pd.array([1, 2], dtype="Int64")})
+    right = DataFrame({"b": [3, 4]})
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.array([1, 1, 2, 2], dtype="Int64"),
+            "b": [3, 4, 3, 4],
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_cross_merge_arm_datetime_tz_aware():
+    # GH#XXXXX: verify tz-aware datetime columns are preserved correctly
+    # in the ARM cross-merge fast path (regression test for _simple_new
+    # positional argument bug that silently dropped timezone info).
+    from pandas.core.reshape.merge import _cross_merge_arm
+
+    left = DataFrame(
+        {"a": pd.to_datetime(["2020-01-01", "2020-01-02"]).tz_localize("UTC")}
+    )
+    right = DataFrame({"b": [3, 4]})
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.to_datetime(
+                ["2020-01-01", "2020-01-01", "2020-01-02", "2020-01-02"]
+            ).tz_localize("UTC"),
+            "b": [3, 4, 3, 4],
+        }
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_cross_merge_arm_timedelta():
+    # Verify timedelta columns work correctly in the ARM cross-merge fast path.
+    from pandas.core.reshape.merge import _cross_merge_arm
+
+    left = DataFrame({"a": pd.to_timedelta(["1 day", "2 days"])})
+    right = DataFrame({"b": [3, 4]})
+    result = _cross_merge_arm(left, right, ("_x", "_y"))
+    expected = DataFrame(
+        {
+            "a": pd.to_timedelta(["1 day", "1 day", "2 days", "2 days"]),
+            "b": [3, 4, 3, 4],
+        }
+    )
+    tm.assert_frame_equal(result, expected)

@@ -23,6 +23,7 @@ if get_option('pandas_cython_coverage')
     add_project_arguments(
         [
             '-DCYTHON_TRACE=1',
+            '-DCYTHON_TRACE_NOGIL=1',
             '-DCYTHON_USE_SYS_MONITORING=0',
         ],
         language: ['c', 'cpp'],
@@ -30,7 +31,7 @@ if get_option('pandas_cython_coverage')
 endif
 # Enables settings __module__ on cdef classes
 # https://github.com/cython/cython/issues/7231
-add_project_arguments('-DCYTHON_USE_TYPE_SPECS=1', language: 'c')
+add_project_arguments('-DCYTHON_USE_TYPE_SPECS=1', language: ['c', 'cpp'])
 
 # Allow supporting older numpys than the version compiled against
 # Set the define to the min supported version of numpy for pandas

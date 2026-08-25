@@ -132,6 +132,145 @@ def test_bool_aggs_dup_column_labels(all_boolean_reductions):
 
 
 @pytest.mark.parametrize(
+    "method,decisive,following",
+    [
+        ("any", True, False),
+        ("all", False, True),
+    ],
+)
+def test_bool_aggs_result_remains_decisive(method, decisive, following):
+    # The first row determines every output column.  Later values, including
+    # missing values, must not change the result.
+    columns = list("abcd")
+    df = DataFrame(
+        [[decisive] * len(columns), [following] * len(columns), [np.nan] * 4],
+        columns=columns,
+    )
+
+    result = getattr(df.groupby([0, 0, 0]), method)()
+    expected = DataFrame([[decisive] * len(columns)], columns=columns)
+
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("dtype", ["str", "string[pyarrow]", "string[python]"])
+@pytest.mark.parametrize(
+    "method,skipna,expected_values",
+    [
+        ("any", True, [True, False, True, False]),
+        ("any", False, [True, True, True, True]),
+        ("all", True, [False, False, True, True]),
+        ("all", False, [False, False, True, True]),
+    ],
+)
+def test_arrow_string_bool_aggs(dtype, method, skipna, expected_values):
+    if dtype != "string[python]":
+        pytest.importorskip("pyarrow")
+    ser = Series(["", "x", "", None, None, "x", None], dtype=dtype)
+
+    result = ser.groupby([0, 0, 1, 1, 2, 2, 3]).agg(method, skipna=skipna)
+    expected = Series(expected_values)
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["any", "all"])
+@pytest.mark.parametrize("dtype", ["str", "string[python]"])
+@pytest.mark.parametrize("skipna", [True, False])
+def test_string_bool_aggs_arm_matches_non_arm(monkeypatch, method, dtype, skipna):
+    if dtype == "str":
+        pytest.importorskip("pyarrow")
+        is_arm = "pandas.core.arrays.arrow.array.IS_ARM"
+    else:
+        is_arm = "pandas.core.arrays.string_.IS_ARM"
+
+    ser = Series(["", "x", None, "y", ""], dtype=dtype)
+    groups = [0, 0, 1, 1, 1]
+
+    monkeypatch.setattr(is_arm, False)
+    expected = getattr(ser.groupby(groups), method)(skipna=skipna)
+    monkeypatch.setattr(is_arm, True)
+    result = getattr(ser.groupby(groups), method)(skipna=skipna)
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["any", "all"])
+@pytest.mark.parametrize("skipna", [True, False])
+def test_python_string_nan_bool_aggs_arm_matches_non_arm(monkeypatch, method, skipna):
+    dtype = pd.StringDtype(storage="python", na_value=np.nan)
+    ser = Series(["", "é", np.nan, "x", ""], dtype=dtype)
+    groups = [0, 0, 1, 1, 1]
+    is_arm = "pandas.core.arrays.string_.IS_ARM"
+
+    monkeypatch.setattr(is_arm, False)
+    expected = getattr(ser.groupby(groups), method)(skipna=skipna)
+    monkeypatch.setattr(is_arm, True)
+    result = getattr(ser.groupby(groups), method)(skipna=skipna)
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["any", "all"])
+def test_bool_aggs_arm_kernel_matches_non_arm(monkeypatch, method):
+    from pandas.core.groupby import ops as groupby_ops
+
+    ser = Series([True, False, np.nan, True, False])
+    groups = [0, 0, 1, 1, 1]
+
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", False)
+    expected = getattr(ser.groupby(groups), method)(skipna=False)
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", True)
+    result = getattr(ser.groupby(groups), method)(skipna=False)
+
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["any", "all"])
+@pytest.mark.parametrize("skipna", [True, False])
+def test_bool_aggs_arm_multicolumn_kernel_matches_non_arm(monkeypatch, method, skipna):
+    from pandas.core.groupby import ops as groupby_ops
+
+    decisive = method == "any"
+    df = DataFrame(
+        [
+            [decisive, decisive, decisive],
+            [decisive, decisive, decisive],
+            [not decisive, np.nan, not decisive],
+        ]
+    )
+    groups = [0, 0, 0]
+
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", False)
+    expected = getattr(df.groupby(groups), method)(skipna=skipna)
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", True)
+    result = getattr(df.groupby(groups), method)(skipna=skipna)
+
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("skipna", [True, False])
+def test_bool_aggs_arm_any_mask_before_group_completed(monkeypatch, skipna):
+    from pandas.core.groupby import ops as groupby_ops
+
+    df = DataFrame(
+        {
+            "a": Series([pd.NA, True, False], dtype="boolean"),
+            "b": Series([True, False, False], dtype="boolean"),
+            "c": Series([True, False, False], dtype="boolean"),
+        }
+    )
+    groups = [0, 0, 0]
+
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", False)
+    expected = df.groupby(groups).any(skipna=skipna)
+    monkeypatch.setattr(groupby_ops, "_IS_AARCH64", True)
+    result = df.groupby(groups).any(skipna=skipna)
+
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
     "data",
     [
         [False, False, False],
@@ -957,6 +1096,64 @@ def test_min_empty_string_dtype(func, string_dtype_no_object):
     tm.assert_frame_equal(result, expected)
 
 
+@pytest.mark.parametrize(
+    "func, skipna, min_count, expected_values",
+    [
+        ("min", True, 1, ["a", "c"]),
+        ("max", True, 1, ["b", "d"]),
+    ],
+)
+def test_min_max_string_dtype(
+    string_dtype_no_object, func, skipna, min_count, expected_values
+):
+    dtype = string_dtype_no_object
+    df = DataFrame(
+        {
+            "key": Series(["x", "x", "x", "y", "y", "y"], dtype=object),
+            "value": Series(["b", pd.NA, "a", "d", pd.NA, "c"], dtype=dtype),
+        }
+    )
+
+    result = getattr(df.groupby("key")["value"], func)(
+        skipna=skipna, min_count=min_count
+    )
+
+    expected = Series(
+        expected_values,
+        index=pd.Index(["x", "y"], name="key"),
+        name="value",
+        dtype=dtype,
+    )
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("func", ["min", "max"])
+@pytest.mark.parametrize(
+    "skipna,min_count", [(True, 1), (False, 1), (True, 3)]
+)
+def test_min_max_string_dtype_arm_matches_non_arm(
+    monkeypatch, string_dtype_no_object, func, skipna, min_count
+):
+    dtype = string_dtype_no_object
+    if dtype.storage == "pyarrow":
+        pytest.importorskip("pyarrow")
+        is_arm = "pandas.core.arrays.arrow.array.IS_ARM"
+    else:
+        is_arm = "pandas.core.arrays.string_.IS_ARM"
+
+    ser = Series(["b", pd.NA, "a", "d", pd.NA, "c"], dtype=dtype)
+    groups = [0, 0, 0, 1, 1, 1]
+
+    monkeypatch.setattr(is_arm, False)
+    expected = getattr(ser.groupby(groups), func)(
+        skipna=skipna, min_count=min_count
+    )
+    monkeypatch.setattr(is_arm, True)
+    result = getattr(ser.groupby(groups), func)(skipna=skipna, min_count=min_count)
+
+    tm.assert_series_equal(result, expected)
+
+
 @pytest.mark.parametrize("min_count", [0, 1])
 @pytest.mark.parametrize("test_series", [True, False])
 def test_string_dtype_all_na(
@@ -1048,6 +1245,43 @@ def test_string_dtype_all_na(
     else:
         expected = DataFrame({"b": expected_value}, index=index, dtype=expected_dtype)
     tm.assert_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "skipna,min_count,expected_values",
+    [
+        (True, 0, ["ab", "c"]),
+        (True, 2, ["ab", pd.NA]),
+        (False, 0, [pd.NA, pd.NA]),
+    ],
+)
+def test_string_dtype_sum_mixed_na(
+    string_dtype_no_object, skipna, min_count, expected_values
+):
+    dtype = string_dtype_no_object
+    ser = Series(["a", pd.NA, "b", pd.NA, "c"], dtype=dtype, name="value")
+    keys = Series([0, 0, 0, 1, 1])
+
+    result = ser.groupby(keys).sum(skipna=skipna, min_count=min_count)
+
+    expected = Series(expected_values, dtype=dtype, name="value")
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("skipna", [True, False])
+@pytest.mark.parametrize("min_count", [0, 1, 2])
+def test_string_dtype_sum_arm_matches_non_arm(
+    monkeypatch, string_dtype_no_object, skipna, min_count
+):
+    ser = Series(["a", pd.NA, "b", pd.NA, "c"], dtype=string_dtype_no_object)
+    keys = Series([0, 0, 0, 1, 1])
+
+    monkeypatch.setattr("pandas.core.arrays.base.IS_ARM", False)
+    expected = ser.groupby(keys).sum(skipna=skipna, min_count=min_count)
+    monkeypatch.setattr("pandas.core.arrays.base.IS_ARM", True)
+    result = ser.groupby(keys).sum(skipna=skipna, min_count=min_count)
+
+    tm.assert_series_equal(result, expected)
 
 
 def test_max_nan_bug():

@@ -39,6 +39,15 @@ u8max: int
 
 def is_np_dtype(dtype: object, kinds: str | None = ...) -> TypeGuard[np.dtype]: ...
 def item_from_zerodim(val: object) -> object: ...
+def fast_string_upper(
+    arr: npt.NDArray[np.object_],
+) -> npt.NDArray[np.object_] | None: ...
+def fast_string_contains(
+    arr: npt.NDArray[np.object_], pat: str
+) -> npt.NDArray[np.bool_] | None: ...
+def fast_string_len(
+    arr: npt.NDArray[np.object_],
+) -> npt.NDArray[np.int64] | None: ...
 def infer_dtype(value: object, skipna: bool = ...) -> str: ...
 def is_iterator(obj: object) -> bool: ...
 def is_scalar(val: object) -> bool: ...
@@ -118,6 +127,9 @@ def maybe_convert_objects(
     convert_to_nullable_dtype: bool = ...,
     dtype_if_all_nat: DtypeObj | None = ...,
 ) -> ArrayLike: ...
+def maybe_convert_object_int64(
+    objects: npt.NDArray[np.object_],
+) -> npt.NDArray[np.int64] | None: ...
 @overload
 def maybe_convert_numeric(
     values: npt.NDArray[np.object_],
@@ -197,6 +209,11 @@ def indices_fast(
     keys: list,
     sorted_labels: list[npt.NDArray[np.int64]],
 ) -> dict[Hashable, npt.NDArray[np.intp]]: ...
+def indices_fast_single(
+    index: npt.NDArray[np.intp],
+    labels: np.ndarray,  # const int64_t[:]
+    keys: object,
+) -> dict[Hashable, npt.NDArray[np.intp]]: ...
 def generate_slices(
     labels: np.ndarray,
     ngroups: int,  # const intp_t[:]
@@ -206,6 +223,16 @@ def count_level_2d(
     labels: np.ndarray,  # const intp_t[:]
     max_bin: int,
 ) -> np.ndarray: ...  # np.ndarray[np.int64, ndim=2]
+def count_level_2d_no_na(
+    labels: np.ndarray,  # const intp_t[:]
+    max_bin: int,
+    n: int,
+) -> np.ndarray | None: ...  # np.ndarray[np.int64, ndim=2]
+def count_level_2d_float64_skipna(
+    values: np.ndarray,  # const float64_t[:]
+    labels: np.ndarray,  # const intp_t[:]
+    max_bin: int,
+) -> np.ndarray | None: ...  # np.ndarray[np.int64, ndim=2]
 def get_level_sorter(
     codes: np.ndarray,  # const int64_t[:]
     starts: np.ndarray,  # const intp_t[:]

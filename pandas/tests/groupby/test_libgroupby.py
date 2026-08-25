@@ -12,8 +12,36 @@ from pandas._libs.groupby import (
 
 from pandas.core.dtypes.common import ensure_platform_int
 
-from pandas import isna
+from pandas import (
+    NA,
+    isna,
+)
 import pandas._testing as tm
+
+
+def test_string_array_to_bool_rejects_non_string():
+    values = np.array(["a", 1], dtype=object)
+
+    with pytest.raises(TypeError, match="must be strings or missing"):
+        libgroupby.string_array_to_bool(values, None)
+
+
+@pytest.mark.parametrize("na_value", [NA, np.nan])
+def test_string_array_to_bool_mask(na_value):
+    values = np.array(["", na_value, "x"], dtype=object)
+
+    result, mask = libgroupby.string_array_to_bool(values, na_value)
+
+    expected = np.array([0, 1, 1], dtype=np.uint8)
+    expected_mask = np.array([0, 1, 0], dtype=np.uint8)
+    tm.assert_numpy_array_equal(result, expected)
+    tm.assert_numpy_array_equal(mask, expected_mask)
+
+    result, mask = libgroupby.string_array_to_bool(
+        np.array(["", "x"], dtype=object), na_value
+    )
+    tm.assert_numpy_array_equal(result, np.array([0, 1], dtype=np.uint8))
+    assert mask is None
 
 
 @pytest.mark.parametrize("dtype, rtol", [("float32", 1e-2), ("float64", 1e-5)])
@@ -86,6 +114,43 @@ class TestGroupVar:
         group_var(out, counts, values, labels)
         tm.assert_almost_equal(out, expected_out, rtol=0.5e-06)
         tm.assert_numpy_array_equal(counts, expected_counts)
+
+    @pytest.mark.parametrize("name", ["var", "std", "sem"])
+    def test_group_var_name(self, dtype, rtol, name):
+        values = np.array(
+            [
+                [1.0, np.nan],
+                [2.0, 4.0],
+                [3.0, 6.0],
+                [10.0, 8.0],
+                [12.0, np.nan],
+                [14.0, 12.0],
+            ],
+            dtype=dtype,
+        )
+        labels = np.repeat(np.arange(2), 3).astype("intp")
+        out = np.full((2, 2), np.nan, dtype=dtype)
+        counts = np.zeros(2, dtype="int64")
+
+        expected = np.vstack(
+            [np.nanvar(values[labels == label], axis=0, ddof=1) for label in range(2)]
+        )
+        if name == "std":
+            expected = np.sqrt(expected)
+        elif name == "sem":
+            nobs = np.vstack(
+                [
+                    np.sum(~np.isnan(values[labels == label]), axis=0)
+                    for label in range(2)
+                ]
+            )
+            expected = np.sqrt(expected / nobs)
+        expected = expected.astype(dtype)
+
+        group_var(out, counts, values, labels, name=name)
+
+        tm.assert_numpy_array_equal(counts, np.array([3, 3], dtype="int64"))
+        tm.assert_almost_equal(out, expected, rtol=rtol)
 
     def test_group_var_constant(self, dtype, rtol):
         # Regression test from GH 10448.
@@ -342,3 +407,386 @@ def test_cython_group_sum_overflow(values, expected_values):
     group_sum(actual, counts, data, labels, None, is_datetimelike=False)
 
     tm.assert_numpy_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "labels, min_count, expected, expected_counts, group_boundaries",
+    [
+        ([0, 0, 0, 1, 1, 1], 1, [[4.0], [9.0]], [3, 3], None),
+        ([0, 1, 0, 1, -1, 1], 1, [[3.0], [15.0]], [2, 3], None),
+        ([0, 1, 0, 1, -1, 1], 3, [[np.nan], [15.0]], [2, 3], None),
+        (
+            [-1, -1, 1, 1, 2, 2],
+            2,
+            [[np.nan], [np.nan], [7.0]],
+            [0, 2, 2],
+            np.array([2, 2, 4, 6], dtype=np.int64),
+        ),
+    ],
+)
+def test_cython_group_sum_single_column_label_transitions(
+    dtype, labels, min_count, expected, expected_counts, group_boundaries
+):
+    values = np.array([[1.0], [10.0], [2.0], [0.0], [100.0], [5.0]], dtype=dtype)
+    if labels == [0, 0, 0, 1, 1, 1]:
+        values = np.array([[1.0], [np.nan], [3.0], [4.0], [5.0], [np.nan]], dtype=dtype)
+    elif group_boundaries is not None:
+        values = np.array(
+            [[100.0], [200.0], [1.0], [np.nan], [3.0], [4.0]], dtype=dtype
+        )
+    actual = np.full((len(expected), 1), np.nan, dtype=dtype)
+    counts = np.zeros(len(expected_counts), dtype=np.int64)
+
+    group_sum(
+        actual,
+        counts,
+        values,
+        np.array(labels, dtype=np.intp),
+        None,
+        min_count=min_count,
+        is_datetimelike=False,
+        _group_boundaries=group_boundaries,
+        _group_boundaries_are_trusted=group_boundaries is not None,
+    )
+
+    tm.assert_numpy_array_equal(actual, np.array(expected, dtype=dtype))
+    tm.assert_numpy_array_equal(counts, np.array(expected_counts, dtype=np.int64))
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_cython_group_sum_single_column_read_only_values(dtype):
+    values = np.array([[1.0], [2.0], [3.0], [4.0]], dtype=dtype)
+    values.flags.writeable = False
+    labels = np.repeat(np.arange(2, dtype=np.intp), 2)
+    boundaries = np.array([2, 4], dtype=np.int64)
+    actual = np.full((2, 1), np.nan, dtype=dtype)
+    counts = np.zeros(2, dtype=np.int64)
+
+    group_sum(
+        actual,
+        counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+        _group_boundaries_are_trusted=True,
+    )
+
+    tm.assert_numpy_array_equal(actual, np.array([[3.0], [7.0]], dtype=dtype))
+    tm.assert_numpy_array_equal(counts, np.array([2, 2], dtype=np.int64))
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_cython_group_sum_single_column_equal_boundary_runs(dtype):
+    values = np.array(
+        [
+            [1.0e16],
+            [1.0],
+            [-1.0e16],
+            [1.0],
+            [1.0e16],
+            [np.nan],
+            [-1.0e16],
+            [1.0],
+            [1.0e16],
+            [2.0],
+            [-1.0e16],
+            [2.0],
+            [1.0e16],
+            [3.0],
+            [-1.0e16],
+            [3.0],
+        ],
+        dtype=dtype,
+    )
+    labels = np.repeat(np.arange(4, dtype=np.intp), 4)
+    boundaries = np.array([4, 8, 12, 16], dtype=np.int64)
+    expected = np.full((4, 1), np.nan, dtype=dtype)
+    expected_counts = np.zeros(4, dtype=np.int64)
+    actual = np.full((4, 1), np.nan, dtype=dtype)
+    actual_counts = np.zeros(4, dtype=np.int64)
+
+    group_sum(
+        expected,
+        expected_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+    )
+    group_sum(
+        actual,
+        actual_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+        _group_boundaries_are_trusted=True,
+    )
+
+    tm.assert_numpy_array_equal(actual, expected)
+    tm.assert_numpy_array_equal(actual_counts, expected_counts)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_cython_group_sum_four_lane_boundary_runs(dtype):
+    values = np.array(
+        [
+            [1.0],
+            [1.0],
+            [1.0],
+            [1.0],
+            [2.0],
+            [np.nan],
+            [2.0],
+            [2.0],
+            [np.inf],
+            [1.0],
+            [1.0],
+            [1.0],
+            [-np.inf],
+            [1.0],
+            [1.0],
+            [1.0],
+        ],
+        dtype=dtype,
+    )
+    labels = np.repeat(np.arange(4, dtype=np.intp), 4)
+    boundaries = np.array([4, 8, 12, 16], dtype=np.int64)
+    expected = np.full((4, 1), np.nan, dtype=dtype)
+    expected_counts = np.zeros(4, dtype=np.int64)
+    actual = np.full((4, 1), np.nan, dtype=dtype)
+    actual_counts = np.zeros(4, dtype=np.int64)
+
+    group_sum(
+        expected,
+        expected_counts,
+        values,
+        labels,
+        None,
+        min_count=4,
+        is_datetimelike=False,
+    )
+    group_sum(
+        actual,
+        actual_counts,
+        values,
+        labels,
+        None,
+        min_count=4,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+        _group_boundaries_are_trusted=True,
+    )
+
+    tm.assert_numpy_array_equal(actual, expected)
+    tm.assert_numpy_array_equal(actual_counts, expected_counts)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_cython_group_sum_non_contiguous_multi_column_boundaries(dtype):
+    values = np.arange(24, dtype=dtype).reshape(6, 4)[:, ::2]
+    labels = np.repeat(np.arange(2, dtype=np.intp), 3)
+    boundaries = np.array([3, 6], dtype=np.int64)
+    expected = np.full((2, 2), np.nan, dtype=dtype)
+    expected_counts = np.zeros(2, dtype=np.int64)
+    actual = np.full((2, 2), np.nan, dtype=dtype)
+    actual_counts = np.zeros(2, dtype=np.int64)
+
+    group_sum(
+        expected,
+        expected_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+    )
+    group_sum(
+        actual,
+        actual_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+        _group_boundaries_are_trusted=True,
+    )
+
+    tm.assert_numpy_array_equal(actual, expected)
+    tm.assert_numpy_array_equal(actual_counts, expected_counts)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_cython_group_sum_ignores_untrusted_boundaries(dtype):
+    values = np.arange(6, dtype=dtype)[:, None]
+    labels = np.array([0, 1, 0, 1, 0, 1], dtype=np.intp)
+    boundaries = np.array([3, 6], dtype=np.int64)
+    expected = np.full((2, 1), np.nan, dtype=dtype)
+    expected_counts = np.zeros(2, dtype=np.int64)
+    actual = np.full((2, 1), np.nan, dtype=dtype)
+    actual_counts = np.zeros(2, dtype=np.int64)
+
+    group_sum(
+        expected,
+        expected_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+    )
+    group_sum(
+        actual,
+        actual_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+    )
+
+    tm.assert_numpy_array_equal(actual, expected)
+    tm.assert_numpy_array_equal(actual_counts, expected_counts)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_cython_group_sum_single_column_non_contiguous_boundary_runs(dtype):
+    source = np.empty((32, 2), dtype=dtype)
+    source[::2, 0] = np.array([1.0e16, 1.0, -1.0e16, 1.0] * 4, dtype=dtype)
+    values = source[::2, :1]
+    assert not values.flags.c_contiguous
+    labels = np.repeat(np.arange(4, dtype=np.intp), 4)
+    boundaries = np.array([4, 8, 12, 16], dtype=np.int64)
+    expected = np.full((4, 1), np.nan, dtype=dtype)
+    expected_counts = np.zeros(4, dtype=np.int64)
+    actual = np.full((4, 1), np.nan, dtype=dtype)
+    actual_counts = np.zeros(4, dtype=np.int64)
+
+    group_sum(
+        expected,
+        expected_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+    )
+    group_sum(
+        actual,
+        actual_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+        _group_boundaries_are_trusted=True,
+    )
+
+    tm.assert_numpy_array_equal(actual, expected)
+    tm.assert_numpy_array_equal(actual_counts, expected_counts)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_cython_group_sum_unequal_boundary_runs_use_scalar_path(dtype):
+    values = np.arange(10, dtype=dtype)[:, None]
+    labels = np.repeat(np.arange(4, dtype=np.intp), [3, 3, 2, 2])
+    boundaries = np.array([3, 6, 8, 10], dtype=np.int64)
+    expected = np.full((4, 1), np.nan, dtype=dtype)
+    expected_counts = np.zeros(4, dtype=np.int64)
+    actual = np.full((4, 1), np.nan, dtype=dtype)
+    actual_counts = np.zeros(4, dtype=np.int64)
+
+    group_sum(
+        expected,
+        expected_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+    )
+    group_sum(
+        actual,
+        actual_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+        _group_boundaries_are_trusted=True,
+    )
+
+    tm.assert_numpy_array_equal(actual, expected)
+    tm.assert_numpy_array_equal(actual_counts, expected_counts)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    "boundaries",
+    [
+        np.array([3, 2, 4], dtype=np.int64),
+        np.array([5, 4], dtype=np.int64),
+    ],
+)
+def test_cython_group_sum_invalid_trusted_boundaries(dtype, boundaries):
+    values = np.arange(1, 5, dtype=dtype)[:, None]
+    labels = np.repeat(np.arange(2, dtype=np.intp), 2)
+    expected = np.full((2, 1), np.nan, dtype=dtype)
+    expected_counts = np.zeros(2, dtype=np.int64)
+    actual = np.full((2, 1), np.nan, dtype=dtype)
+    actual_counts = np.zeros(2, dtype=np.int64)
+
+    group_sum(
+        expected,
+        expected_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+    )
+    group_sum(
+        actual,
+        actual_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+        _group_boundaries_are_trusted=True,
+    )
+
+    tm.assert_numpy_array_equal(actual, expected)
+    tm.assert_numpy_array_equal(actual_counts, expected_counts)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_cython_group_sum_repeated_lane_label_uses_scalar_path(dtype):
+    values = np.arange(1, 9, dtype=dtype)[:, None]
+    labels = np.repeat(np.array([0, 1, 0, 2], dtype=np.intp), 2)
+    boundaries = np.array([2, 4, 6, 8], dtype=np.int64)
+    expected = np.full((3, 1), np.nan, dtype=dtype)
+    expected_counts = np.zeros(3, dtype=np.int64)
+    actual = np.full((3, 1), np.nan, dtype=dtype)
+    actual_counts = np.zeros(3, dtype=np.int64)
+
+    group_sum(
+        expected,
+        expected_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+    )
+    group_sum(
+        actual,
+        actual_counts,
+        values,
+        labels,
+        None,
+        is_datetimelike=False,
+        _group_boundaries=boundaries,
+        _group_boundaries_are_trusted=True,
+    )
+
+    tm.assert_numpy_array_equal(actual, expected)
+    tm.assert_numpy_array_equal(actual_counts, expected_counts)

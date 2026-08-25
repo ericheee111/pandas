@@ -4,6 +4,14 @@ import numpy as np
 
 from pandas._typing import npt
 
+def group_nth_zero_mask(
+    labels: npt.NDArray[np.intp],
+    ngroups: int,
+    valid: npt.NDArray[np.bool_] | None = ...,
+) -> npt.NDArray[np.bool_]: ...
+def string_array_to_bool(
+    arr: npt.NDArray[np.object_], na_value: object
+) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8] | None]: ...
 def group_median_float64(
     out: np.ndarray,  # ndarray[float64_t, ndim=2]
     counts: npt.NDArray[np.int64],
@@ -69,6 +77,8 @@ def group_sum(
     is_datetimelike: bool = ...,
     initial: object = ...,
     skipna: bool = ...,
+    _group_boundaries: np.ndarray | None = ...,
+    _group_boundaries_are_trusted: bool = ...,
 ) -> None: ...
 def group_prod(
     out: np.ndarray,  # int64float_t[:, ::1]
@@ -178,6 +188,14 @@ def group_rank(
     na_option: Literal["keep", "top", "bottom"] = ...,
     mask: npt.NDArray[np.bool_] | None = ...,
 ) -> None: ...
+def group_min_max_string(
+    values: npt.NDArray[np.object_],
+    labels: npt.NDArray[np.intp],
+    ngroups: int,
+    min_count: int = ...,
+    compute_max: bool = ...,
+    skipna: bool = ...,
+) -> npt.NDArray[np.object_]: ...
 def group_max(
     out: np.ndarray,  # groupby_t[:, ::1]
     counts: np.ndarray,  # int64_t[::1]

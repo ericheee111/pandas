@@ -13,10 +13,13 @@ from pandas.api.indexers import (
     BaseIndexer,
     FixedForwardWindowIndexer,
 )
+import pandas.core.indexers.objects as indexers
 from pandas.core.indexers.objects import (
     ExpandingIndexer,
     FixedWindowIndexer,
+    GroupbyIndexer,
     VariableOffsetWindowIndexer,
+    VariableWindowIndexer,
 )
 
 from pandas.tseries.offsets import BusinessDay
@@ -38,6 +41,191 @@ def test_expanding_indexer():
     result = s.rolling(indexer).mean()
     expected = s.expanding().mean()
     tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "window_indexer,window_size",
+    [
+        (ExpandingIndexer, 0),
+        (FixedWindowIndexer, 3),
+        (VariableWindowIndexer, 3),
+    ],
+)
+@pytest.mark.parametrize("center", [False, True])
+@pytest.mark.parametrize("closed", [None, "right", "left", "both", "neither"])
+@pytest.mark.parametrize("step", [None, 2])
+@pytest.mark.parametrize("is_arm", [False, True])
+@pytest.mark.parametrize("index_growth_sign", [1, -1])
+def test_groupby_indexer_matches_individual_groups(
+    window_indexer,
+    window_size,
+    center,
+    closed,
+    step,
+    is_arm,
+    index_growth_sign,
+    monkeypatch,
+):
+    monkeypatch.setattr(indexers, "IS_ARM", is_arm)
+    # Adjacent groups are closer than window_size to verify that bounds never
+    # cross groups; group sizes also cover empty, unequal, and singleton groups.
+    index_array = index_growth_sign * np.array(
+        [0, 5, 2, 7, 4, 9, 11, 12], dtype=np.int64
+    )
+    groupby_indices = {
+        "empty": np.array([], dtype=np.intp),
+        "a": np.array([0, 2, 4], dtype=np.intp),
+        "b": np.array([1, 3, 5, 6], dtype=np.intp),
+        "single": np.array([7], dtype=np.intp),
+    }
+    indexer = GroupbyIndexer(
+        index_array=index_array,
+        window_size=window_size,
+        groupby_indices=groupby_indices,
+        window_indexer=window_indexer,
+    )
+
+    result_start, result_end = indexer.get_window_bounds(
+        num_values=len(index_array),
+        min_periods=1,
+        center=center,
+        closed=closed,
+        step=step,
+    )
+
+    expected_start = []
+    expected_end = []
+    offset = 0
+    for indices in groupby_indices.values():
+        group_indexer = window_indexer(
+            index_array=index_array.take(indices),
+            window_size=window_size,
+        )
+        start, end = group_indexer.get_window_bounds(
+            num_values=len(indices),
+            min_periods=1,
+            center=center,
+            closed=closed,
+            step=step,
+        )
+        expected_start.append(start + offset)
+        expected_end.append(end + offset)
+        offset += len(indices)
+
+    tm.assert_numpy_array_equal(result_start, np.concatenate(expected_start))
+    tm.assert_numpy_array_equal(result_end, np.concatenate(expected_end))
+
+
+def test_groupby_variable_indexer_mismatched_index_length(monkeypatch):
+    monkeypatch.setattr(indexers, "IS_ARM", True)
+    indexer = GroupbyIndexer(
+        index_array=np.array([0], dtype=np.int64),
+        window_size=1,
+        groupby_indices={"a": np.array([0], dtype=np.intp)},
+        window_indexer=VariableWindowIndexer,
+    )
+
+    msg = "Variable rolling window requires .* Got 1 < 2"
+    with pytest.raises(ValueError, match=msg):
+        indexer.get_window_bounds(num_values=2, min_periods=1)
+
+
+@pytest.mark.parametrize(
+    "is_arm,window_indexer,step,uses_legacy",
+    [
+        (False, ExpandingIndexer, None, True),
+        (False, FixedWindowIndexer, None, True),
+        (False, VariableWindowIndexer, None, True),
+        (True, ExpandingIndexer, None, False),
+        (True, FixedWindowIndexer, None, False),
+        (True, VariableWindowIndexer, None, False),
+        (True, FixedWindowIndexer, 1, True),
+        (True, FixedForwardWindowIndexer, None, True),
+    ],
+)
+def test_groupby_indexer_legacy_routing(
+    is_arm, window_indexer, step, uses_legacy, monkeypatch
+):
+    called = False
+
+    def legacy(self, *args, **kwargs):
+        nonlocal called
+        called = True
+        return np.array([0], dtype=np.int64), np.array([1], dtype=np.int64)
+
+    monkeypatch.setattr(indexers, "IS_ARM", is_arm)
+    monkeypatch.setattr(GroupbyIndexer, "_get_window_bounds_legacy", legacy)
+    indexer = GroupbyIndexer(
+        index_array=np.array([0], dtype=np.int64),
+        window_size=1,
+        groupby_indices={"a": np.array([0], dtype=np.intp)},
+        window_indexer=window_indexer,
+    )
+
+    indexer.get_window_bounds(num_values=1, min_periods=1, step=step)
+
+    assert called is uses_legacy
+
+
+@pytest.mark.parametrize(
+    "window,kwargs",
+    [
+        ("expanding", {}),
+        ("rolling", {"window": 2}),
+        ("rolling", {"window": "30s"}),
+    ],
+)
+def test_groupby_window_arch_paths_match(window, kwargs, monkeypatch):
+    df = DataFrame(
+        {"group": ["a", "b", "a", "b"], "value": [1.0, 2.0, 3.0, 4.0]},
+        index=date_range("2020", periods=4, freq="min"),
+    )
+
+    monkeypatch.setattr(indexers, "IS_ARM", False)
+    expected = getattr(df.groupby("group"), window)(**kwargs).sum()
+    monkeypatch.setattr(indexers, "IS_ARM", True)
+    result = getattr(df.groupby("group"), window)(**kwargs).sum()
+
+    tm.assert_frame_equal(result, expected)
+    tm.assert_index_equal(result.index, expected.index)
+
+
+@pytest.mark.parametrize(
+    "window_indexer,window_size,expected_start",
+    [
+        (ExpandingIndexer, 0, [0, 0, 0, 0, 4, 4, 4, 4]),
+        (FixedWindowIndexer, 2, [0, 0, 1, 2, 4, 4, 5, 6]),
+        (VariableWindowIndexer, 3, [0, 0, 1, 3, 4, 4, 5, 7]),
+    ],
+)
+def test_groupby_indexer_non_arm_fallback(
+    window_indexer, window_size, expected_start, monkeypatch
+):
+    def fail(*args, **kwargs):
+        pytest.fail("used the ARM groupby bounds path")
+
+    monkeypatch.setattr(indexers, "IS_ARM", False)
+    if window_indexer is VariableWindowIndexer:
+        monkeypatch.setattr(
+            indexers, "calculate_variable_window_bounds_grouped", fail
+        )
+    else:
+        monkeypatch.setattr(indexers.np, "repeat", fail)
+
+    indexer = GroupbyIndexer(
+        index_array=np.array([0, 0, 1, 1, 3, 3, 6, 6], dtype=np.int64),
+        window_size=window_size,
+        groupby_indices={
+            "a": np.array([0, 2, 4, 6], dtype=np.intp),
+            "b": np.array([1, 3, 5, 7], dtype=np.intp),
+        },
+        window_indexer=window_indexer,
+    )
+
+    start, end = indexer.get_window_bounds(num_values=8, min_periods=1)
+
+    assert start.tolist() == expected_start
+    assert end.tolist() == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_indexer_constructor_arg():

@@ -1082,7 +1082,6 @@ def crosstab(
     rownames = _get_names(index, rownames, prefix="row")
     colnames = _get_names(columns, colnames, prefix="col")
 
-    # duplicate names mapped to unique names for pivot op
     (
         rownames_mapper,
         unique_rownames,
@@ -1100,13 +1099,9 @@ def crosstab(
 
     if values is None:
         df["__dummy__"] = 0
-        kwargs = {"aggfunc": len, "fill_value": 0}
     else:
         df["__dummy__"] = values
-        kwargs = {"aggfunc": aggfunc}
 
-    # error: Argument 7 to "pivot_table" of "DataFrame" has incompatible type
-    # "**Dict[str, object]"; expected "Union[...]"
     table = df.pivot_table(
         "__dummy__",
         index=unique_rownames,
@@ -1115,7 +1110,8 @@ def crosstab(
         margins_name=margins_name,
         dropna=dropna,
         observed=dropna,
-        **kwargs,  # type: ignore[arg-type]
+        aggfunc=len if values is None else aggfunc,
+        fill_value=0 if values is None else None,
     )
 
     # Post-process

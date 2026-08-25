@@ -409,6 +409,26 @@ def test_len_mixed():
     tm.assert_series_equal(result, expected)
 
 
+def test_str_len_no_missing_string_python():
+    # GH: ARM fast path for string[python] must return Int64 (nullable)
+    # when there are no missing values, matching x86 behavior.
+    ser = Series(["foo", "bar", "baz"], dtype="string[python]")
+    result = ser.str.len()
+    assert result.dtype == "Int64"
+    expected = Series([3, 3, 3], dtype="Int64")
+    tm.assert_series_equal(result, expected)
+
+
+def test_str_upper_no_missing_string_python():
+    # GH: ARM fast path for string[python] must return string dtype
+    # when there are no missing values, matching x86 behavior.
+    ser = Series(["foo", "bar", "baz"], dtype="string[python]")
+    result = ser.str.upper()
+    assert result.dtype == "string"
+    expected = Series(["FOO", "BAR", "BAZ"], dtype="string[python]")
+    tm.assert_series_equal(result, expected)
+
+
 @pytest.mark.parametrize(
     "method,sub,start,end,expected",
     [

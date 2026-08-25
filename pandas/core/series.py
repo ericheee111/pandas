@@ -35,6 +35,7 @@ from pandas._libs import (
 )
 from pandas._libs.lib import is_range_indexer
 from pandas.compat import CHAINED_WARNING_DISABLED
+from pandas.compat._arch import IS_ARM
 from pandas.compat._constants import (
     REF_COUNT,
     REF_COUNT_METHOD,
@@ -350,6 +351,10 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
     _hidden_attrs = (
         base.IndexOpsMixin._hidden_attrs | NDFrame._hidden_attrs | frozenset([])
     )
+    _row_apply_label_to_pos: dict[Hashable, int] | None = None
+    _row_apply_label_to_pos_index: Index | None = None
+    _row_apply_values: ArrayLike | None = None
+    _row_apply_needs_ref_reset = False
 
     # similar to __array_priority__, positions Series after DataFrame
     #  but before Index and ExtensionArray.  Should NOT be overridden by subclasses.
@@ -934,6 +939,25 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
         """
         return self._values[i]
 
+    def _get_row_apply_cached_value(self, key):
+        positions = self._row_apply_label_to_pos
+        if positions is None or self._row_apply_label_to_pos_index is not self.index:
+            return lib.no_default
+
+        try:
+            loc = positions[key]
+        except (KeyError, TypeError):
+            return lib.no_default
+
+        values = self._row_apply_values
+        if values is None:
+            values = self._values
+        return values[loc]
+
+    def _invalidate_row_apply_cache(self) -> None:
+        if self._row_apply_values is not None:
+            object.__setattr__(self, "_row_apply_values", None)
+
     def _slice(self, slobj: slice, axis: AxisInt = 0) -> Series:
         # axis kwarg is retained for compat with NDFrame method
         #  _slice is *always* positional
@@ -944,6 +968,11 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
 
     def __getitem__(self, key):
         check_dict_or_set_indexers(key)
+        if IS_ARM and not callable(key):
+            result = self._get_row_apply_cached_value(key)
+            if result is not lib.no_default:
+                return result
+
         key = com.apply_if_callable(key, self)
 
         if key is Ellipsis:
@@ -1076,6 +1105,8 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
                     _chained_assignment_msg, ChainedAssignmentError, stacklevel=2
                 )
 
+        if IS_ARM:
+            self._invalidate_row_apply_cache()
         check_dict_or_set_indexers(key)
         key = com.apply_if_callable(key, self)
 
@@ -6843,8 +6874,12 @@ class Series(base.IndexOpsMixin, NDFrame):  # type: ignore[misc]
 
         # TODO: result should always be ArrayLike, but this fails for some
         #  JSONArray tests
-        dtype = getattr(result, "dtype", None)
-        out = self._constructor(result, index=self.index, dtype=dtype, copy=False)
+        if IS_ARM and isinstance(result, (np.ndarray, ExtensionArray)):
+            mgr = SingleBlockManager.from_array(result, self.index)
+            out = self._constructor_from_mgr(mgr, axes=mgr.axes)
+        else:
+            dtype = getattr(result, "dtype", None)
+            out = self._constructor(result, index=self.index, dtype=dtype, copy=False)
         out = out.__finalize__(self)
         out = out.__finalize__(other)
 

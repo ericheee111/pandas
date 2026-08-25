@@ -418,3 +418,13 @@ def test_value_counts_object_inference_deprecated():
 def test_value_counts_index_datetimelike(index, expected_index):
     vc = index.value_counts(sort=False, dropna=False)
     tm.assert_index_equal(vc.index, expected_index)
+
+
+def test_value_counts_sort_false_first_appearance_order():
+    # GH: value_counts(sort=False) must return values in first-appearance
+    # order, not ascending, as required by the stable sort contract.
+    s = Series([3, 1, 2, 1, 3])
+    result = s.value_counts(sort=False)
+    # First-appearance: 3 (pos 0), 1 (pos 1), 2 (pos 2)
+    expected_index = Index([3, 1, 2])
+    tm.assert_index_equal(result.index, expected_index)

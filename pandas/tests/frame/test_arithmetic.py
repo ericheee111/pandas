@@ -21,6 +21,7 @@ from pandas import (
     Series,
 )
 import pandas._testing as tm
+from pandas.core import frame as frame_module
 from pandas.core.computation import expressions as expr
 from pandas.tests.frame.common import (
     _check_mixed_float,
@@ -722,6 +723,123 @@ class TestFrameFlexArithmetic:
         expected.columns = expected.columns.set_names(["L1", "L2"])
 
         tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "op",
+        [
+            "add",
+            "sub",
+            "mul",
+            "div",
+            "floordiv",
+            "mod",
+            "pow",
+            "radd",
+            "rsub",
+            "rmul",
+            "rdiv",
+            "rfloordiv",
+            "rmod",
+            "rpow",
+        ],
+    )
+    def test_arith_frame_multiindex_level_broadcast(self, op):
+        labels = ["0", "1", "2", "10"]
+        index = MultiIndex.from_product(
+            [labels, [0, 1]], names=["key", "num"]
+        )
+        df = DataFrame(
+            np.arange(1, 17, dtype="float64").reshape(8, 2),
+            index=index,
+            columns=["x", "y"],
+        )
+        other = DataFrame(
+            {"x": [1.0, 2.0, 3.0, 4.0], "y": [5.0, 6.0, 7.0, 8.0]},
+            index=Index(labels, name="key"),
+        )
+
+        result = getattr(df, op)(other, level="key")
+        right = other.reindex(index.get_level_values("key"))
+        right.index = index
+        expected = getattr(df, op)(right)
+
+        tm.assert_frame_equal(result, expected)
+
+    def test_arith_frame_multiindex_level_non_arm_uses_portable_path(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(frame_module, "IS_ARM", False)
+
+        def fail_if_called(*args, **kwargs):
+            pytest.fail("non-ARM arithmetic used the MultiIndex fast path")
+
+        monkeypatch.setattr(
+            DataFrame, "_arith_method_with_multiindex_level", fail_if_called
+        )
+        index = MultiIndex.from_product(
+            [["a", "b"], [0, 1]], names=["group", "position"]
+        )
+        left = DataFrame({"value": [1.0, 2.0, 3.0, 4.0]}, index=index)
+        right = DataFrame({"value": [10.0, 20.0]}, index=Index(["a", "b"]))
+
+        result = left.add(right, level="group")
+
+        expected = DataFrame({"value": [11.0, 12.0, 23.0, 24.0]}, index=index)
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("op", ["add", "sub", "mul", "div"])
+    def test_arith_frame_multiindex_level_arm_matches_portable(
+        self, monkeypatch, op
+    ):
+        index = MultiIndex.from_product(
+            [["a", "b"], [0, 1]], names=["group", "position"]
+        )
+        left = DataFrame({"value": [1.0, 2.0, 3.0, 4.0]}, index=index)
+        right = DataFrame({"value": [10.0, 20.0]}, index=Index(["a", "b"]))
+
+        monkeypatch.setattr(frame_module, "IS_ARM", False)
+        expected = getattr(left, op)(right, level="group")
+        calls = 0
+        original = DataFrame._arith_method_with_multiindex_level
+
+        def tracked(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            DataFrame, "_arith_method_with_multiindex_level", tracked
+        )
+        monkeypatch.setattr(frame_module, "IS_ARM", True)
+        result = getattr(left, op)(right, level="group")
+
+        assert calls == 1
+        tm.assert_frame_equal(result, expected)
+
+    def test_arith_frame_multiindex_level_broadcast_unused_level(self):
+        index = MultiIndex(
+            levels=[["a", "b", "c"], [0, 1]],
+            codes=[[0, 0, 1, 1], [0, 1, 0, 1]],
+            names=["key", "num"],
+        )
+        df = DataFrame(np.arange(8).reshape(4, 2), index=index, columns=["x", "y"])
+        other = DataFrame(
+            {"x": [1, 2, 3], "y": [4, 5, 6]}, index=Index(["a", "b", "c"])
+        )
+
+        result = df.add(other, level="key")
+        left, right = df.align(other, join="outer", level="key")
+        expected = left + right
+
+        tm.assert_frame_equal(result, expected)
+
+    def test_arith_frame_multiindex_level_broadcast_invalid_level(self):
+        index = MultiIndex.from_product([["a", "b"], [0, 1]], names=["key", "num"])
+        df = DataFrame(np.arange(8).reshape(4, 2), index=index, columns=["x", "y"])
+        other = DataFrame({"x": [1, 2], "y": [3, 4]}, index=Index(["a", "b"]))
+
+        with pytest.raises(KeyError, match="Level \\['key'\\] not found"):
+            df.add(other, level=["key"])
 
     def test_frame_multiindex_operations(self):
         # GH 43321
