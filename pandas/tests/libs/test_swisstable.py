@@ -1012,3 +1012,216 @@ class TestDuplicated:
         values = np.array([1, 2, 3], dtype=np.int64)
         with pytest.raises(ValueError, match="keep must be either"):
             swisstable.duplicated_int64(values, keep="invalid")
+
+
+@pytest.fixture(params=[(np.complex64, "complex64"), (np.complex128, "complex128")])
+def complex_swiss(request):
+    dtype, suffix = request.param
+    return (
+        dtype,
+        getattr(swisstable, f"Swiss{suffix.title()}Map"),
+        getattr(swisstable, f"ismember_{suffix}"),
+        getattr(swisstable, f"value_count_{suffix}"),
+        getattr(swisstable, f"duplicated_{suffix}"),
+    )
+
+
+class TestSwissComplexMap:
+    def test_scalar_mapping_interface(self, complex_swiss):
+        dtype, map_type, _, _, _ = complex_swiss
+        table = map_type(size_hint=8)
+        first = dtype(1 + 2j)
+        second = dtype(3 + 4j)
+        missing = dtype(9 + 9j)
+
+        assert table.capacity >= 8
+        assert table.insert(first, 10)
+        assert not table.insert(first, 11)
+        assert table.get(first) == 11
+        assert table.get(missing) is None
+        assert table.get(missing, -1) == -1
+        assert table[first] == 11
+        with pytest.raises(KeyError):
+            table[missing]
+
+        table[second] = 20
+        table.set_item(first, 12)
+        assert table.get_item(first) == 12
+        with pytest.raises(KeyError):
+            table.get_item(missing)
+        assert first in table
+        assert missing not in table
+        assert len(table) == table.size == 2
+        assert set(table) == {first, second}
+        assert dict(table.items()) == {first: 12, second: 20}
+        assert map_type.__name__ in repr(table)
+
+        with pytest.raises(NotImplementedError):
+            table.get_na()
+        with pytest.raises(NotImplementedError):
+            table.set_na(1)
+
+    def test_array_mapping_contiguous_and_strided(self, complex_swiss):
+        dtype, map_type, _, _, _ = complex_swiss
+        values = np.array([1 + 1j, 2 + 2j, 1 + 1j], dtype=dtype)
+        table = map_type()
+
+        table.map_locations(values)
+        assert len(table) == 2
+        assert table[dtype(1 + 1j)] == 2
+        tm.assert_numpy_array_equal(
+            table.lookup(np.array([2 + 2j, 9 + 9j], dtype=dtype)),
+            np.array([1, -1], dtype=np.intp),
+        )
+
+        storage = np.array(
+            [1 + 1j, 0, 2 + 2j, 0, 3 + 3j, 0], dtype=dtype
+        )
+        strided = storage[::2]
+        assert not strided.flags.c_contiguous
+        table = map_type()
+        table.map_locations(strided)
+        tm.assert_numpy_array_equal(
+            table.lookup(storage[2::2]), np.array([1, 2], dtype=np.intp)
+        )
+
+    def test_unique_fast_and_masked_paths(self, complex_swiss):
+        dtype, map_type, _, _, _ = complex_swiss
+        values = np.array([1 + 1j, 2 + 2j, 1 + 1j], dtype=dtype)
+
+        result = map_type().unique(values)
+        tm.assert_numpy_array_equal(
+            result, np.array([1 + 1j, 2 + 2j], dtype=dtype)
+        )
+
+        result, labels = map_type().unique(values, return_inverse=True)
+        tm.assert_numpy_array_equal(
+            result, np.array([1 + 1j, 2 + 2j], dtype=dtype)
+        )
+        tm.assert_numpy_array_equal(labels, np.array([0, 1, 0], dtype=np.intp))
+
+        masked_values = np.array([1 + 1j, 9 + 9j, 1 + 1j, 8 + 8j], dtype=dtype)
+        mask = np.array([False, True, False, True])
+        result, result_mask = map_type().unique(masked_values, mask=mask)
+        tm.assert_numpy_array_equal(
+            result, np.array([1 + 1j, 9 + 9j], dtype=dtype)
+        )
+        tm.assert_numpy_array_equal(result_mask, np.array([0, 1], dtype=np.uint8))
+
+        result, labels, result_mask = map_type().unique(
+            masked_values, return_inverse=True, mask=mask
+        )
+        tm.assert_numpy_array_equal(
+            result, np.array([1 + 1j, 9 + 9j], dtype=dtype)
+        )
+        tm.assert_numpy_array_equal(labels, np.array([0, 1, 0, 1], dtype=np.intp))
+        tm.assert_numpy_array_equal(result_mask, np.array([0, 1], dtype=np.uint8))
+
+    def test_factorize_fast_strided_and_masked_paths(self, complex_swiss):
+        dtype, map_type, _, _, _ = complex_swiss
+        values = np.array([1 + 1j, 2 + 2j, 1 + 1j], dtype=dtype)
+
+        result, labels = map_type().factorize(values)
+        tm.assert_numpy_array_equal(
+            result, np.array([1 + 1j, 2 + 2j], dtype=dtype)
+        )
+        tm.assert_numpy_array_equal(labels, np.array([0, 1, 0], dtype=np.intp))
+
+        result, labels = map_type().factorize(values, ignore_na=False)
+        tm.assert_numpy_array_equal(
+            result, np.array([1 + 1j, 2 + 2j], dtype=dtype)
+        )
+        tm.assert_numpy_array_equal(labels, np.array([0, 1, 0], dtype=np.intp))
+
+        storage = np.array([1 + 1j, 0, 2 + 2j, 0, 1 + 1j, 0], dtype=dtype)
+        result, labels = map_type().factorize(storage[::2])
+        tm.assert_numpy_array_equal(
+            result, np.array([1 + 1j, 2 + 2j], dtype=dtype)
+        )
+        tm.assert_numpy_array_equal(labels, np.array([0, 1, 0], dtype=np.intp))
+
+        masked_values = np.array([1 + 1j, 9 + 9j, 1 + 1j, 8 + 8j], dtype=dtype)
+        mask = np.array([0, 1, 0, 1], dtype=np.uint8)
+        result, labels = map_type().factorize(masked_values, mask=mask)
+        tm.assert_numpy_array_equal(result, np.array([1 + 1j], dtype=dtype))
+        tm.assert_numpy_array_equal(labels, np.array([0, -1, 0, -1], dtype=np.intp))
+
+        result, labels = map_type().factorize(
+            masked_values, mask=mask, ignore_na=False
+        )
+        tm.assert_numpy_array_equal(
+            result, np.array([1 + 1j, 9 + 9j], dtype=dtype)
+        )
+        tm.assert_numpy_array_equal(labels, np.array([0, 1, 0, 1], dtype=np.intp))
+
+
+class TestSwissComplexAlgorithms:
+    def test_ismember(self, complex_swiss):
+        dtype, _, ismember, _, _ = complex_swiss
+        values = np.array([1 + 1j, 2 + 2j], dtype=dtype)
+        arr = np.array([2 + 2j, 3 + 3j, 1 + 1j], dtype=dtype)
+
+        result = ismember(arr, values)
+        tm.assert_numpy_array_equal(result, np.array([True, False, True]))
+
+    def test_value_count_fast_and_masked_paths(self, complex_swiss):
+        dtype, _, _, value_count, _ = complex_swiss
+        values = np.array([1 + 1j, 2 + 2j, 1 + 1j], dtype=dtype)
+
+        keys, counts, _ = value_count(values)
+        tm.assert_numpy_array_equal(
+            keys, np.array([1 + 1j, 2 + 2j], dtype=dtype)
+        )
+        tm.assert_numpy_array_equal(counts, np.array([2, 1], dtype=np.int64))
+
+        masked_values = np.array([1 + 1j, 9 + 9j, 1 + 1j, 8 + 8j], dtype=dtype)
+        mask = np.array([0, 1, 0, 1], dtype=np.uint8)
+        keys, counts, na_count = value_count(masked_values, mask=mask)
+        tm.assert_numpy_array_equal(keys, np.array([1 + 1j], dtype=dtype))
+        tm.assert_numpy_array_equal(counts, np.array([2], dtype=np.int64))
+        assert na_count == 0
+
+        keys, counts, na_count = value_count(
+            masked_values, dropna=False, mask=mask
+        )
+        assert keys[0] == dtype(1 + 1j)
+        tm.assert_numpy_array_equal(counts, np.array([2, 2], dtype=np.int64))
+        assert na_count == 2
+
+    @pytest.mark.parametrize(
+        "keep,expected",
+        [
+            ("first", [False, False, True, False, True]),
+            ("last", [True, True, False, False, False]),
+            (False, [True, True, True, False, True]),
+        ],
+    )
+    def test_duplicated_fast_paths(self, complex_swiss, keep, expected):
+        dtype, _, _, _, duplicated = complex_swiss
+        values = np.array([1 + 1j, 2 + 2j, 1 + 1j, 3 + 3j, 2 + 2j], dtype=dtype)
+
+        result = duplicated(values, keep=keep)
+        tm.assert_numpy_array_equal(result, np.array(expected))
+
+    @pytest.mark.parametrize(
+        "keep,expected",
+        [
+            ("first", [False, False, True, True, False]),
+            ("last", [True, True, False, False, False]),
+            (False, [True, True, True, True, False]),
+        ],
+    )
+    def test_duplicated_masked_paths(self, complex_swiss, keep, expected):
+        dtype, _, _, _, duplicated = complex_swiss
+        values = np.array([1 + 1j, 9 + 9j, 1 + 1j, 8 + 8j, 2 + 2j], dtype=dtype)
+        mask = np.array([0, 1, 0, 1, 0], dtype=np.uint8)
+
+        result = duplicated(values, keep=keep, mask=mask)
+        tm.assert_numpy_array_equal(result, np.array(expected))
+
+    def test_duplicated_invalid_keep(self, complex_swiss):
+        dtype, _, _, _, duplicated = complex_swiss
+        values = np.array([1 + 1j], dtype=dtype)
+
+        with pytest.raises(ValueError, match="keep must be either"):
+            duplicated(values, keep="invalid")
