@@ -1071,6 +1071,7 @@ def group_sum(
                                             break
                                     if not use_lanes:
                                         break
+
                             if use_lanes:
                                 # Keep explicit specializations so the hot loop
                                 # remains C-only for each float dtype.

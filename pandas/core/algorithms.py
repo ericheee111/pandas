@@ -496,6 +496,7 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
     original = values
     use_swiss = get_use_swisstable() and len(values) <= 1_000_000
     hashtable, values = _get_hashtable_algo(values, use_swisstable=use_swiss)
+    using_swisstable = use_swiss and hashtable in _swisstables.values()
 
     table = hashtable(len(values))
     if mask is None:
@@ -504,7 +505,7 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
         return uniques
 
     else:
-        if use_swiss:
+        if using_swisstable:
             mask_uint8 = mask.view(np.uint8)
             uniques, result_mask = table.unique(values, mask=mask_uint8)
         else:
@@ -726,9 +727,10 @@ def factorize_array(
 
     use_swiss = get_use_swisstable() and mask is None
     hash_klass, values = _get_hashtable_algo(values, use_swisstable=use_swiss)
+    using_swisstable = use_swiss and hash_klass in _swisstables.values()
 
     table = hash_klass(size_hint or len(values))
-    if use_swiss:
+    if using_swisstable:
         mask_uint8 = mask.view(np.uint8) if mask is not None else None
         uniques, codes = table.factorize(
             values,
