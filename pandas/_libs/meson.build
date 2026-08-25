@@ -88,7 +88,11 @@ libs_sources = {
     },
     'arrays': {'sources': ['arrays.pyx']},
     'groupby': {
-        'sources': ['groupby.pyx', 'src/groupby.c', 'src/groupby_neon.c'],
+        'sources': ['groupby.pyx', 'src/groupby.c'],
+        'deps': [m_dep],
+    },
+    'groupby_neon': {
+        'sources': ['groupby_neon.pyx', 'src/groupby_neon.c'],
         'deps': [m_dep],
     },
     'hashing': {'sources': ['hashing.pyx']},
@@ -226,6 +230,7 @@ sources_to_install = [
     'arrays.pyi',
     'byteswap.pyi',
     'groupby.pyi',
+    'groupby_neon.pyi',
     'hashing.pyi',
     'hashtable.pyi',
     'index.pyi',

@@ -40,25 +40,6 @@ cdef extern from "pandas/portable.h":
     bint pandas_is_aarch64() noexcept nogil
 
 
-cdef extern from "pandas/groupby_neon.h":
-    void pandas_group_prod_float64_neon(
-        float64_t*, const float64_t*, const intp_t*, int64_t*,
-        Py_ssize_t, Py_ssize_t,
-    ) noexcept nogil
-    void pandas_group_prod_float32_neon(
-        float32_t*, const float32_t*, const intp_t*, int64_t*,
-        Py_ssize_t, Py_ssize_t,
-    ) noexcept nogil
-    void pandas_group_prod_float64_neon_colmajor(
-        float64_t*, const float64_t*, const intp_t*, int64_t*,
-        Py_ssize_t, Py_ssize_t,
-    ) noexcept nogil
-    void pandas_group_prod_float32_neon_colmajor(
-        float32_t*, const float32_t*, const intp_t*, int64_t*,
-        Py_ssize_t, Py_ssize_t,
-    ) noexcept nogil
-
-
 cdef extern from "pandas/groupby.h":
     void pandas_group_idx_float32(
         intp_t*, const float32_t*, const intp_t*, float32_t*, uint8_t*,
@@ -102,6 +83,72 @@ cdef enum InterpolationEnumType:
     INTERPOLATION_HIGHER,
     INTERPOLATION_NEAREST,
     INTERPOLATION_MIDPOINT
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def group_last(
+    numeric_object_t[:, ::1] out,
+    int64_t[::1] counts,
+    const numeric_object_t[:, :] values,
+    const intp_t[::1] labels,
+    const uint8_t[:, :] mask,
+    uint8_t[:, ::1] result_mask=None,
+    Py_ssize_t min_count=-1,
+    bint is_datetimelike=False,
+    bint skipna=True,
+) -> None:
+    """
+    Only aggregates on axis=0
+    """
+    cdef:
+        Py_ssize_t i, j, N, K, lab, ncounts = len(counts)
+        numeric_object_t val
+        numeric_object_t[:, ::1] resx
+        int64_t[:, ::1] nobs
+        bint uses_mask = mask is not None
+        bint isna_entry
+
+    if not len(values) == len(labels):
+        raise AssertionError("len(index) != len(labels)")
+
+    min_count = max(min_count, 1)
+
+    nobs = np.zeros((<object>out).shape, dtype=np.int64)
+    if numeric_object_t is object:
+        resx = np.empty((<object>out).shape, dtype=object)
+    else:
+        resx = np.empty_like(out)
+
+    N, K = (<object>values).shape
+
+    with nogil(numeric_object_t is not object):
+        for i in range(N):
+            lab = labels[i]
+            if lab < 0:
+                continue
+
+            counts[lab] += 1
+            for j in range(K):
+                val = values[i, j]
+
+                if skipna:
+                    if uses_mask:
+                        isna_entry = mask[i, j]
+                    else:
+                        isna_entry = _treat_as_na(val, is_datetimelike)
+                    if isna_entry:
+                        continue
+
+                nobs[lab, j] += 1
+                resx[lab, j] = val
+
+                if uses_mask and not skipna:
+                    result_mask[lab, j] = mask[i, j]
+
+    _check_below_mincount(
+        out, uses_mask, result_mask, ncounts, K, nobs, min_count, resx
+    )
 
 
 @cython.boundscheck(False)
@@ -1298,264 +1345,6 @@ def group_sum(
 
 @cython.wraparound(False)
 @cython.boundscheck(False)
-cdef bint _group_prod_float64_1d_min_count_le0(
-    float64_t[:, ::1] out,
-    int64_t[::1] counts,
-    const float64_t[:, :] values,
-    const intp_t[::1] labels,
-    uint8_t[:, ::1] result_mask,
-    Py_ssize_t ncounts,
-    Py_ssize_t min_count,
-):
-    """
-    AArch64 K==1 specialization for skipna ``prod`` on a single native float64
-    column without a mask when ``min_count <= 0``.
-
-    When ``min_count <= 0``, ``_check_below_mincount`` treats every group as
-    satisfying the threshold (``nobs >= min_count`` is trivially true since
-    nobs is non-negative), so the per-element nobs increment is dead work.
-    This helper uses a fully separate specialized loop that skips nobs entirely
-    (no ``need_nobs`` branch inside the N-row loop, unlike the rejected
-    group_prod experiment in f1f0b985df).  The accepted generic loop remains
-    unchanged.  NaN is skipped via ``val == val``; ``prodx`` is initialized to
-    the multiplicative identity.  Returns True if handled; the caller falls
-    back otherwise.  Eligibility uses only dtype, column count, mask/skipna/
-    min_count semantics, and contiguity -- never benchmark parameters.
-
-    Not ``noexcept``: the helper allocates ``prodx``/``nobs`` via ``np.ones``/
-    ``np.zeros`` (GIL-held, before the ``nogil`` loop), which can raise
-    ``MemoryError``.  With ``noexcept`` Cython 3 would swallow the exception
-    and return an indeterminate ``bint``, leaving the caller's
-    ``if helper(...): return`` guard unreliable.  Dropping ``noexcept`` lets
-    the exception propagate; the hot loop itself stays ``nogil`` and adds no
-    per-iteration check.
-    """
-    cdef:
-        Py_ssize_t i, N, K, lab
-        float64_t val
-        float64_t[:, ::1] prodx
-        int64_t[:, ::1] nobs
-
-    if not pandas_is_aarch64():
-        return False
-
-    N, K = (<object>values).shape
-    if K != 1:
-        return False
-
-    prodx = np.ones((<object>out).shape, dtype=np.float64)
-    # nobs stays zero-filled; min_count <= 0 means _check_below_mincount
-    # treats every group as satisfying the threshold, so nobs is never read
-    # for a gating decision.
-    nobs = np.zeros((<object>out).shape, dtype=np.int64)
-
-    with nogil:
-        for i in range(N):
-            lab = labels[i]
-            if lab < 0:
-                continue
-
-            counts[lab] += 1
-
-            val = values[i, 0]
-            if val == val:
-                # Non-NaN: accumulate into the running product.
-                prodx[lab, 0] *= val
-
-    _check_below_mincount(
-        out,
-        False,  # uses_mask
-        result_mask,
-        ncounts,
-        K,
-        nobs,
-        min_count,
-        prodx,
-    )
-    return True
-
-
-@cython.wraparound(False)
-@cython.boundscheck(False)
-cdef bint _group_prod_float32_1d_min_count_le0(
-    float32_t[:, ::1] out,
-    int64_t[::1] counts,
-    const float32_t[:, :] values,
-    const intp_t[::1] labels,
-    uint8_t[:, ::1] result_mask,
-    Py_ssize_t ncounts,
-    Py_ssize_t min_count,
-):
-    """float32 variant of ``_group_prod_float64_1d_min_count_le0``.
-
-    Not ``noexcept``: allocates ``prodx``/``nobs`` via ``np.ones``/``np.zeros``
-    which can raise ``MemoryError``; see the float64 variant for details.
-    """
-    cdef:
-        Py_ssize_t i, N, K, lab
-        float32_t val
-        float32_t[:, ::1] prodx
-        int64_t[:, ::1] nobs
-
-    if not pandas_is_aarch64():
-        return False
-
-    N, K = (<object>values).shape
-    if K != 1:
-        return False
-
-    prodx = np.ones((<object>out).shape, dtype=np.float32)
-    nobs = np.zeros((<object>out).shape, dtype=np.int64)
-
-    with nogil:
-        for i in range(N):
-            lab = labels[i]
-            if lab < 0:
-                continue
-
-            counts[lab] += 1
-
-            val = values[i, 0]
-            if val == val:
-                prodx[lab, 0] *= val
-
-    _check_below_mincount(
-        out,
-        False,  # uses_mask
-        result_mask,
-        ncounts,
-        K,
-        nobs,
-        min_count,
-        prodx,
-    )
-    return True
-
-
-@cython.wraparound(False)
-@cython.boundscheck(False)
-cdef bint _group_prod_float64_multicol_min_count_le0(
-    float64_t[:, ::1] out,
-    int64_t[::1] counts,
-    const float64_t[:, :] values,
-    const intp_t[::1] labels,
-):
-    """
-    Use two-lane AArch64 NEON for contiguous multi-column float64 products.
-
-    The vector lanes span columns, so each column retains its original row
-    order. NaN lanes are replaced by the multiplicative identity. ``nobs`` is
-    not maintained because it cannot affect ``min_count <= 0`` results.
-    """
-    cdef:
-        Py_ssize_t N, K
-        bint is_c_contiguous, is_f_contiguous
-
-    if not pandas_is_aarch64():
-        return False
-
-    N, K = (<object>values).shape
-    is_c_contiguous = (
-        values.strides[1] == sizeof(float64_t)
-        and values.strides[0] == K * sizeof(float64_t)
-    )
-    is_f_contiguous = (
-        values.strides[0] == sizeof(float64_t)
-        and values.strides[1] == N * sizeof(float64_t)
-    )
-    if (
-        K <= 1
-        or N == 0
-        or len(counts) == 0
-        or not (is_c_contiguous or is_f_contiguous)
-    ):
-        return False
-
-    out[:, :] = 1.0
-
-    with nogil:
-        if is_c_contiguous:
-            pandas_group_prod_float64_neon(
-                &out[0, 0],
-                &values[0, 0],
-                &labels[0],
-                &counts[0],
-                N,
-                K,
-            )
-        else:
-            pandas_group_prod_float64_neon_colmajor(
-                &out[0, 0],
-                &values[0, 0],
-                &labels[0],
-                &counts[0],
-                N,
-                K,
-            )
-
-    return True
-
-
-@cython.wraparound(False)
-@cython.boundscheck(False)
-cdef bint _group_prod_float32_multicol_min_count_le0(
-    float32_t[:, ::1] out,
-    int64_t[::1] counts,
-    const float32_t[:, :] values,
-    const intp_t[::1] labels,
-):
-    """Use four-lane AArch64 NEON for contiguous multi-column float32 prod."""
-    cdef:
-        Py_ssize_t N, K
-        bint is_c_contiguous, is_f_contiguous
-
-    if not pandas_is_aarch64():
-        return False
-
-    N, K = (<object>values).shape
-    is_c_contiguous = (
-        values.strides[1] == sizeof(float32_t)
-        and values.strides[0] == K * sizeof(float32_t)
-    )
-    is_f_contiguous = (
-        values.strides[0] == sizeof(float32_t)
-        and values.strides[1] == N * sizeof(float32_t)
-    )
-    if (
-        K <= 1
-        or N == 0
-        or len(counts) == 0
-        or not (is_c_contiguous or is_f_contiguous)
-    ):
-        return False
-
-    out[:, :] = 1.0
-
-    with nogil:
-        if is_c_contiguous:
-            pandas_group_prod_float32_neon(
-                &out[0, 0],
-                &values[0, 0],
-                &labels[0],
-                &counts[0],
-                N,
-                K,
-            )
-        else:
-            pandas_group_prod_float32_neon_colmajor(
-                &out[0, 0],
-                &values[0, 0],
-                &labels[0],
-                &counts[0],
-                N,
-                K,
-            )
-
-    return True
-
-
-@cython.wraparound(False)
-@cython.boundscheck(False)
 def group_prod(
     int64float_t[:, ::1] out,
     int64_t[::1] counts,
@@ -1579,33 +1368,6 @@ def group_prod(
 
     if len_values != len_labels:
         raise ValueError("len(index) != len(labels)")
-
-    if (
-        not uses_mask and skipna and min_count <= 0
-    ) and (int64float_t is float64_t or int64float_t is float32_t):
-        # AArch64 specializations for skipna prod on native float arrays
-        # without a mask when min_count <= 0. Multi-column C/F-contiguous
-        # inputs use NEON; single columns use a scalar branch-free loop.
-        # Dedicated helpers keep the generic loop's compiled layout unchanged.
-        # All unsupported cases fall through to the existing implementation.
-        if int64float_t is float64_t:
-            if _group_prod_float64_multicol_min_count_le0(
-                out, counts, values, labels
-            ):
-                return
-            if _group_prod_float64_1d_min_count_le0(
-                out, counts, values, labels, result_mask, ncounts, min_count
-            ):
-                return
-        elif int64float_t is float32_t:
-            if _group_prod_float32_multicol_min_count_le0(
-                out, counts, values, labels
-            ):
-                return
-            if _group_prod_float32_1d_min_count_le0(
-                out, counts, values, labels, result_mask, ncounts, min_count
-            ):
-                return
 
     nobs = np.zeros((<object>out).shape, dtype=np.int64)
     prodx = np.ones((<object>out).shape, dtype=(<object>out).base.dtype)
@@ -2514,140 +2276,6 @@ cdef inline void _check_below_mincount(
                     else:
                         # placeholder, see above
                         out[i, j] = 0
-
-
-@cython.wraparound(False)
-@cython.boundscheck(False)
-cdef bint _group_last_float_reverse_scan(
-    floating[:, ::1] out,
-    int64_t[::1] counts,
-    const floating[:, :] values,
-    const intp_t[::1] labels,
-    uint8_t[:, ::1] result_mask,
-    Py_ssize_t ncounts,
-    Py_ssize_t min_count,
-):
-    """Preserve the existing AArch64 K==1 float ``last`` specialization."""
-    cdef:
-        Py_ssize_t i, N, K, lab
-        floating val
-        uint8_t[::1] seen
-        floating[:, ::1] last_resx
-        int64_t[:, ::1] last_nobs
-
-    if not pandas_is_aarch64():
-        return False
-
-    N, K = (<object>values).shape
-    if K != 1:
-        return False
-
-    seen = np.zeros(ncounts, dtype=np.uint8)
-    last_resx = np.empty_like(out)
-    last_nobs = np.zeros((<object>out).shape, dtype=np.int64)
-
-    with nogil:
-        for i in range(N - 1, -1, -1):
-            lab = labels[i]
-            if lab < 0:
-                continue
-
-            counts[lab] += 1
-
-            if seen[lab]:
-                continue
-
-            val = values[i, 0]
-            if val == val:
-                last_resx[lab, 0] = val
-                last_nobs[lab, 0] = 1
-                seen[lab] = 1
-
-    _check_below_mincount(
-        out,
-        False,
-        result_mask,
-        ncounts,
-        K,
-        last_nobs,
-        min_count,
-        last_resx,
-    )
-    return True
-
-
-@cython.wraparound(False)
-@cython.boundscheck(False)
-def group_last(
-    numeric_object_t[:, ::1] out,
-    int64_t[::1] counts,
-    const numeric_object_t[:, :] values,
-    const intp_t[::1] labels,
-    const uint8_t[:, :] mask,
-    uint8_t[:, ::1] result_mask=None,
-    Py_ssize_t min_count=-1,
-    bint is_datetimelike=False,
-    bint skipna=True,
-) -> None:
-    """
-    Only aggregates on axis=0
-    """
-    cdef:
-        Py_ssize_t i, j, N, K, lab, ncounts = len(counts)
-        numeric_object_t val
-        numeric_object_t[:, ::1] resx
-        int64_t[:, ::1] nobs
-        bint uses_mask = mask is not None
-        bint isna_entry
-
-    if not len(values) == len(labels):
-        raise AssertionError("len(index) != len(labels)")
-
-    min_count = max(min_count, 1)
-
-    if (
-        numeric_object_t is float32_t or numeric_object_t is float64_t
-    ) and not uses_mask and skipna and not is_datetimelike and min_count <= 1:
-        if _group_last_float_reverse_scan(
-            out, counts, values, labels, result_mask, ncounts, min_count
-        ):
-            return
-
-    nobs = np.zeros((<object>out).shape, dtype=np.int64)
-    if numeric_object_t is object:
-        resx = np.empty((<object>out).shape, dtype=object)
-    else:
-        resx = np.empty_like(out)
-
-    N, K = (<object>values).shape
-
-    with nogil(numeric_object_t is not object):
-        for i in range(N):
-            lab = labels[i]
-            if lab < 0:
-                continue
-
-            counts[lab] += 1
-            for j in range(K):
-                val = values[i, j]
-
-                if skipna:
-                    if uses_mask:
-                        isna_entry = mask[i, j]
-                    else:
-                        isna_entry = _treat_as_na(val, is_datetimelike)
-                    if isna_entry:
-                        continue
-
-                nobs[lab, j] += 1
-                resx[lab, j] = val
-
-                if uses_mask and not skipna:
-                    result_mask[lab, j] = mask[i, j]
-
-    _check_below_mincount(
-        out, uses_mask, result_mask, ncounts, K, nobs, min_count, resx
-    )
 
 
 @cython.wraparound(False)

@@ -1,18 +1,19 @@
 """
 Direct libgroupby tests for ``group_prod``.
 
-These exercise the AArch64 native-float fastpaths (min_count <= 0) as well as
-the generic fallback path. On AArch64, contiguous native-float arrays with
-skipna and min_count <= 0 hit a scalar or multi-column NEON fastpath; masked,
-non-float, skipna=False, min_count>0 cases hit the fallback.  Every case is
-cross-checked against an independent NumPy reference and, where both paths are
-reachable, against the fallback path itself.
+Every case is cross-checked against an independent NumPy reference,
+covering skipna/keep-NaN variants, masked inputs, min_count semantics,
+negative labels and empty groups.
 """
 
 import numpy as np
 import pytest
 
+from pandas import DataFrame
+from pandas.compat import is_platform_arm
+
 from pandas._libs.groupby import group_prod
+from pandas._libs.groupby_neon import group_prod_native_float
 
 import pandas._testing as tm
 
@@ -47,7 +48,7 @@ def _reference_prod(values, labels, ngroups, skipna=True, min_count=0):
 
 
 def _run_group_prod(values, labels, ngroups, skipna=True, min_count=0, mask=None):
-    """Call libgroupby.group_prod with fresh output/counts buffers."""
+    """Call libgroupby group_prod with fresh output/counts buffers."""
     values = np.asarray(values)
     if values.ndim == 1:
         values = values[:, None]
@@ -71,8 +72,7 @@ def _run_group_prod(values, labels, ngroups, skipna=True, min_count=0, mask=None
 
 
 # ---------------------------------------------------------------------------
-# Basic correctness on the fastpath-eligible shape (1-D native float, skipna,
-# min_count <= 0)
+# Basic correctness (1-D native float, skipna, min_count <= 0)
 # ---------------------------------------------------------------------------
 
 
@@ -248,7 +248,7 @@ def test_prod_min_count_2_blocks_sparse_group():
 
 
 def test_prod_min_count_neg1_treated_as_le0():
-    # min_count=-1 should behave like min_count=0 for the fastpath (le0).
+    # min_count=-1 is treated like min_count=0.
     values = np.array([np.nan, np.nan, 2.0, 3.0], dtype=np.float64)
     labels = np.array([0, 0, 1, 1], dtype=np.intp)
     out, counts, _ = _run_group_prod(values, labels, 2, min_count=-1)
@@ -260,7 +260,7 @@ def test_prod_min_count_neg1_treated_as_le0():
 
 
 # ---------------------------------------------------------------------------
-# skipna=False forces fallback (fastpath requires skipna=True)
+# skipna=False propagates NaN
 # ---------------------------------------------------------------------------
 
 
@@ -276,7 +276,7 @@ def test_prod_skipna_false():
 
 
 # ---------------------------------------------------------------------------
-# Multi-column native floats use NEON on AArch64
+# Multi-column native floats
 # ---------------------------------------------------------------------------
 
 
@@ -305,7 +305,7 @@ def test_prod_multi_column_with_nan():
     tm.assert_numpy_array_equal(counts, expected_counts)
 
 
-def test_prod_multi_column_noncontiguous_fallback():
+def test_prod_multi_column_noncontiguous():
     rng = np.random.default_rng(15)
     base = (rng.standard_normal((40, 12)) + 2.0).astype(np.float64)
     values = base[:, ::2]
@@ -328,7 +328,7 @@ def test_prod_multi_column_signed_zero_and_infinity():
 
 
 # ---------------------------------------------------------------------------
-# Mask path forces fallback (fastpath requires not uses_mask)
+# Masked inputs
 # ---------------------------------------------------------------------------
 
 
@@ -364,11 +364,10 @@ def test_prod_with_mask_all_masked_group():
 
 
 # ---------------------------------------------------------------------------
-# int64 path forces fallback (fastpath requires float32/float64)
 # ---------------------------------------------------------------------------
 
 
-def test_prod_int64_fallback():
+def test_prod_int64():
     values = np.array([2, 3, 4, 5], dtype=np.int64).reshape(-1, 1)
     labels = np.array([0, 0, 1, 1], dtype=np.intp)
     out, counts, _ = _run_group_prod(values, labels, 2, min_count=0)
@@ -377,25 +376,66 @@ def test_prod_int64_fallback():
     assert counts.tolist() == [2, 2]
 
 
-# ---------------------------------------------------------------------------
-# Fastpath vs fallback public-result equality on ARM
-# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not is_platform_arm(), reason="NEON prod entry is AArch64-only")
+@pytest.mark.parametrize("ncols", [1, 2, 3, 8])
+def test_prod_native_entry_equals_fallback(ncols):
+    # native float arrays without a mask take the AArch64 NEON/scalar
+    # entry; min_count=1 forces the generic fused loop. Every group has
+    # well over one valid observation per column, so results match.
+    rng = np.random.default_rng(13)
+    n, ngroups = 500, 17
+    values = (rng.standard_normal((n, ncols)) + 2.0).astype(np.float64)
+    values[::7] = np.nan
+    df = DataFrame(values, columns=[f"c{i}" for i in range(ncols)])
+    df["key"] = rng.integers(0, ngroups, size=n)
+
+    result = df.groupby("key").prod()
+    expected = df.groupby("key").prod(min_count=1)
+
+    tm.assert_frame_equal(result, expected)
+
+
+def test_prod_native_entry_rejects_ineligible_calls():
+    # entry contract: skipna=False / min_count > 0 / masked input must
+    # return False (caller falls back to the fused group_prod) on every
+    # platform; a mask argument cannot be passed here (the entry takes
+    # none), so eligibility for masks is enforced by the caller.
+    rng = np.random.default_rng(13)
+    values = (rng.standard_normal((30, 2)) + 2.0).reshape(-1, 2)
+    values[::7] = np.nan
+    labels = rng.integers(0, 3, size=30).astype(np.intp)
+
+    out = np.zeros((3, 2), dtype=np.float64)
+    counts = np.zeros(3, dtype=np.int64)
+
+    assert not group_prod_native_float(
+        out, counts, values, labels, 0, False
+    )  # skipna=False
+    assert not group_prod_native_float(
+        out, counts, values, labels, 1, True
+    )  # min_count > 0
 
 
 @pytest.mark.parametrize("ncols", [1, 2, 3, 8])
-def test_prod_fastpath_equals_fallback(ncols):
-    """Compare eligible native-float fastpaths with min_count fallback."""
-    rng = np.random.default_rng(13)
+def test_prod_native_entry_direct(ncols):
+    # direct call: on AArch64 the entry handles eligible calls and must
+    # match the NumPy reference; elsewhere it returns False and the
+    # buffers stay untouched (fallback responsibility).
+    rng = np.random.default_rng(29)
     n, ngroups = 500, 17
     values = (rng.standard_normal((n, ncols)) + 2.0).astype(np.float64)
     values[::7] = np.nan
     labels = rng.integers(0, ngroups, size=n).astype(np.intp)
 
-    fast, fast_counts, _ = _run_group_prod(values, labels, ngroups, min_count=0)
+    out = np.zeros((ngroups, ncols), dtype=np.float64)
+    counts = np.zeros(ngroups, dtype=np.int64)
 
-    # Positive min_count forces the generic loop while preserving results:
-    # every group/column has substantially more than one valid observation.
-    fallback, fallback_counts, _ = _run_group_prod(values, labels, ngroups, min_count=1)
+    handled = group_prod_native_float(out, counts, values, labels, 0, True)
+    if not is_platform_arm():
+        assert not handled
+        return
 
-    tm.assert_numpy_array_equal(fast_counts, fallback_counts)
-    tm.assert_almost_equal(fast, fallback, rtol=1e-6)
+    assert handled
+    expected_out, expected_counts = _reference_prod(values, labels, ngroups)
+    tm.assert_almost_equal(out, expected_out, rtol=1e-5)
+    tm.assert_numpy_array_equal(counts, expected_counts)
