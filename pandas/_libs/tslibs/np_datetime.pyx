@@ -67,6 +67,43 @@ cdef extern from "pandas/datetime/pd_datetime.h":
                                 const char *format, int format_len,
                                 FormatRequirement exact)
 
+
+cdef extern from *:
+    """
+    #include <stdint.h>
+    #include "pandas/portable.h"
+
+    static inline int pandas_add_overflowsafe_i8_aarch64(
+            const int64_t * __restrict left,
+            const int64_t * __restrict right,
+            int64_t * __restrict result,
+            int64_t n,
+            int64_t nat) {
+        int64_t i, value;
+
+        for (i = 0; i < n; ++i) {
+            if (left[i] == nat || right[i] == nat) {
+                result[i] = nat;
+            } else if (checked_add(left[i], right[i], &value)) {
+                return -1;
+            } else {
+                result[i] = value;
+            }
+        }
+        return 0;
+    }
+    """
+    int pandas_add_overflowsafe_i8_aarch64(
+        const int64_t *left,
+        const int64_t *right,
+        int64_t *result,
+        int64_t n,
+        int64_t nat,
+    ) noexcept nogil
+
+cdef extern from "pandas/portable.h":
+    bint pandas_is_aarch64() noexcept nogil
+
 # ----------------------------------------------------------------------
 # numpy object inspection
 
@@ -729,11 +766,41 @@ cpdef cnp.ndarray add_overflowsafe(cnp.ndarray left, cnp.ndarray right):
     """
     cdef:
         Py_ssize_t N = left.size
+        Py_ssize_t i
         int64_t lval, rval, res_value
+        int64_t *left_data
+        int64_t *right_data
+        int64_t *result_data
+        int overflowed
         ndarray iresult = cnp.PyArray_EMPTY(
             left.ndim, left.shape, cnp.NPY_INT64, 0
         )
-        cnp.broadcast mi = cnp.PyArray_MultiIterNew3(iresult, left, right)
+        cnp.broadcast mi
+
+    if (
+        pandas_is_aarch64()
+        and left.ndim == 1
+        and right.ndim == 1
+        and right.size == N
+        and left.strides[0] == sizeof(int64_t)
+        and right.strides[0] == sizeof(int64_t)
+        and iresult.strides[0] == sizeof(int64_t)
+    ):
+        left_data = <int64_t*>cnp.PyArray_DATA(left)
+        right_data = <int64_t*>cnp.PyArray_DATA(right)
+        result_data = <int64_t*>cnp.PyArray_DATA(iresult)
+
+        with nogil:
+            overflowed = pandas_add_overflowsafe_i8_aarch64(
+                left_data, right_data, result_data, N, NPY_DATETIME_NAT
+            )
+
+        if overflowed:
+            raise OverflowError("Overflow in int64 addition")
+
+        return iresult
+
+    mi = cnp.PyArray_MultiIterNew3(iresult, left, right)
 
     # Note: doing this try/except outside the loop improves performance over
     #  doing it inside the loop.
