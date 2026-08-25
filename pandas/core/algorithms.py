@@ -1107,15 +1107,11 @@ def duplicated(
     values = _ensure_data(values)
 
     if get_use_swisstable():
+        # Integer dtypes stay on the klib hashtable: on AArch64 the Swiss
+        # table's ctrl-metadata probing measured 1.7x slower than klib for
+        # int64 duplicated (Kunpeng 920B, 50w-element workloads) even after
+        # hash-pipelining, while float/complex paths match or beat klib.
         duplicated_funcs = {
-            np.dtype("int64"): swisstable.duplicated_int64,
-            np.dtype("int32"): swisstable.duplicated_int32,
-            np.dtype("int16"): swisstable.duplicated_int16,
-            np.dtype("int8"): swisstable.duplicated_int8,
-            np.dtype("uint64"): swisstable.duplicated_uint64,
-            np.dtype("uint32"): swisstable.duplicated_uint32,
-            np.dtype("uint16"): swisstable.duplicated_uint16,
-            np.dtype("uint8"): swisstable.duplicated_uint8,
             np.dtype("float64"): swisstable.duplicated_float64,
             np.dtype("float32"): swisstable.duplicated_float32,
             np.dtype("complex128"): swisstable.duplicated_complex128,
