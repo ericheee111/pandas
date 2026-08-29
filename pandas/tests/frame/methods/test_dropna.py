@@ -437,10 +437,9 @@ def test_dropna_subset_avoids_float_helpers(monkeypatch, how):
     df = DataFrame({"a": [1.0, np.nan], "b": [np.nan, 2.0]})
     result = df.dropna(subset=["a"], how=how)
 
-    if how == "any":
-        expected = df.iloc[[0]]
-    else:
-        expected = df
+    # row 1 is dropped under both semantics: "any" sees an NA in column a
+    # and "all" sees every subset value of that row being NA.
+    expected = df.iloc[[0]]
     tm.assert_frame_equal(result, expected)
 
 
