@@ -212,7 +212,7 @@ def test_dropna_non_arm_avoids_nanvalidity(monkeypatch, axis):
     if axis == 0:
         tm.assert_frame_equal(result, df.iloc[[1]])
     else:
-        tm.assert_frame_equal(result, df.iloc[:, [1]])
+        tm.assert_frame_equal(result, df.iloc[:, [0]])
 
 
 def test_fillna_extension_blocks_non_arm_avoids_batch_helper(monkeypatch):
