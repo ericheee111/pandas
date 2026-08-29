@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from pandas._libs import algos
-from pandas.compat._arch import IS_ARM
+from pandas.core import frame
 
 import pandas as pd
 from pandas import (
@@ -288,10 +288,46 @@ class TestDataFrameMissingData:
         tm.assert_frame_equal(df, expected)
 
 
-@pytest.mark.parametrize("how", ["any", "all"])
+def _float_block_helper_forbidden():
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("dropna used a Cython float-block helper on a forbidden path")
+
+    return fail_if_called
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("axis", [0, 1])
-def test_dropna_float_block_uses_arch_reduction(monkeypatch, how, axis):
-    df = DataFrame([[1.0, np.nan], [np.nan, 2.0]])
+@pytest.mark.parametrize("how", ["any", "all"])
+def test_dropna_non_arm_uses_portable_path(monkeypatch, how, axis, dtype):
+    # Non-AArch64 must keep the baseline e04b26f3 control flow
+    # (notna(...).all/any) for every axis/how combination, including the
+    # homogeneous-float column-wise (axis=1) case that previously leaked
+    # into nancount_2d.
+    monkeypatch.setattr(frame, "IS_ARM", False)
+
+    fail_if_called = _float_block_helper_forbidden()
+    monkeypatch.setattr(DataFrame, "_nancount_float_block", fail_if_called)
+    monkeypatch.setattr(frame.libalgos, "nancount_2d", fail_if_called)
+    monkeypatch.setattr(frame.libalgos, "nanvalidity_2d", fail_if_called)
+
+    df = DataFrame([[1.0, np.nan], [np.nan, 2.0]], dtype=dtype)
+    result = df.dropna(axis=axis, how=how)
+
+    if how == "any":
+        expected = df.iloc[:0] if axis == 0 else df.iloc[:, :0]
+    else:
+        expected = df
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("how", ["any", "all"])
+def test_dropna_arm_uses_nanvalidity(monkeypatch, how, axis, dtype):
+    # AArch64 homogeneous-float dropna must route through nanvalidity_2d
+    # and must produce exactly the portable path's result.
+    monkeypatch.setattr(frame, "IS_ARM", True)
+
     original_nanvalidity = algos.nanvalidity_2d
     original_nancount = algos.nancount_2d
     nanvalidity_called = False
@@ -300,6 +336,7 @@ def test_dropna_float_block_uses_arch_reduction(monkeypatch, how, axis):
     def wrapped_nanvalidity(values, op_axis, all_valid):
         nonlocal nanvalidity_called
         nanvalidity_called = True
+        assert op_axis == 1 - axis
         return original_nanvalidity(values, op_axis, all_valid)
 
     def wrapped_nancount(values, op_axis):
@@ -307,15 +344,15 @@ def test_dropna_float_block_uses_arch_reduction(monkeypatch, how, axis):
         nancount_called = True
         return original_nancount(values, op_axis)
 
-    monkeypatch.setattr(algos, "nanvalidity_2d", wrapped_nanvalidity)
-    monkeypatch.setattr(algos, "nancount_2d", wrapped_nancount)
+    monkeypatch.setattr(frame.libalgos, "nanvalidity_2d", wrapped_nanvalidity)
+    monkeypatch.setattr(frame.libalgos, "nancount_2d", wrapped_nancount)
+
+    df = DataFrame([[1.0, np.nan], [np.nan, 2.0]], dtype=dtype)
     result = df.dropna(axis=axis, how=how)
-    if IS_ARM:
-        assert nanvalidity_called
-        assert not nancount_called
-    else:
-        assert not nanvalidity_called
-        assert nancount_called == (axis == 1)
+
+    assert nanvalidity_called
+    assert not nancount_called
+
     if how == "any":
         expected = df.iloc[:0] if axis == 0 else df.iloc[:, :0]
     else:
@@ -324,8 +361,29 @@ def test_dropna_float_block_uses_arch_reduction(monkeypatch, how, axis):
 
 
 @pytest.mark.parametrize("axis", [0, 1])
-def test_dropna_float_block_thresh_uses_nancount(monkeypatch, axis):
+def test_dropna_thresh_non_arm_uses_portable_path(monkeypatch, axis):
+    # Non-AArch64 thresh must go through the portable DataFrame.count path
+    # and must not touch any Cython float-block helper.
+    monkeypatch.setattr(frame, "IS_ARM", False)
+
+    fail_if_called = _float_block_helper_forbidden()
+    monkeypatch.setattr(DataFrame, "_nancount_float_block", fail_if_called)
+    monkeypatch.setattr(frame.libalgos, "nancount_2d", fail_if_called)
+    monkeypatch.setattr(frame.libalgos, "nanvalidity_2d", fail_if_called)
+
     df = DataFrame([[1.0, np.nan, 3.0], [np.nan, 2.0, 4.0]])
+    result = df.dropna(axis=axis, thresh=2)
+
+    expected = df if axis == 0 else df.iloc[:, [2]]
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+def test_dropna_thresh_arm_uses_nancount(monkeypatch, axis):
+    # AArch64 thresh may use nancount_2d for a homogeneous float block and
+    # must produce exactly the portable path's result.
+    monkeypatch.setattr(frame, "IS_ARM", True)
+
     original = algos.nancount_2d
     called = False
 
@@ -335,10 +393,54 @@ def test_dropna_float_block_thresh_uses_nancount(monkeypatch, axis):
         assert op_axis == 1 - axis
         return original(values, op_axis)
 
-    monkeypatch.setattr(algos, "nancount_2d", wrapped)
+    monkeypatch.setattr(frame.libalgos, "nancount_2d", wrapped)
+
+    df = DataFrame([[1.0, np.nan, 3.0], [np.nan, 2.0, 4.0]])
     result = df.dropna(axis=axis, thresh=2)
+
     assert called
     expected = df if axis == 0 else df.iloc[:, [2]]
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("how", ["any", "all"])
+def test_dropna_mixed_dtypes_avoid_float_helpers(monkeypatch, how, axis):
+    # Mixed-dtype frames must never enter the float-block fast path on
+    # either architecture.
+    monkeypatch.setattr(frame, "IS_ARM", True)
+
+    fail_if_called = _float_block_helper_forbidden()
+    monkeypatch.setattr(frame.libalgos, "nancount_2d", fail_if_called)
+    monkeypatch.setattr(frame.libalgos, "nanvalidity_2d", fail_if_called)
+
+    df = DataFrame({"a": [1.0, np.nan], "b": ["x", "y"]})
+    result = df.dropna(axis=axis, how=how)
+
+    if how == "any":
+        expected = df.iloc[[0]] if axis == 0 else df.iloc[:, [1]]
+    else:
+        expected = df
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("how", ["any", "all"])
+def test_dropna_subset_avoids_float_helpers(monkeypatch, how):
+    # An explicit subset must force the portable path on both architectures
+    # even for a homogeneous float frame.
+    monkeypatch.setattr(frame, "IS_ARM", True)
+
+    fail_if_called = _float_block_helper_forbidden()
+    monkeypatch.setattr(frame.libalgos, "nancount_2d", fail_if_called)
+    monkeypatch.setattr(frame.libalgos, "nanvalidity_2d", fail_if_called)
+
+    df = DataFrame({"a": [1.0, np.nan], "b": [np.nan, 2.0]})
+    result = df.dropna(subset=["a"], how=how)
+
+    if how == "any":
+        expected = df.iloc[[0]]
+    else:
+        expected = df
     tm.assert_frame_equal(result, expected)
 
 

@@ -195,18 +195,24 @@ def test_stack_arrays_non_arm_avoids_array_constructor(monkeypatch):
     assert placement == (0, 1)
 
 
-def test_dropna_non_arm_avoids_nanvalidity(monkeypatch):
+@pytest.mark.parametrize("axis", [0, 1])
+def test_dropna_non_arm_avoids_nanvalidity(monkeypatch, axis):
     monkeypatch.setattr(frame, "IS_ARM", False)
 
     def forbidden(*args, **kwargs):
-        pytest.fail("non-ARM dropna used nanvalidity_2d")
+        pytest.fail("non-ARM dropna used a Cython float-block helper")
 
     monkeypatch.setattr(frame.libalgos, "nanvalidity_2d", forbidden)
+    monkeypatch.setattr(frame.libalgos, "nancount_2d", forbidden)
+    monkeypatch.setattr(frame.DataFrame, "_nancount_float_block", forbidden)
     df = DataFrame([[1.0, np.nan], [2.0, 3.0]])
 
-    result = df.dropna(how="any")
+    result = df.dropna(how="any", axis=axis)
 
-    tm.assert_frame_equal(result, df.iloc[[1]])
+    if axis == 0:
+        tm.assert_frame_equal(result, df.iloc[[1]])
+    else:
+        tm.assert_frame_equal(result, df.iloc[:, [1]])
 
 
 def test_fillna_extension_blocks_non_arm_avoids_batch_helper(monkeypatch):
