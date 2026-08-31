@@ -61,6 +61,8 @@ constexpr size_t PREFETCH_MIN_CAPACITY = 1 << 16;
 constexpr size_t DIRECT_SET_MIN_SIZE = 1 << 16;
 constexpr size_t DIRECT_SET_SAMPLE_SIZE = 1 << 10;
 constexpr size_t DIRECT_SET_VALUES_TO_KEYS_RATIO = 4;
+constexpr size_t DIRECT_DUPLICATED_MIN_SIZE = 1 << 14;
+constexpr size_t DIRECT_DUPLICATED_MAX_RANGE = 1 << 10;
 constexpr uint8_t DIRECT_SET_PRESENT = 1;
 constexpr uint8_t DIRECT_SET_BLOOM_LOW = 2;
 constexpr uint8_t DIRECT_SET_BLOOM_HIGH = 4;
@@ -1647,6 +1649,97 @@ public:
             }
         }
         return 0;
+    }
+
+    // Use direct addressing when an integer array is large and its complete
+    // value range is small. Return 0 when the caller should use its fallback.
+    int duplicated_direct(const Key *keys, size_t n, uint8_t keep, uint8_t *result) noexcept
+    {
+        static_assert(std::is_integral_v<Key>);
+        if (n < DIRECT_DUPLICATED_MIN_SIZE) {
+            return 0;
+        }
+
+        using UnsignedKey = std::make_unsigned_t<Key>;
+        auto ordered = [](Key key) noexcept -> uint64_t {
+            UnsignedKey value = static_cast<UnsignedKey>(key);
+            if constexpr (std::is_signed_v<Key>) {
+                value ^= UnsignedKey(1) << (sizeof(Key) * 8 - 1);
+            }
+            return static_cast<uint64_t>(value);
+        };
+
+        Key min_key = keys[0];
+        Key max_key = keys[0];
+        auto extend_range = [&](Key key) noexcept -> bool {
+            min_key = std::min(min_key, key);
+            max_key = std::max(max_key, key);
+            return ordered(max_key) - ordered(min_key)
+                < DIRECT_DUPLICATED_MAX_RANGE;
+        };
+        size_t left = 1;
+        size_t right = n - 1;
+        while (left <= right) {
+            if (!extend_range(keys[left])) {
+                return 0;
+            }
+            if (left == right) {
+                break;
+            }
+            if (!extend_range(keys[right])) {
+                return 0;
+            }
+            left++;
+            right--;
+        }
+
+        size_t range = static_cast<size_t>(
+            ordered(max_key) - ordered(min_key) + 1);
+        auto offset = [ordered, min_key](Key key) noexcept -> size_t {
+            return static_cast<size_t>(ordered(key) - ordered(min_key));
+        };
+
+        if (keep == 1 || keep == 2) {
+            auto *seen = static_cast<uint8_t *>(SWISSTABLE_MALLOC(range));
+            if (seen == nullptr) {
+                return -1;
+            }
+            std::memset(seen, 0, range);
+            if (keep == 1) {
+                for (size_t i = 0; i < n; i++) {
+                    size_t index = offset(keys[i]);
+                    result[i] = seen[index];
+                    seen[index] = 1;
+                }
+            } else {
+                for (size_t i = n; i > 0; i--) {
+                    size_t index = offset(keys[i - 1]);
+                    result[i - 1] = seen[index];
+                    seen[index] = 1;
+                }
+            }
+            SWISSTABLE_FREE(seen);
+            return 1;
+        }
+
+        auto *first = static_cast<size_t *>(
+            SWISSTABLE_MALLOC(range * sizeof(size_t)));
+        if (first == nullptr) {
+            return -1;
+        }
+        std::memset(first, 0xff, range * sizeof(size_t));
+        for (size_t i = 0; i < n; i++) {
+            size_t index = offset(keys[i]);
+            if (first[index] == std::numeric_limits<size_t>::max()) {
+                first[index] = i;
+                result[i] = 0;
+            } else {
+                result[first[index]] = 1;
+                result[i] = 1;
+            }
+        }
+        SWISSTABLE_FREE(first);
+        return 1;
     }
 
 private:

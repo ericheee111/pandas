@@ -600,4 +600,36 @@ def duplicated_{{dtype}}(const {{c_type}}[:] values, object keep="first",
 
     return np.asarray(result).view(np.bool_)
 
+
+def duplicated_{{dtype}}_direct(const {{c_type}}[:] values, object keep="first"):
+    cdef:
+        Py_ssize_t n = len(values)
+        SwissTable[{{c_type}}, size_t] table
+        np_uint8_t[::1] result
+        uint8_t keep_code
+        int ret
+
+    if keep == "first":
+        keep_code = 1
+    elif keep == "last":
+        keep_code = 2
+    elif keep is False:
+        keep_code = 0
+    else:
+        raise ValueError('keep must be either "first", "last" or False')
+
+    if n == 0 or values.strides[0] != sizeof({{c_type}}):
+        return None
+
+    result = np.empty(n, dtype=np.uint8)
+    with nogil:
+        ret = table.duplicated_direct(
+            &values[0], <size_t>n, keep_code, &result[0]
+        )
+    if ret == -1:
+        raise MemoryError("Failed to allocate direct duplicated table")
+    if ret == 0:
+        return None
+    return np.asarray(result).view(np.bool_)
+
 {{endfor}}

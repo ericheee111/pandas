@@ -83,8 +83,8 @@ from pandas.core.dtypes.missing import (
 )
 
 from pandas.core import boostkit_fastpaths
-from pandas.core.config_init import get_use_swisstable
 from pandas.core.array_algos.take import take_nd
+from pandas.core.config_init import get_use_swisstable
 from pandas.core.construction import (
     array as pd_array,
     ensure_wrapped_if_datetimelike,
@@ -288,6 +288,24 @@ _swisstables = {
     "int8": swisstable.SwissInt8Map,
     "complex128": swisstable.SwissComplex128Map,
     "complex64": swisstable.SwissComplex64Map,
+}
+
+_duplicated_int_direct = {
+    np.dtype("int64"): swisstable.duplicated_int64_direct,
+    np.dtype("int32"): swisstable.duplicated_int32_direct,
+    np.dtype("int16"): swisstable.duplicated_int16_direct,
+    np.dtype("int8"): swisstable.duplicated_int8_direct,
+    np.dtype("uint64"): swisstable.duplicated_uint64_direct,
+    np.dtype("uint32"): swisstable.duplicated_uint32_direct,
+    np.dtype("uint16"): swisstable.duplicated_uint16_direct,
+    np.dtype("uint8"): swisstable.duplicated_uint8_direct,
+}
+
+_duplicated_swisstable = {
+    np.dtype("float64"): swisstable.duplicated_float64,
+    np.dtype("float32"): swisstable.duplicated_float32,
+    np.dtype("complex128"): swisstable.duplicated_complex128,
+    np.dtype("complex64"): swisstable.duplicated_complex64,
 }
 
 
@@ -1107,17 +1125,14 @@ def duplicated(
     values = _ensure_data(values)
 
     if get_use_swisstable():
-        # Integer dtypes stay on the klib hashtable: on AArch64 the Swiss
-        # table's ctrl-metadata probing measured 1.7x slower than klib for
-        # int64 duplicated (Kunpeng 920B, 50w-element workloads) even after
-        # hash-pipelining, while float/complex paths match or beat klib.
-        duplicated_funcs = {
-            np.dtype("float64"): swisstable.duplicated_float64,
-            np.dtype("float32"): swisstable.duplicated_float32,
-            np.dtype("complex128"): swisstable.duplicated_complex128,
-            np.dtype("complex64"): swisstable.duplicated_complex64,
-        }
-        func = duplicated_funcs.get(values.dtype)
+        if mask is None:
+            direct_func = _duplicated_int_direct.get(values.dtype)
+            if direct_func is not None:
+                result = direct_func(values, keep=keep)
+                if result is not None:
+                    return result
+
+        func = _duplicated_swisstable.get(values.dtype)
         if func is not None:
             mask_uint8 = mask.view(np.uint8) if mask is not None else None
             return func(values, keep=keep, mask=mask_uint8)
