@@ -185,6 +185,27 @@ def test_duplicated_integer_direct_falls_back(
     assert calls == {"direct": 1, "portable": 1}
 
 
+@pytest.mark.parametrize("dtype", _INTEGER_DTYPES)
+def test_duplicated_integer_direct_small_falls_back_without_allocating(
+    monkeypatch: pytest.MonkeyPatch, dtype: str
+) -> None:
+    values = np.arange(1000).astype(dtype)
+    empty = np.empty
+    calls = 0
+
+    def wrapped_empty(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return empty(*args, **kwargs)
+
+    monkeypatch.setattr(np, "empty", wrapped_empty)
+
+    result = algorithms._duplicated_int_direct[np.dtype(dtype)](values)
+
+    assert result is None
+    assert calls == 0
+
+
 @pytest.mark.parametrize("mask_kind", ["all_false", "partial", "multiple_na"])
 @pytest.mark.parametrize("keep", ["first", "last", False])
 def test_duplicated_masked_integer_uses_portable(

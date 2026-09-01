@@ -20,6 +20,8 @@ ctypedef intp_t c_ssize_t
 
 # External declarations for all Swiss Table types
 cdef extern from "swisstable/swisstable_class.hpp" namespace "pandas::swisstable" nogil:
+    const size_t DIRECT_DUPLICATED_MIN_SIZE
+
     cdef cppclass NaNTraits[K]:
         @staticmethod
         K NaN()
