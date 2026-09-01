@@ -618,7 +618,10 @@ def duplicated_{{dtype}}_direct(const {{c_type}}[:] values, object keep="first")
     else:
         raise ValueError('keep must be either "first", "last" or False')
 
-    if n == 0 or values.strides[0] != sizeof({{c_type}}):
+    if (
+        <size_t>n < DIRECT_DUPLICATED_MIN_SIZE
+        or values.strides[0] != sizeof({{c_type}})
+    ):
         return None
 
     result = np.empty(n, dtype=np.uint8)
